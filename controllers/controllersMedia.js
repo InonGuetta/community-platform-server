@@ -1,0 +1,175 @@
+import * as servicesMedia from "../services/servicesMedia.js";
+import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOCAL_UPLOAD_DIR = path.join(__dirname, "../uploads");
+
+const s3Configured = () => !!(
+  process.env.AWS_REGION &&
+  process.env.S3_BUCKET &&
+  process.env.AWS_ACCESS_KEY_ID &&
+  process.env.AWS_SECRET_ACCESS_KEY
+);
+const s3 = new S3Client({ region: process.env.AWS_REGION || "us-east-1" });
+
+const MIME_TYPES = {
+  pdf: "application/pdf",
+  txt: "text/plain",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+};
+const getMimeType = (filename) => {
+  const ext = filename.split(".").pop().toLowerCase();
+  return MIME_TYPES[ext] || "application/octet-stream";
+};
+
+export const getAllMedia = async (req, res) => {
+  try {
+    const { type, published, search } = req.query;
+    const items = await servicesMedia.getAllMedia({
+      type,
+      published: published !== undefined ? published === "true" : undefined,
+      search,
+    });
+    res.status(200).json(items);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+export const getMediaById = async (req, res) => {
+  try {
+    const item = await servicesMedia.getMediaById(req.params.id);
+    res.status(200).json(item);
+  } catch (err) {
+    res.status(404).json({ message: err.message });
+  }
+};
+
+export const createMedia = async (req, res) => {
+  try {
+    const { title, description, mediaType } = req.body ?? {};
+    if (!req.file) return res.status(400).json({ message: "File is required" });
+    if (!title) return res.status(400).json({ message: "Title is required" });
+    if (!["video", "audio", "text"].includes(mediaType))
+      return res.status(400).json({ message: `Invalid media type: "${mediaType}"` });
+
+    const ext = req.file.originalname.split(".").pop();
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    let s3Key;
+
+    if (s3Configured()) {
+      s3Key = `uploads/${filename}`;
+      await new Upload({
+        client: s3,
+        params: {
+          Bucket: process.env.S3_BUCKET,
+          Key: s3Key,
+          Body: req.file.buffer,
+          ContentType: req.file.mimetype,
+        },
+      }).done();
+    } else {
+      s3Key = `local/${filename}`;
+      await fs.promises.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
+      await fs.promises.writeFile(path.join(LOCAL_UPLOAD_DIR, filename), req.file.buffer);
+    }
+
+    const item = await servicesMedia.createMedia({
+      uploaderId: req.user.id,
+      title,
+      description,
+      mediaType,
+      s3Key,
+    });
+    res.status(201).json(item);
+  } catch (err) {
+    console.error("[createMedia error]", err);
+    res.status(400).json({ message: err.message });
+  }
+};
+
+export const updateMedia = async (req, res) => {
+  try {
+    const item = await servicesMedia.updateMedia(req.params.id, req.body);
+    res.status(200).json(item);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};
+
+export const deleteMedia = async (req, res) => {
+  try {
+    const item = await servicesMedia.getMediaById(req.params.id);
+
+    if (item.s3_key.startsWith("local/")) {
+      const filePath = path.join(LOCAL_UPLOAD_DIR, item.s3_key.slice("local/".length));
+      await fs.promises.unlink(filePath).catch(() => {});
+    } else {
+      try {
+        await s3.send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key }));
+      } catch (s3Err) {
+        console.error(`S3 delete failed for key ${item.s3_key}:`, s3Err.message);
+      }
+    }
+
+    const result = await servicesMedia.deleteMedia(req.params.id);
+    res.status(200).json(result);
+  } catch (err) {
+    res.status(404).json({ message: err.message });
+  }
+};
+
+export const streamMedia = async (req, res) => {
+  try {
+    const item = await servicesMedia.getMediaById(req.params.id);
+
+    if (item.s3_key.startsWith("local/")) {
+      const filename = item.s3_key.slice("local/".length);
+      const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+      const stat = await fs.promises.stat(filePath);
+      res.set("Content-Type", getMimeType(filename));
+      res.set("Content-Length", stat.size);
+      res.set("Content-Disposition", "inline");
+      fs.createReadStream(filePath).pipe(res);
+    } else {
+      const s3Response = await s3.send(
+        new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key })
+      );
+      res.set("Content-Type", s3Response.ContentType || "application/octet-stream");
+      if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
+      res.set("Content-Disposition", "inline");
+      s3Response.Body.pipe(res);
+    }
+  } catch (err) {
+    res.status(404).json({ message: err.message });
+  }
+};
+
+export const getProgress = async (req, res) => {
+  try {
+    const progress = await servicesMedia.getWatchProgress(req.user.id, req.params.id);
+    res.status(200).json(progress);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+export const saveProgress = async (req, res) => {
+  try {
+    const { positionSeconds } = req.body;
+    const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
+    res.status(200).json(progress);
+  } catch (err) {
+    res.status(400).json({ message: err.message });
+  }
+};

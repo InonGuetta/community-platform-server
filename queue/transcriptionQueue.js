@@ -1,0 +1,5 @@
+import Bull from "bull";
+
+if (!process.env.REDIS_URL) throw new Error("Missing REDIS_URL");
+
+export const transcriptionQueue = new Bull("transcription", process.env.REDIS_URL);
