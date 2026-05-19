@@ -95,10 +95,12 @@ export const updateTranscript = async (mediaId, data) => {
 
 export const triggerPipeline = async (mediaId) => {
   const media = await pool.query(
-    "SELECT id, s3_key FROM media_items WHERE id=$1",
+    "SELECT id, s3_key, media_type FROM media_items WHERE id=$1",
     [mediaId]
   );
   if (media.rows.length === 0) throw new Error("Media not found");
+  if (media.rows[0].media_type === "text")
+    throw new Error("Transcription is not available for text media");
 
   await pool.query(
     `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')

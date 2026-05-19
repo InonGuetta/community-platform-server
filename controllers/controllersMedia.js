@@ -1,6 +1,7 @@
 import * as servicesMedia from "../services/servicesMedia.js";
 import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
+import mammoth from "mammoth";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -129,6 +130,19 @@ export const deleteMedia = async (req, res) => {
   }
 };
 
+const WORD_MIMES = new Set([
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+]);
+const isWordFile = (filename) => /\.(doc|docx)$/i.test(filename);
+
+const convertWordToHtml = async (buffer) => {
+  const { value: html } = await mammoth.convertToHtml({ buffer });
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>body{font-family:sans-serif;line-height:1.6;padding:24px;max-width:800px;margin:0 auto}</style>
+</head><body>${html}</body></html>`;
+};
+
 export const streamMedia = async (req, res) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
@@ -136,6 +150,13 @@ export const streamMedia = async (req, res) => {
     if (item.s3_key.startsWith("local/")) {
       const filename = item.s3_key.slice("local/".length);
       const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+
+      if (isWordFile(filename)) {
+        const buffer = await fs.promises.readFile(filePath);
+        const html = await convertWordToHtml(buffer);
+        return res.set("Content-Type", "text/html; charset=utf-8").send(html);
+      }
+
       const stat = await fs.promises.stat(filePath);
       res.set("Content-Type", getMimeType(filename));
       res.set("Content-Length", stat.size);
@@ -145,7 +166,17 @@ export const streamMedia = async (req, res) => {
       const s3Response = await s3.send(
         new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key })
       );
-      res.set("Content-Type", s3Response.ContentType || "application/octet-stream");
+      const contentType = s3Response.ContentType || "application/octet-stream";
+
+      if (WORD_MIMES.has(contentType)) {
+        const chunks = [];
+        for await (const chunk of s3Response.Body) chunks.push(chunk);
+        const buffer = Buffer.concat(chunks);
+        const html = await convertWordToHtml(buffer);
+        return res.set("Content-Type", "text/html; charset=utf-8").send(html);
+      }
+
+      res.set("Content-Type", contentType);
       if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
       res.set("Content-Disposition", "inline");
       s3Response.Body.pipe(res);

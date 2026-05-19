@@ -3,6 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
+import cookieParser from "cookie-parser";
 import passport from "./config/passport.js";
 import { pool } from "./db/pool.js";
 import { initSockets } from "./sockets/socketManager.js";
@@ -19,8 +20,9 @@ import routersAdmin from "./routes/routersAdmin.js";
 const app = express();
 
 app.use(helmet());
-app.use(cors());
+app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173", credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
 app.use(passport.initialize());
 
 app.use("/api/auth", routersAuth);
