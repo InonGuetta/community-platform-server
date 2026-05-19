@@ -1,12 +1,21 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import passport from "../config/passport.js";
 import { verifyToken } from "../middleware/auth.js";
 import * as controllersAuth from "../controllers/controllersAuth.js";
 
 const router = Router();
 
-router.post("/register", controllersAuth.register);
-router.post("/login", controllersAuth.login);
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many attempts, please try again in a minute" },
+});
+
+router.post("/register", authLimiter, controllersAuth.register);
+router.post("/login", authLimiter, controllersAuth.login);
 router.post("/logout", verifyToken, controllersAuth.logout);
 router.get("/me", verifyToken, controllersAuth.getMe);
 
