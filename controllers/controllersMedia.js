@@ -158,13 +158,46 @@ export const streamMedia = async (req, res) => {
       }
 
       const stat = await fs.promises.stat(filePath);
-      res.set("Content-Type", getMimeType(filename));
+      const contentType = getMimeType(filename);
+      const range = req.headers.range;
+
+      // A Range request means the player is seeking. Answer 206 with just the
+      // requested byte slice; without this, <audio>/<video> can't scrub.
+      if (range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        if (match) {
+          const start = match[1] ? parseInt(match[1], 10) : 0;
+          const end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
+
+          if (start > end || start >= stat.size || end >= stat.size) {
+            return res.status(416).set("Content-Range", `bytes */${stat.size}`).end();
+          }
+
+          res.status(206);
+          res.set("Content-Type", contentType);
+          res.set("Content-Range", `bytes ${start}-${end}/${stat.size}`);
+          res.set("Accept-Ranges", "bytes");
+          res.set("Content-Length", end - start + 1);
+          res.set("Content-Disposition", "inline");
+          return fs.createReadStream(filePath, { start, end }).pipe(res);
+        }
+      }
+
+      // No Range: send the whole file, but advertise range support so the
+      // browser knows seeking is possible and will start sending Range requests.
+      res.set("Content-Type", contentType);
       res.set("Content-Length", stat.size);
+      res.set("Accept-Ranges", "bytes");
       res.set("Content-Disposition", "inline");
       fs.createReadStream(filePath).pipe(res);
     } else {
+      const range = req.headers.range;
       const s3Response = await s3.send(
-        new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key })
+        new GetObjectCommand({
+          Bucket: process.env.S3_BUCKET,
+          Key: item.s3_key,
+          ...(range ? { Range: range } : {}),
+        })
       );
       const contentType = s3Response.ContentType || "application/octet-stream";
 
@@ -177,8 +210,14 @@ export const streamMedia = async (req, res) => {
       }
 
       res.set("Content-Type", contentType);
-      if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
+      res.set("Accept-Ranges", "bytes");
       res.set("Content-Disposition", "inline");
+      if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
+      // S3 returns 206 + Content-Range when it honored the Range header.
+      if (range && s3Response.ContentRange) {
+        res.status(206);
+        res.set("Content-Range", s3Response.ContentRange);
+      }
       s3Response.Body.pipe(res);
     }
   } catch (err) {

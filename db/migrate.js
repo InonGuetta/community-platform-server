@@ -10,6 +10,7 @@ const files = [
   "005_create_bookmarks.sql",
   "006_create_donations.sql",
   "007_create_transcript_chunks.sql",
+  "008_add_google_oauth.sql",
 ];
 
 async function migrate() {

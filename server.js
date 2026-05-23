@@ -21,7 +21,16 @@ const app = express();
 
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173", credentials: true }));
-app.use(express.json());
+
+// Stripe verifies the webhook signature against the raw request body, so it must
+// NOT be JSON-parsed. Skip the global parser for that one route; the donations
+// router re-parses it with express.raw(). Every other route still gets JSON.
+const jsonParser = express.json();
+app.use((req, res, next) => {
+  if (req.originalUrl === "/api/donations/webhook") return next();
+  jsonParser(req, res, next);
+});
+
 app.use(cookieParser());
 app.use(passport.initialize());
 
