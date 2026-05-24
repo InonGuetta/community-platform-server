@@ -39,6 +39,7 @@ router.post("/upload", (req, res, next) => {
 router.put("/update/:id", controllersMedia.updateMedia);
 router.delete("/delete/:id", controllersMedia.deleteMedia);
 router.get("/:id/stream", controllersMedia.streamMedia);
+router.get("/:id/download", controllersMedia.downloadMedia);
 router.get("/:id/progress", controllersMedia.getProgress);
 router.post("/:id/progress", controllersMedia.saveProgress);
 
