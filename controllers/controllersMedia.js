@@ -33,6 +33,15 @@ const getMimeType = (filename) => {
   return MIME_TYPES[ext] || "application/octet-stream";
 };
 
+// Build a Content-Disposition that forces a download and keeps a friendly,
+// UTF-8-safe filename (titles may be Hebrew). filename* carries the real name;
+// filename is an ASCII fallback for older clients.
+const downloadDisposition = (title, ext) => {
+  const full = `${(title || "download").trim() || "download"}.${ext}`;
+  const ascii = full.replace(/[^\x20-\x7E]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(full)}`;
+};
+
 export const getAllMedia = async (req, res) => {
   try {
     const { type, published, search } = req.query;
@@ -218,6 +227,32 @@ export const streamMedia = async (req, res) => {
         res.status(206);
         res.set("Content-Range", s3Response.ContentRange);
       }
+      s3Response.Body.pipe(res);
+    }
+  } catch (err) {
+    res.status(404).json({ message: err.message });
+  }
+};
+
+export const downloadMedia = async (req, res) => {
+  try {
+    const item = await servicesMedia.getMediaById(req.params.id);
+    const ext = item.s3_key.split(".").pop();
+    res.set("Content-Disposition", downloadDisposition(item.title, ext));
+
+    if (item.s3_key.startsWith("local/")) {
+      const filename = item.s3_key.slice("local/".length);
+      const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+      const stat = await fs.promises.stat(filePath);
+      res.set("Content-Type", getMimeType(filename));
+      res.set("Content-Length", stat.size);
+      fs.createReadStream(filePath).pipe(res);
+    } else {
+      const s3Response = await s3.send(
+        new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key })
+      );
+      res.set("Content-Type", s3Response.ContentType || "application/octet-stream");
+      if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
       s3Response.Body.pipe(res);
     }
   } catch (err) {
