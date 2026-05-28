@@ -57,6 +57,13 @@ app.use(errorHandler);
 const httpServer = createServer(app);
 initSockets(httpServer);
 
+// Warm the pg pool before traffic arrives so the SSL handshake / cold
+// Supabase connection happens on boot — not on the user's first login,
+// where it manifested as ECONNRESET on /api/auth/login.
+pool.query("SELECT 1").catch((err) =>
+  console.error("[pg pool] warmup failed:", err.message)
+);
+
 httpServer.listen(process.env.PORT || 3001, () =>
   console.log(`Server on port ${process.env.PORT || 3001}`)
 );
