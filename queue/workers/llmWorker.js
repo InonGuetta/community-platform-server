@@ -5,18 +5,23 @@ import { pool } from "../../db/pool.js";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const SYSTEM_PROMPT = `You are an expert content analyzer. Given a transcript, return a JSON object with exactly these fields:
+const SYSTEM_PROMPT = `אתה מנתח תוכן מומחה. תקבל תמלול של הרצאה/שיעור בעברית.
+החזר אובייקט JSON עם השדות הבאים בדיוק — כל הטקסט (summary, title, key_points) חייב להיות **בעברית**:
 {
-  "summary": "A concise paragraph summarizing the main content",
-  "chapters": [{ "title": "Chapter title", "start_time": 0, "end_time": 60 }],
-  "key_points": ["Key point 1", "Key point 2", "Key point 3"]
+  "summary": "פסקה תמציתית של 3–5 משפטים המסכמת את התוכן העיקרי",
+  "chapters": [{ "title": "כותרת הפרק בעברית", "start_time": 0, "end_time": 60 }],
+  "key_points": ["נקודה מרכזית 1", "נקודה מרכזית 2", "נקודה מרכזית 3"]
 }
-Return only valid JSON, no markdown, no explanation.`;
+שמות השדות נשארים באנגלית (summary, chapters, key_points, title, start_time, end_time). רק הערכים בעברית.
+החזר רק JSON תקין — בלי markdown, בלי הסברים, בלי \`\`\`.`;
 
 llmQueue.process(async (job) => {
   const { mediaId, rawText } = job.data;
+  const t0 = Date.now();
+  console.log(`[WORKER:llm] ── job picked up jobId=${job.id} mediaId=${mediaId} textLen=${rawText.length}`);
 
   try {
+    console.log(`[WORKER:llm] step 1/2 — calling GPT-4o`);
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
@@ -27,7 +32,9 @@ llmQueue.process(async (job) => {
     });
 
     const parsed = JSON.parse(response.choices[0].message.content);
+    console.log(`[WORKER:llm] step 1/2 ✓ GPT-4o returned summary=${parsed.summary?.length}ch chapters=${parsed.chapters?.length} keyPoints=${parsed.key_points?.length}`);
 
+    console.log(`[WORKER:llm] step 2/2 — updating transcripts row`);
     await pool.query(
       `UPDATE transcripts SET
         ai_summary=$1,
@@ -42,10 +49,16 @@ llmQueue.process(async (job) => {
         mediaId,
       ]
     );
+    console.log(`[WORKER:llm] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms`);
   } catch (err) {
-    console.error(`LLM worker error for mediaId ${mediaId}:`, err.message);
+    console.error(`[WORKER:llm] ✗ FAILED mediaId=${mediaId} ${Date.now() - t0}ms — ${err.message}`);
+    if (err.response?.data) console.error(`[WORKER:llm]   openai response:`, err.response.data);
     throw err;
   }
 });
 
-console.log("LLM worker started");
+llmQueue.on("error", (err) => {
+  console.error(`[WORKER:llm] queue error:`, err.message);
+});
+
+console.log("[WORKER:llm] LLM worker started, waiting for jobs...");

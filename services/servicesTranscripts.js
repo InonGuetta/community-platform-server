@@ -94,22 +94,31 @@ export const updateTranscript = async (mediaId, data) => {
 };
 
 export const triggerPipeline = async (mediaId) => {
+  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} → look up media`);
   const media = await pool.query(
     "SELECT id, s3_key, media_type FROM media_items WHERE id=$1",
     [mediaId]
   );
-  if (media.rows.length === 0) throw new Error("Media not found");
-  if (media.rows[0].media_type === "text")
+  if (media.rows.length === 0) {
+    console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ media not found in DB`);
+    throw new Error("Media not found");
+  }
+  if (media.rows[0].media_type === "text") {
+    console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ text media — skipping`);
     throw new Error("Transcription is not available for text media");
+  }
+  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} found media type=${media.rows[0].media_type} s3Key=${media.rows[0].s3_key}`);
 
   await pool.query(
     `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
      ON CONFLICT (media_id) DO UPDATE SET status='pending', updated_at=NOW()`,
     [mediaId]
   );
+  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ transcripts row set to 'pending'`);
 
-  await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key });
-  return { queued: true, mediaId };
+  const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key });
+  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ job queued id=${job.id}`);
+  return { queued: true, mediaId, jobId: job.id };
 };
 
 export const searchTranscripts = async (query) => {
