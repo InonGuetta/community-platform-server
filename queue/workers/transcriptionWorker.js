@@ -13,7 +13,14 @@ import { saveChunks } from "../../services/servicesTranscripts.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_UPLOAD_DIR = path.join(__dirname, "../../uploads");
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Explicit timeout + maxRetries: ECONNRESET on the audio endpoint is often a
+// transient middlebox issue (AV/firewall/ISP DPI). With retries the SDK will
+// wait and try again automatically.
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 5 * 60 * 1000,
+  maxRetries: 3,
+});
 
 const s3Configured = () => !!(
   process.env.AWS_REGION &&
@@ -23,13 +30,15 @@ const s3Configured = () => !!(
 );
 const s3 = new S3Client({ region: process.env.AWS_REGION || "us-east-1" });
 
-// Whisper wants either a Node ReadStream or a File-like object. For S3 the
-// SDK gives us an async iterable, so we drain to a Buffer and wrap it with
-// openai's toFile helper (the filename is what Whisper uses to detect format).
+// Always send a Buffer wrapped with toFile — this produces a single multipart
+// upload with a proper Content-Length, instead of chunked transfer encoding.
+// Some Windows AV / ISP middleboxes drop chunked HTTPS uploads after ~30s,
+// which is what was causing the read ECONNRESET.
 const loadAudio = async (s3Key) => {
   if (s3Key.startsWith("local/")) {
     const filename = s3Key.slice("local/".length);
-    return fs.createReadStream(path.join(LOCAL_UPLOAD_DIR, filename));
+    const buffer = await fs.promises.readFile(path.join(LOCAL_UPLOAD_DIR, filename));
+    return toFile(buffer, filename);
   }
   if (!s3Configured()) {
     throw new Error(`S3 not configured but s3_key is remote: ${s3Key}`);
@@ -44,43 +53,58 @@ const loadAudio = async (s3Key) => {
 
 transcriptionQueue.process(async (job) => {
   const { mediaId, s3Key } = job.data;
-  console.log(`[transcription] starting mediaId=${mediaId} s3Key=${s3Key}`);
+  const t0 = Date.now();
+  console.log(`[WORKER:transcription] ── job picked up jobId=${job.id} mediaId=${mediaId} s3Key=${s3Key}`);
 
   await pool.query(
     "UPDATE transcripts SET status='processing', updated_at=NOW() WHERE media_id=$1",
     [mediaId]
   );
+  console.log(`[WORKER:transcription] step 1/5 — status='processing' set in DB`);
 
   try {
+    console.log(`[WORKER:transcription] step 2/5 — loading audio from ${s3Key.startsWith("local/") ? "local FS" : "S3"}`);
     const audio = await loadAudio(s3Key);
+    console.log(`[WORKER:transcription] step 2/5 ✓ audio loaded (${(Date.now() - t0)}ms)`);
 
-    // verbose_json returns per-segment timestamps; language=he prevents
-    // Whisper from guessing (and getting it wrong on short Hebrew clips).
+    console.log(`[WORKER:transcription] step 3/5 — calling OpenAI Whisper (language=he)`);
+    const tWhisper = Date.now();
     const transcription = await openai.audio.transcriptions.create({
       file: audio,
       model: "whisper-1",
       response_format: "verbose_json",
       language: "he",
     });
-
     const segments = transcription.segments || [];
+    console.log(`[WORKER:transcription] step 3/5 ✓ Whisper returned ${segments.length} segments (${Date.now() - tWhisper}ms)`);
+
     if (segments.length === 0) {
       throw new Error("Whisper returned no segments");
     }
 
+    console.log(`[WORKER:transcription] step 4/5 — saving chunks to DB`);
     const chunkCount = await saveChunks(mediaId, segments);
+    console.log(`[WORKER:transcription] step 4/5 ✓ ${chunkCount} chunks saved`);
 
     await pool.query(
       "UPDATE transcripts SET status='done', updated_at=NOW() WHERE media_id=$1",
       [mediaId]
     );
+    console.log(`[WORKER:transcription] step 5/5 ✓ status='done' set in DB`);
 
     const fullText = segments.map((s) => s.text).join(" ");
-    await llmQueue.add({ mediaId, rawText: fullText });
-
-    console.log(`[transcription] done mediaId=${mediaId} chunks=${chunkCount}`);
+    const llmJob = await llmQueue.add({ mediaId, rawText: fullText });
+    console.log(`[WORKER:transcription] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms — queued LLM job id=${llmJob.id}`);
   } catch (err) {
-    console.error(`[transcription] failed mediaId=${mediaId}:`, err.message);
+    console.error(`[WORKER:transcription] ✗ FAILED mediaId=${mediaId} ${(Date.now() - t0)}ms — ${err.message}`);
+    if (err.status) console.error(`[WORKER:transcription]   http status:`, err.status);
+    if (err.code) console.error(`[WORKER:transcription]   err.code:`, err.code);
+    if (err.type) console.error(`[WORKER:transcription]   err.type:`, err.type);
+    if (err.cause) console.error(`[WORKER:transcription]   cause:`, err.cause?.message || err.cause, "code:", err.cause?.code, "errno:", err.cause?.errno);
+    if (err.response?.data) console.error(`[WORKER:transcription]   openai response:`, err.response.data);
+    if (err.error) console.error(`[WORKER:transcription]   openai error:`, err.error);
+    // Print env-relevant info so we can rule out wrong key / proxy quickly.
+    console.error(`[WORKER:transcription]   diag: key=${process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.slice(0, 10) + "..." : "MISSING"} HTTP_PROXY=${process.env.HTTP_PROXY || "none"} HTTPS_PROXY=${process.env.HTTPS_PROXY || "none"}`);
     await pool.query(
       "UPDATE transcripts SET status='error', updated_at=NOW() WHERE media_id=$1",
       [mediaId]
@@ -89,4 +113,8 @@ transcriptionQueue.process(async (job) => {
   }
 });
 
-console.log("Transcription worker started");
+transcriptionQueue.on("error", (err) => {
+  console.error(`[WORKER:transcription] queue error:`, err.message);
+});
+
+console.log("[WORKER:transcription] Transcription worker started, waiting for jobs...");
