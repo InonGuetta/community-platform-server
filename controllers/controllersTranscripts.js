@@ -31,10 +31,36 @@ export const triggerPipeline = async (req, res) => {
   console.log(`[BE:ctrl] POST /transcripts/${mediaId}/trigger user=${req.user?.id}`);
   try {
     const result = await servicesTranscripts.triggerPipeline(mediaId);
-    console.log(`[BE:ctrl] POST /transcripts/${mediaId}/trigger ✓`, result);
+    console.log(`[BE:ctrl] POST /transcripts/${mediaId}/trigger ✓ jobId=${result.jobId}`);
     res.status(200).json(result);
   } catch (err) {
     console.log(`[BE:ctrl] POST /transcripts/${mediaId}/trigger ✗ ${err.message}`);
+    res.status(400).json({ message: err.message });
+  }
+};
+
+export const fixHebrew = async (req, res) => {
+  const { mediaId } = req.params;
+  console.log(`[BE:ctrl] POST /transcripts/${mediaId}/fix-hebrew user=${req.user?.id}`);
+  try {
+    const transcript = await servicesTranscripts.fixHebrewTranscript(mediaId);
+    console.log(`[BE:ctrl] POST /transcripts/${mediaId}/fix-hebrew ✓`);
+    res.status(200).json(transcript);
+  } catch (err) {
+    console.log(`[BE:ctrl] POST /transcripts/${mediaId}/fix-hebrew ✗ ${err.message}`);
+    res.status(400).json({ message: err.message });
+  }
+};
+
+export const generateKeyPointHeadings = async (req, res) => {
+  const { mediaId } = req.params;
+  console.log(`[BE:ctrl] POST /transcripts/${mediaId}/key-point-headings user=${req.user?.id}`);
+  try {
+    const transcript = await servicesTranscripts.generateKeyPointHeadings(mediaId);
+    console.log(`[BE:ctrl] POST /transcripts/${mediaId}/key-point-headings ✓`);
+    res.status(200).json(transcript);
+  } catch (err) {
+    console.log(`[BE:ctrl] POST /transcripts/${mediaId}/key-point-headings ✗ ${err.message}`);
     res.status(400).json({ message: err.message });
   }
 };

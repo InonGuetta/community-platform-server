@@ -6,13 +6,12 @@ import { pool } from "../../db/pool.js";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const SYSTEM_PROMPT = `אתה מנתח תוכן מומחה. תקבל תמלול של הרצאה/שיעור בעברית.
-החזר אובייקט JSON עם השדות הבאים בדיוק — כל הטקסט (summary, title, key_points) חייב להיות **בעברית**:
+החזר אובייקט JSON עם השדות הבאים בדיוק — כל הטקסט (summary, key_points) חייב להיות **בעברית**:
 {
   "summary": "פסקה תמציתית של 3–5 משפטים המסכמת את התוכן העיקרי",
-  "chapters": [{ "title": "כותרת הפרק בעברית", "start_time": 0, "end_time": 60 }],
   "key_points": ["נקודה מרכזית 1", "נקודה מרכזית 2", "נקודה מרכזית 3"]
 }
-שמות השדות נשארים באנגלית (summary, chapters, key_points, title, start_time, end_time). רק הערכים בעברית.
+שמות השדות נשארים באנגלית (summary, key_points). רק הערכים בעברית.
 החזר רק JSON תקין — בלי markdown, בלי הסברים, בלי \`\`\`.`;
 
 llmQueue.process(async (job) => {
@@ -32,19 +31,20 @@ llmQueue.process(async (job) => {
     });
 
     const parsed = JSON.parse(response.choices[0].message.content);
-    console.log(`[WORKER:llm] step 1/2 ✓ GPT-4o returned summary=${parsed.summary?.length}ch chapters=${parsed.chapters?.length} keyPoints=${parsed.key_points?.length}`);
+    console.log(`[WORKER:llm] step 1/2 ✓ GPT-4o returned summary=${parsed.summary?.length}ch keyPoints=${parsed.key_points?.length}`);
 
+    // Chapters are no longer auto-generated. The transcript view shows a single
+    // "subheadings by key points" block that the user produces on demand from
+    // the key points below — so we only persist summary + key_points here.
     console.log(`[WORKER:llm] step 2/2 — updating transcripts row`);
     await pool.query(
       `UPDATE transcripts SET
         ai_summary=$1,
-        ai_chapters=$2,
-        ai_key_points=$3,
+        ai_key_points=$2,
         updated_at=NOW()
-       WHERE media_id=$4`,
+       WHERE media_id=$3`,
       [
         parsed.summary,
-        JSON.stringify(parsed.chapters),
         JSON.stringify(parsed.key_points),
         mediaId,
       ]

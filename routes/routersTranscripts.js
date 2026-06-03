@@ -11,5 +11,7 @@ router.get("/search", controllersTranscripts.searchTranscripts);
 router.get("/:mediaId", controllersTranscripts.getTranscript);
 router.put("/:mediaId", requireRole("lecturer", "admin"), controllersTranscripts.updateTranscript);
 router.post("/:mediaId/trigger", requireRole("lecturer", "admin"), controllersTranscripts.triggerPipeline);
+router.post("/:mediaId/fix-hebrew", requireRole("lecturer", "admin"), controllersTranscripts.fixHebrew);
+router.post("/:mediaId/key-point-headings", requireRole("lecturer", "admin"), controllersTranscripts.generateKeyPointHeadings);
 
 export default router;
