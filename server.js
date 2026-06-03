@@ -25,7 +25,12 @@ app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173", creden
 // Stripe verifies the webhook signature against the raw request body, so it must
 // NOT be JSON-parsed. Skip the global parser for that one route; the donations
 // router re-parses it with express.raw(). Every other route still gets JSON.
-const jsonParser = express.json();
+//
+// limit: a saved transcript carries the full edited text in the body. A multi-hour
+// Hebrew lecture is hundreds of KB (UTF-8 Hebrew is ~2 bytes/char), well past the
+// 100KB body-parser default — which silently rejected the PUT with 413 and lost
+// the edit. 20mb leaves ample headroom for any realistic transcript.
+const jsonParser = express.json({ limit: "20mb" });
 app.use((req, res, next) => {
   if (req.originalUrl === "/api/donations/webhook") return next();
   jsonParser(req, res, next);
