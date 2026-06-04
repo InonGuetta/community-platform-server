@@ -7,7 +7,10 @@ const CHUNK_WORDS = 500;
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
   timeout: 5 * 60 * 1000,
-  maxRetries: 3,
+  // 5 retries: long transcripts are analysed in several calls that share the
+  // org's per-minute token budget. A call that trips the 30k TPM limit returns
+  // 429 + Retry-After; the SDK waits and retries, so batches self-pace.
+  maxRetries: 5,
 });
 
 // Yiddish-accented Hebrew confuses Whisper (e.g. "תורה"→"תוירו",
@@ -67,6 +70,79 @@ export const fixHebrewTranscript = async (mediaId) => {
   return result.rows[0];
 };
 
+// ── AI analysis (summary + key points) ──────────────────────────────────────
+// Shared by the LLM worker (auto, after transcription) and by the headings
+// feature (on demand, if the auto step failed/was skipped). Short transcripts
+// go to GPT in one call; long ones are condensed batch-by-batch first (map) and
+// the batch summaries analysed together (reduce), so no single call exceeds the
+// TPM limit — which is what silently broke multi-hour lectures.
+const ANALYSIS_BATCH_WORDS = 5000;
+
+const ANALYSIS_MAP_PROMPT = `אתה מקבל קטע מתוך תמלול של הרצאה/שיעור בעברית. סכם בעברית, ב-3–4 משפטים, את התוכן המרכזי של הקטע הזה בלבד. החזר טקסט רגיל בלבד, בלי כותרות ובלי markdown.`;
+
+// How many key points a transcript of `wordCount` words warrants. The count
+// scales with length so a 3-hour lecture (~22k words) gets ~10–15 sections, not
+// a fixed 3, while a short clip stays at 3. The model picks the exact number
+// within this range based on how many distinct topics actually exist.
+const keyPointRange = (wordCount) => {
+  const target = Math.round(wordCount / 1800);
+  const min = Math.max(3, target - 2);
+  const max = Math.min(20, Math.max(min + 2, target + 3));
+  return { min, max };
+};
+
+// Built per call so the requested count tracks the transcript's length.
+const analysisPrompt = (min, max) => `אתה מנתח תוכן מומחה. תקבל תמלול של הרצאה/שיעור בעברית (או תקצירים מסודרים שלו לפי הסדר).
+החזר אובייקט JSON עם השדות הבאים בדיוק — כל הטקסט (summary, key_points) חייב להיות **בעברית**:
+{
+  "summary": "פסקה תמציתית של 3–5 משפטים המסכמת את התוכן העיקרי",
+  "key_points": ["נקודה מרכזית 1", "נקודה מרכזית 2", "..."]
+}
+לגבי key_points: החזר בין ${min} ל-${max} נקודות מפתח — כמספר הנושאים/הקטעים המובחנים שבאמת קיימים בתוכן, לפי סדר הופעתם. אל תמתח או תמציא נקודות סתם כדי למלא, אבל אם יש הרבה נושאים — פרט אותם ואל תצטמצם ל-3.
+שמות השדות נשארים באנגלית (summary, key_points). רק הערכים בעברית.
+החזר רק JSON תקין — בלי markdown, בלי הסברים, בלי \`\`\`.`;
+
+const summarizeBatch = async (text) => {
+  const r = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "system", content: ANALYSIS_MAP_PROMPT },
+      { role: "user", content: text },
+    ],
+  });
+  return r.choices[0].message.content.trim();
+};
+
+export const analyzeTranscript = async (rawText) => {
+  const words = rawText.split(/\s+/);
+  const { min, max } = keyPointRange(words.length);
+  let input = rawText;
+
+  if (words.length > ANALYSIS_BATCH_WORDS) {
+    const batches = [];
+    for (let i = 0; i < words.length; i += ANALYSIS_BATCH_WORDS) {
+      batches.push(words.slice(i, i + ANALYSIS_BATCH_WORDS).join(" "));
+    }
+    console.log(`[BE:svc] analyzeTranscript — long text ${words.length} words → ${batches.length} batch(es) (map)`);
+    const partials = [];
+    for (let i = 0; i < batches.length; i++) {
+      console.log(`[BE:svc]   map ${i + 1}/${batches.length} → GPT-4o`);
+      partials.push(await summarizeBatch(batches[i]));
+    }
+    input = partials.join("\n\n");
+  }
+
+  const r = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "system", content: analysisPrompt(min, max) },
+      { role: "user", content: input },
+    ],
+    response_format: { type: "json_object" },
+  });
+  return JSON.parse(r.choices[0].message.content);
+};
+
 // "Subheadings by key points": take the key points already produced by the LLM
 // worker and place each one on the transcript timeline. We give GPT the key
 // points plus a trimmed, time-stamped view of the chunks (first words of each
@@ -87,16 +163,39 @@ export const generateKeyPointHeadings = async (mediaId) => {
   );
   if (transcript.rows.length === 0) throw new Error("Transcript not found");
 
-  const keyPoints = transcript.rows[0].ai_key_points;
-  if (!Array.isArray(keyPoints) || keyPoints.length === 0) {
-    throw new Error("No key points yet — run the AI pipeline first");
-  }
-
   const chunks = await pool.query(
-    "SELECT start_time, content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
+    "SELECT start_time, end_time, content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
     [mediaId]
   );
-  if (chunks.rows.length === 0) throw new Error("No transcript content to map");
+  if (chunks.rows.length === 0) throw new Error("No transcript content yet — run transcription first");
+
+  const rawText = chunks.rows.map((r) => r.content).join("\n\n");
+  const totalWords = rawText.split(/\s+/).length;
+  const warrantedMin = keyPointRange(totalWords).min;
+
+  let keyPoints = transcript.rows[0].ai_key_points;
+  // (Re)generate key points from the existing chunks — no re-transcription — when
+  // they're missing (the auto step failed) OR there are too few for the length.
+  // The second case covers transcripts whose points were made before the count
+  // became length-adaptive: e.g. a 3-hour lecture stuck at 3 points gets ~12.
+  if (!Array.isArray(keyPoints) || keyPoints.length < warrantedMin) {
+    console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} — key points ${keyPoints?.length ?? 0} < ${warrantedMin}, re-analysing transcript`);
+    const analysis = await analyzeTranscript(rawText);
+    keyPoints = Array.isArray(analysis.key_points) ? analysis.key_points : [];
+    if (keyPoints.length === 0) throw new Error("AI analysis produced no key points");
+    await pool.query(
+      "UPDATE transcripts SET ai_summary=$1, ai_key_points=$2, status='done', updated_at=NOW() WHERE media_id=$3",
+      [analysis.summary, JSON.stringify(keyPoints), mediaId]
+    );
+    console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);
+  }
+
+  const validStarts = chunks.rows.map((c) => c.start_time);
+  const endByStart = new Map(chunks.rows.map((c) => [c.start_time, c.end_time]));
+  // Snap a model-provided time to the nearest real chunk start, so a slightly
+  // off number still lands on a known position.
+  const snapToChunk = (t) =>
+    validStarts.reduce((best, s) => (Math.abs(s - t) < Math.abs(best - t) ? s : best), validStarts[0]);
 
   // Trim each chunk to its opening words — enough for GPT to recognise the
   // topic without spending tokens on the full text of a multi-hour lecture.
@@ -121,12 +220,40 @@ export const generateKeyPointHeadings = async (mediaId) => {
 
   const parsed = JSON.parse(response.choices[0].message.content);
   const headings = Array.isArray(parsed.headings) ? parsed.headings : [];
-  // Defensive: keep only well-formed entries and sort by time, in case the
-  // model returns something slightly off.
-  const clean = headings
-    .filter((h) => h && typeof h.title === "string" && Number.isFinite(Number(h.start_time)))
-    .map((h) => ({ title: h.title, start_time: Math.floor(Number(h.start_time)) }))
-    .sort((a, b) => a.start_time - b.start_time);
+
+  // Keep only well-formed entries, snapping each to a real chunk start.
+  const valid = headings
+    .filter((h) => h && typeof h.title === "string" && h.title.trim() && Number.isFinite(Number(h.start_time)))
+    .map((h) => ({ title: h.title.trim(), start: snapToChunk(Math.floor(Number(h.start_time))) }));
+
+  // Timestamps only have chunk-level resolution, so several key points can land
+  // on the same chunk → identical times. Group by chunk and spread each group
+  // evenly across that chunk's [start, end] window so no two headings share a
+  // time (this is the "same time twice" bug).
+  const byChunk = new Map();
+  for (const v of valid) {
+    if (!byChunk.has(v.start)) byChunk.set(v.start, []);
+    byChunk.get(v.start).push(v.title);
+  }
+
+  const clean = [];
+  for (const [start, titles] of byChunk) {
+    const end = endByStart.get(start) ?? start;
+    const span = Math.max(0, end - start);
+    titles.forEach((title, i) => {
+      const offset = titles.length > 1 ? Math.floor((span * i) / titles.length) : 0;
+      clean.push({ title, start_time: start + offset });
+    });
+  }
+  clean.sort((a, b) => a.start_time - b.start_time);
+
+  // Final guard: force strictly-increasing times so even a degenerate case
+  // (chunk with zero span, or rounding collisions) can't produce duplicates.
+  for (let i = 1; i < clean.length; i++) {
+    if (clean[i].start_time <= clean[i - 1].start_time) {
+      clean[i].start_time = clean[i - 1].start_time + 1;
+    }
+  }
 
   const result = await pool.query(
     "UPDATE transcripts SET ai_key_point_headings=$1, updated_at=NOW() WHERE media_id=$2 RETURNING *",
