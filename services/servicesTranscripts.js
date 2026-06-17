@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { pool } from "../db/pool.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
+import { embedQuery, toVectorLiteral } from "./servicesEmbeddings.js";
 
 const CHUNK_WORDS = 500;
 
@@ -318,8 +319,10 @@ export const getTranscriptByMediaId = async (mediaId) => {
   console.log(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId}`);
   const [transcript, chunks] = await Promise.all([
     pool.query("SELECT * FROM transcripts WHERE media_id=$1", [mediaId]),
+    // Explicit columns (not SELECT *) so the embedding vector(1536) — added in
+    // migration 010 — never ships to the client on every transcript load.
     pool.query(
-      "SELECT * FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
+      "SELECT id, media_id, chunk_index, start_time, end_time, content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
       [mediaId]
     ),
   ]);
@@ -388,24 +391,167 @@ export const triggerPipeline = async (mediaId) => {
   return { queued: true, mediaId, jobId: job.id };
 };
 
-export const searchTranscripts = async (query) => {
+// ── Transcript search ────────────────────────────────────────────────────────
+// Three modes, all returning the SAME row shape so the client never needs to
+// branch on mode: { media_id, chunk_index, start_time, end_time, content,
+// media_title, headline }.
+//   keyword  — the original full-text search (FTS over to_tsvector('simple')).
+//   semantic — pure vector nearest-neighbour over the embeddings (meaning, not
+//              words). No FTS terms, so the snippet is the chunk's opening text.
+//   hybrid   — fuses keyword + semantic with Reciprocal Rank Fusion (RRF, k=60):
+//              each result's score is Σ 1/(k + rank_in_each_list). This is the
+//              default; it catches both exact-word and meaning matches.
+const RRF_K = 60;
+const SEARCH_LIMIT = 30;
+const FUSE_DEPTH = 60; // how deep each list goes into the fusion
+const SEMANTIC_SNIPPET_CHARS = 200;
+// hybrid fetches more candidates than it returns so the reranker has a pool to
+// reorder; the LLM then picks the best SEARCH_LIMIT.
+const CANDIDATE_LIMIT = 40;
+const RERANK_PREVIEW_WORDS = 100;
+
+// LLM reranking: the embedding/FTS fusion is good at *recall* (pulling the right
+// candidates) but its scores don't reflect true relevance well — cosine values
+// sit in a narrow band and RRF is rank-only. GPT-4o reads the query and each
+// candidate together (a cross-encoder-style judgment) and scores 0–100 how well
+// the segment actually matches the query's meaning. We reorder by that score and
+// expose it as `similarity` (0–1) so the UI's colour tiers finally sit on a
+// meaningful scale. Best-effort: any failure falls back to the RRF order.
+const RERANK_PROMPT = `אתה מדרג רלוונטיות בחיפוש. תקבל שאילתת חיפוש ורשימת קטעי תמלול ממוספרים בעברית.
+לכל קטע תן ציון שלם בין 0 ל-100: עד כמה הקטע באמת רלוונטי *במשמעות* לשאילתה — 100 = בדיוק על הנושא שחיפשו, 0 = לא קשור כלל. אל תתגמל הופעה מקרית של מילה; דרג לפי התוכן.
+החזר JSON תקין בלבד במבנה: { "scores": [{ "index": <מספר הקטע>, "score": <0-100> }] } — ציון לכל הקטעים שקיבלת, בלי markdown ובלי הסברים.`;
+
+const rerankByRelevance = async (query, rows) => {
+  if (rows.length === 0) return rows;
+  const list = rows
+    .map((r, i) => `${i + 1}. ${r.content.split(/\s+/).slice(0, RERANK_PREVIEW_WORDS).join(" ")}`)
+    .join("\n\n");
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o",
+    messages: [
+      { role: "system", content: RERANK_PROMPT },
+      { role: "user", content: `שאילתה: ${query}\n\nקטעים:\n${list}` },
+    ],
+    response_format: { type: "json_object" },
+  });
+
+  const parsed = JSON.parse(response.choices[0].message.content);
+  const scoreByIndex = new Map(
+    (Array.isArray(parsed.scores) ? parsed.scores : []).map((s) => [Number(s.index), Number(s.score)])
+  );
+  // Overwrite `similarity` with the LLM relevance (0–1) — a far better colour
+  // signal than raw cosine. Keep the cosine under `cosine` for reference.
+  const scored = rows.map((r, i) => {
+    const score = scoreByIndex.get(i + 1);
+    return {
+      ...r,
+      cosine: r.similarity,
+      similarity: Number.isFinite(score) ? score / 100 : 0,
+    };
+  });
+  scored.sort((a, b) => b.similarity - a.similarity);
+  return scored.slice(0, SEARCH_LIMIT);
+};
+
+const SELECT_COLS = `
+  c.media_id, c.chunk_index, c.start_time, c.end_time, c.content,
+  m.title AS media_title`;
+
+const searchKeyword = async (query) => {
   const result = await pool.query(
     `SELECT
-       c.media_id,
-       c.chunk_index,
-       c.start_time,
-       c.end_time,
-       c.content,
-       m.title AS media_title,
-       ts_headline('simple', c.content,
-         plainto_tsquery('simple', $1),
+       ${SELECT_COLS},
+       ts_headline('simple', c.content, plainto_tsquery('simple', $1),
          'MaxWords=20, MinWords=5') AS headline
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
-     ORDER BY c.media_id, c.start_time
-     LIMIT 30`,
+     ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
+     LIMIT ${SEARCH_LIMIT}`,
     [query]
   );
   return result.rows;
+};
+
+const searchSemantic = async (query) => {
+  const queryVector = toVectorLiteral(await embedQuery(query));
+  const result = await pool.query(
+    `SELECT
+       ${SELECT_COLS},
+       LEFT(c.content, ${SEMANTIC_SNIPPET_CHARS}) AS headline,
+       1 - (c.embedding <=> $1::vector) AS similarity
+     FROM transcript_chunks c
+     JOIN media_items m ON c.media_id = m.id
+     WHERE c.embedding IS NOT NULL
+     ORDER BY c.embedding <=> $1::vector
+     LIMIT ${SEARCH_LIMIT}`,
+    [queryVector]
+  );
+  return result.rows;
+};
+
+const searchHybrid = async (query) => {
+  const queryVector = toVectorLiteral(await embedQuery(query));
+  // $1 = query text (FTS), $2 = query embedding (vector). Each CTE ranks its own
+  // top FUSE_DEPTH; the FULL OUTER JOIN unions the two id sets and RRF sums the
+  // reciprocal ranks. ts_headline highlights the FTS terms (semantic-only hits
+  // simply have no terms to highlight, which is fine).
+  const result = await pool.query(
+    `WITH kw AS (
+       SELECT c.id,
+         row_number() OVER (
+           ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
+         ) AS rank
+       FROM transcript_chunks c
+       WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
+       ORDER BY rank
+       LIMIT ${FUSE_DEPTH}
+     ),
+     vec AS (
+       SELECT c.id,
+         row_number() OVER (ORDER BY c.embedding <=> $2::vector) AS rank
+       FROM transcript_chunks c
+       WHERE c.embedding IS NOT NULL
+       ORDER BY c.embedding <=> $2::vector
+       LIMIT ${FUSE_DEPTH}
+     ),
+     fused AS (
+       SELECT
+         COALESCE(kw.id, vec.id) AS id,
+         COALESCE(1.0 / (${RRF_K} + kw.rank), 0) +
+         COALESCE(1.0 / (${RRF_K} + vec.rank), 0) AS score
+       FROM kw FULL OUTER JOIN vec ON kw.id = vec.id
+     )
+     SELECT
+       ${SELECT_COLS},
+       ts_headline('simple', c.content, plainto_tsquery('simple', $1),
+         'MaxWords=20, MinWords=5') AS headline,
+       1 - (c.embedding <=> $2::vector) AS similarity
+     FROM fused f
+     JOIN transcript_chunks c ON c.id = f.id
+     JOIN media_items m ON c.media_id = m.id
+     ORDER BY f.score DESC
+     LIMIT ${CANDIDATE_LIMIT}`,
+    [query, queryVector]
+  );
+
+  // Rerank the candidates with GPT-4o for true relevance ordering + scoring.
+  // Best-effort: if the LLM call/parse fails, return the RRF order untouched so
+  // search never breaks (those rows keep their cosine `similarity`).
+  try {
+    const reranked = await rerankByRelevance(query, result.rows);
+    console.log(`[BE:svc] searchHybrid ✓ reranked ${result.rows.length} → ${reranked.length}`);
+    return reranked;
+  } catch (err) {
+    console.error(`[BE:svc] searchHybrid ⚠ rerank failed (non-fatal) — ${err.message}`);
+    return result.rows.slice(0, SEARCH_LIMIT);
+  }
+};
+
+export const searchTranscripts = async (query, mode = "hybrid") => {
+  console.log(`[BE:svc] searchTranscripts mode=${mode} q="${query}"`);
+  if (mode === "keyword") return searchKeyword(query);
+  if (mode === "semantic") return searchSemantic(query);
+  return searchHybrid(query);
 };

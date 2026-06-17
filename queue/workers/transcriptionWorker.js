@@ -12,6 +12,7 @@ import { transcriptionQueue } from "../transcriptionQueue.js";
 import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
 import { saveChunks } from "../../services/servicesTranscripts.js";
+import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_UPLOAD_DIR = path.join(__dirname, "../../uploads");
@@ -171,6 +172,17 @@ transcriptionQueue.process(async (job) => {
       [mediaId]
     );
     console.log(`[WORKER:transcription] step 6/6 ✓ status='done' set in DB`);
+
+    // Best-effort: embed the freshly-saved chunks for semantic search. This must
+    // never fail the job — the transcript is already saved and status='done'. A
+    // missed embedding is recoverable later (the LLM headings path and the
+    // backfill script both re-embed only the chunks WHERE embedding IS NULL).
+    try {
+      const embedded = await embedChunksForMedia(mediaId);
+      console.log(`[WORKER:transcription] ✓ embedded ${embedded} chunk(s) for semantic search`);
+    } catch (embedErr) {
+      console.error(`[WORKER:transcription] ⚠ embedding failed (non-fatal) mediaId=${mediaId} — ${embedErr.message}`);
+    }
 
     const fullText = allSegments.map((s) => s.text).join(" ");
     const llmJob = await llmQueue.add({ mediaId, rawText: fullText });

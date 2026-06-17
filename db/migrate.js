@@ -12,6 +12,7 @@ const files = [
   "007_create_transcript_chunks.sql",
   "008_add_google_oauth.sql",
   "009_add_key_point_headings.sql",
+  "010_add_embeddings.sql",
 ];
 
 async function migrate() {
