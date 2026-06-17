@@ -7,6 +7,7 @@
     "dev": "node --watch server.js",
     "worker:transcription": "node --watch queue/workers/transcriptionWorker.js",
     "worker:llm": "node --watch queue/workers/llmWorker.js",
+    "backfill:embeddings": "node db/backfillEmbeddings.js",
     "workers": "concurrently -n transcription,llm -c blue,magenta \"npm:worker:transcription\" \"npm:worker:llm\""
   },
   "dependencies": {

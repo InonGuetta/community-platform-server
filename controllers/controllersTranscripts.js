@@ -65,11 +65,16 @@ export const generateKeyPointHeadings = async (req, res) => {
   }
 };
 
+const SEARCH_MODES = new Set(["keyword", "semantic", "hybrid"]);
+
 export const searchTranscripts = async (req, res) => {
   try {
     const { q } = req.query;
     if (!q) return res.status(400).json({ message: "Query parameter 'q' is required" });
-    const results = await servicesTranscripts.searchTranscripts(q);
+    // Default to hybrid; ignore anything unrecognised rather than 400 so a stray
+    // mode value can't break search.
+    const mode = SEARCH_MODES.has(req.query.mode) ? req.query.mode : "hybrid";
+    const results = await servicesTranscripts.searchTranscripts(q, mode);
     res.status(200).json(results);
   } catch (err) {
     res.status(500).json({ message: err.message });
