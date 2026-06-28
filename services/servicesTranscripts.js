@@ -409,6 +409,8 @@ const SEMANTIC_SNIPPET_CHARS = 200;
 // reorder; the LLM then picks the best SEARCH_LIMIT.
 const CANDIDATE_LIMIT = 40;
 const RERANK_PREVIEW_WORDS = 100;
+// Below this rerank relevance a hit is treated as noise and hidden entirely.
+const RELEVANCE_FLOOR = 0.1;
 
 // LLM reranking: the embedding/FTS fusion is good at *recall* (pulling the right
 // candidates) but its scores don't reflect true relevance well — cosine values
@@ -437,21 +439,60 @@ const rerankByRelevance = async (query, rows) => {
   });
 
   const parsed = JSON.parse(response.choices[0].message.content);
-  const scoreByIndex = new Map(
-    (Array.isArray(parsed.scores) ? parsed.scores : []).map((s) => [Number(s.index), Number(s.score)])
-  );
+  const scoreByIndex = parseRerankScores(parsed);
+
+  // If NOTHING parsed (the model returned an unexpected shape), don't zero every
+  // result — throw so the caller falls back to the RRF/cosine order.
+  if (scoreByIndex.size === 0) throw new Error("rerank returned no usable scores");
+
   // Overwrite `similarity` with the LLM relevance (0–1) — a far better colour
-  // signal than raw cosine. Keep the cosine under `cosine` for reference.
+  // signal than raw cosine. A row the model didn't score falls back to its
+  // cosine (never 0). Keep the cosine under `cosine` for reference.
   const scored = rows.map((r, i) => {
     const score = scoreByIndex.get(i + 1);
+    const relevance = Number.isFinite(score) ? score / 100 : null;
     return {
       ...r,
       cosine: r.similarity,
-      similarity: Number.isFinite(score) ? score / 100 : 0,
+      similarity: relevance ?? r.similarity ?? 0,
     };
   });
   scored.sort((a, b) => b.similarity - a.similarity);
-  return scored.slice(0, SEARCH_LIMIT);
+  // Drop near-zero / irrelevant hits so the list isn't padded with 0% noise.
+  return scored.filter((r) => r.similarity >= RELEVANCE_FLOOR).slice(0, SEARCH_LIMIT);
+};
+
+// Pull { index → score } out of whatever shape GPT-4o returned. Tolerates the
+// array forms ({scores|results|data: [{index,score}]} or a bare array) and the
+// object-map form ({ "1": 80, ... }). Field-name variants are accepted too.
+const parseRerankScores = (parsed) => {
+  const arr =
+    (Array.isArray(parsed) && parsed) ||
+    (Array.isArray(parsed?.scores) && parsed.scores) ||
+    (Array.isArray(parsed?.results) && parsed.results) ||
+    (Array.isArray(parsed?.data) && parsed.data) ||
+    null;
+
+  const map = new Map();
+  if (arr) {
+    for (const s of arr) {
+      const idx = Number(s.index ?? s.i ?? s.id ?? s.idx);
+      const score = Number(s.score ?? s.relevance ?? s.rating ?? s.value);
+      if (Number.isFinite(idx) && Number.isFinite(score)) map.set(idx, score);
+    }
+    return map;
+  }
+
+  // Object-map fallback: { "1": 80, "2": 65 } possibly nested under `scores`.
+  const obj = parsed?.scores && typeof parsed.scores === "object" ? parsed.scores : parsed;
+  if (obj && typeof obj === "object") {
+    for (const [k, v] of Object.entries(obj)) {
+      const idx = Number(k);
+      const score = Number(v);
+      if (Number.isFinite(idx) && Number.isFinite(score)) map.set(idx, score);
+    }
+  }
+  return map;
 };
 
 const SELECT_COLS = `
