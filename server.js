@@ -8,6 +8,7 @@ import passport from "./config/passport.js";
 import { pool } from "./db/pool.js";
 import { initSockets } from "./sockets/socketManager.js";
 import { errorHandler } from "./middleware/errorHandler.js";
+import { logger } from "./lib/logger.js";
 import routersAuth from "./routes/routersAuth.js";
 import routersUsers from "./routes/routersUsers.js";
 import routersMedia from "./routes/routersMedia.js";
@@ -59,6 +60,13 @@ app.get("/health", async (req, res) => {
 
 app.use(errorHandler);
 
+// Without these, any stray error anywhere in the process (a socket.io handler,
+// a timer, an unrelated route) crashes the entire server and drops every
+// in-flight request — including unrelated ones like a login that was otherwise
+// succeeding. Log and keep running instead.
+process.on("uncaughtException", (err) => logger.error("uncaughtException:", err));
+process.on("unhandledRejection", (err) => logger.error("unhandledRejection:", err));
+
 const httpServer = createServer(app);
 initSockets(httpServer);
 
@@ -66,9 +74,22 @@ initSockets(httpServer);
 // Supabase connection happens on boot — not on the user's first login,
 // where it manifested as ECONNRESET on /api/auth/login.
 pool.query("SELECT 1").catch((err) =>
-  console.error("[pg pool] warmup failed:", err.message)
+  logger.error("[pg pool] warmup failed:", err.message)
 );
 
-httpServer.listen(process.env.PORT || 3001, () =>
-  console.log(`Server on port ${process.env.PORT || 3001}`)
-);
+const PORT = process.env.PORT || 3001;
+
+// On Windows, `node --watch` can start the new process before the previous
+// one has released the port, so the fresh process hits EADDRINUSE and (being
+// an unhandled 'error' event) crashes outright instead of retrying — dropping
+// any request that was in flight during the restart. Retry the bind instead.
+httpServer.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    logger.warn(`Port ${PORT} still in use, retrying in 500ms...`);
+    setTimeout(() => httpServer.listen(PORT), 500);
+  } else {
+    logger.error("HTTP server error:", err);
+  }
+});
+
+httpServer.listen(PORT, () => logger.info(`Server on port ${PORT}`));

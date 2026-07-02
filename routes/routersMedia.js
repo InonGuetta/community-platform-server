@@ -1,6 +1,8 @@
 import { Router } from "express";
 import multer from "multer";
 import { verifyToken } from "../middleware/auth.js";
+import { requireRole } from "../middleware/requireRole.js";
+import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
 
 const router = Router();
@@ -23,9 +25,13 @@ const upload = multer({
 
 router.use(verifyToken);
 
+// Only lecturers/admins manage the library. The controller still enforces
+// is_published visibility on reads (students never see unpublished items).
+const canManage = requireRole("lecturer", "admin");
+
 router.get("/get-all", controllersMedia.getAllMedia);
-router.get("/:id", controllersMedia.getMediaById);
-router.post("/upload", (req, res, next) => {
+router.get("/:id", validateIntParam("id"), controllersMedia.getMediaById);
+router.post("/upload", canManage, (req, res, next) => {
   upload.single("file")(req, res, (err) => {
     if (err) {
       console.error("[upload] multer error:", err.message);
@@ -36,11 +42,11 @@ router.post("/upload", (req, res, next) => {
     next();
   });
 }, controllersMedia.createMedia);
-router.put("/update/:id", controllersMedia.updateMedia);
-router.delete("/delete/:id", controllersMedia.deleteMedia);
-router.get("/:id/stream", controllersMedia.streamMedia);
-router.get("/:id/download", controllersMedia.downloadMedia);
-router.get("/:id/progress", controllersMedia.getProgress);
-router.post("/:id/progress", controllersMedia.saveProgress);
+router.put("/update/:id", canManage, validateIntParam("id"), controllersMedia.updateMedia);
+router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
+router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
+router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);
+router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
+router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);
 
 export default router;

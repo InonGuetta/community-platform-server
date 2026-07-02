@@ -1,18 +1,16 @@
-import OpenAI from "openai";
 import { pool } from "../db/pool.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { embedQuery, toVectorLiteral } from "./servicesEmbeddings.js";
+import { makeOpenAI } from "../lib/openaiClient.js";
+import { logger } from "../lib/logger.js";
+import { notFound, badRequest } from "../lib/AppError.js";
 
 const CHUNK_WORDS = 500;
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  timeout: 5 * 60 * 1000,
-  // 5 retries: long transcripts are analysed in several calls that share the
-  // org's per-minute token budget. A call that trips the 30k TPM limit returns
-  // 429 + Retry-After; the SDK waits and retries, so batches self-pace.
-  maxRetries: 5,
-});
+// 5 retries: long transcripts are analysed in several calls that share the org's
+// per-minute token budget. A call that trips the 30k TPM limit returns 429 +
+// Retry-After; the SDK waits and retries, so batches self-pace.
+const openai = makeOpenAI(5);
 
 // Yiddish-accented Hebrew confuses Whisper (e.g. "תורה"→"תוירו",
 // "בית יוסף"→"בסייסף"). This prompt asks GPT to restore standard Hebrew
@@ -38,27 +36,27 @@ const correctTextBatch = async (text) => {
 };
 
 export const fixHebrewTranscript = async (mediaId) => {
-  console.log(`[BE:svc] fixHebrewTranscript mediaId=${mediaId}`);
+  logger.debug(`[BE:svc] fixHebrewTranscript mediaId=${mediaId}`);
   const existing = await pool.query("SELECT edited_text FROM transcripts WHERE media_id=$1", [mediaId]);
-  if (existing.rows.length === 0) throw new Error("Transcript not found");
+  if (existing.rows.length === 0) throw notFound("Transcript not found");
 
   const chunks = await pool.query(
     "SELECT content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
     [mediaId]
   );
   const sourceText = existing.rows[0].edited_text || chunks.rows.map((r) => r.content).join("\n\n");
-  if (!sourceText.trim()) throw new Error("No transcript text to correct");
+  if (!sourceText.trim()) throw badRequest("No transcript text to correct");
 
   const words = sourceText.split(/\s+/);
   const batches = [];
   for (let i = 0; i < words.length; i += FIX_BATCH_WORDS) {
     batches.push(words.slice(i, i + FIX_BATCH_WORDS).join(" "));
   }
-  console.log(`[BE:svc] fixHebrewTranscript mediaId=${mediaId} — ${words.length} words in ${batches.length} batch(es)`);
+  logger.debug(`[BE:svc] fixHebrewTranscript mediaId=${mediaId} — ${words.length} words in ${batches.length} batch(es)`);
 
   const corrected = [];
   for (let i = 0; i < batches.length; i++) {
-    console.log(`[BE:svc] fixHebrewTranscript batch ${i + 1}/${batches.length} → GPT-4o`);
+    logger.debug(`[BE:svc] fixHebrewTranscript batch ${i + 1}/${batches.length} → GPT-4o`);
     corrected.push(await correctTextBatch(batches[i]));
   }
   const correctedText = corrected.join("\n\n");
@@ -67,7 +65,7 @@ export const fixHebrewTranscript = async (mediaId) => {
     "UPDATE transcripts SET edited_text=$1, updated_at=NOW() WHERE media_id=$2 RETURNING *",
     [correctedText, mediaId]
   );
-  console.log(`[BE:svc] fixHebrewTranscript mediaId=${mediaId} ✓ saved ${correctedText.length} chars`);
+  logger.debug(`[BE:svc] fixHebrewTranscript mediaId=${mediaId} ✓ saved ${correctedText.length} chars`);
   return result.rows[0];
 };
 
@@ -124,10 +122,10 @@ export const analyzeTranscript = async (rawText) => {
     for (let i = 0; i < words.length; i += ANALYSIS_BATCH_WORDS) {
       batches.push(words.slice(i, i + ANALYSIS_BATCH_WORDS).join(" "));
     }
-    console.log(`[BE:svc] analyzeTranscript — long text ${words.length} words → ${batches.length} batch(es) (map)`);
+    logger.debug(`[BE:svc] analyzeTranscript — long text ${words.length} words → ${batches.length} batch(es) (map)`);
     const partials = [];
     for (let i = 0; i < batches.length; i++) {
-      console.log(`[BE:svc]   map ${i + 1}/${batches.length} → GPT-4o`);
+      logger.debug(`[BE:svc]   map ${i + 1}/${batches.length} → GPT-4o`);
       partials.push(await summarizeBatch(batches[i]));
     }
     input = partials.join("\n\n");
@@ -157,18 +155,18 @@ const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" 
 const HEADING_PREVIEW_WORDS = 120;
 
 export const generateKeyPointHeadings = async (mediaId) => {
-  console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId}`);
+  logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId}`);
   const transcript = await pool.query(
     "SELECT ai_key_points FROM transcripts WHERE media_id=$1",
     [mediaId]
   );
-  if (transcript.rows.length === 0) throw new Error("Transcript not found");
+  if (transcript.rows.length === 0) throw notFound("Transcript not found");
 
   const chunks = await pool.query(
     "SELECT start_time, end_time, content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
     [mediaId]
   );
-  if (chunks.rows.length === 0) throw new Error("No transcript content yet — run transcription first");
+  if (chunks.rows.length === 0) throw badRequest("No transcript content yet — run transcription first");
 
   const rawText = chunks.rows.map((r) => r.content).join("\n\n");
   const totalWords = rawText.split(/\s+/).length;
@@ -180,15 +178,15 @@ export const generateKeyPointHeadings = async (mediaId) => {
   // The second case covers transcripts whose points were made before the count
   // became length-adaptive: e.g. a 3-hour lecture stuck at 3 points gets ~12.
   if (!Array.isArray(keyPoints) || keyPoints.length < warrantedMin) {
-    console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} — key points ${keyPoints?.length ?? 0} < ${warrantedMin}, re-analysing transcript`);
+    logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} — key points ${keyPoints?.length ?? 0} < ${warrantedMin}, re-analysing transcript`);
     const analysis = await analyzeTranscript(rawText);
     keyPoints = Array.isArray(analysis.key_points) ? analysis.key_points : [];
-    if (keyPoints.length === 0) throw new Error("AI analysis produced no key points");
+    if (keyPoints.length === 0) throw badRequest("AI analysis produced no key points");
     await pool.query(
       "UPDATE transcripts SET ai_summary=$1, ai_key_points=$2, status='done', updated_at=NOW() WHERE media_id=$3",
       [analysis.summary, JSON.stringify(keyPoints), mediaId]
     );
-    console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);
+    logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);
   }
 
   const validStarts = chunks.rows.map((c) => c.start_time);
@@ -209,7 +207,7 @@ export const generateKeyPointHeadings = async (mediaId) => {
 
   const userContent = `נקודות מפתח:\n${keyPoints.map((p, i) => `${i + 1}. ${p}`).join("\n")}\n\nקטעי התמלול:\n${chunkView}`;
 
-  console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} — ${keyPoints.length} key points over ${chunks.rows.length} chunks → GPT-4o`);
+  logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} — ${keyPoints.length} key points over ${chunks.rows.length} chunks → GPT-4o`);
   const response = await openai.chat.completions.create({
     model: "gpt-4o",
     messages: [
@@ -260,7 +258,7 @@ export const generateKeyPointHeadings = async (mediaId) => {
     "UPDATE transcripts SET ai_key_point_headings=$1, updated_at=NOW() WHERE media_id=$2 RETURNING *",
     [JSON.stringify(clean), mediaId]
   );
-  console.log(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ ${clean.length} headings saved`);
+  logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ ${clean.length} headings saved`);
   return result.rows[0];
 };
 
@@ -301,22 +299,46 @@ const splitSegmentsToChunks = (segments) => {
 
 export const saveChunks = async (mediaId, segments) => {
   const chunks = splitSegmentsToChunks(segments);
-  console.log(`[BE:svc] saveChunks mediaId=${mediaId} — ${segments.length} segments → ${chunks.length} chunks`);
-  await pool.query("DELETE FROM transcript_chunks WHERE media_id=$1", [mediaId]);
+  logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} — ${segments.length} segments → ${chunks.length} chunks`);
 
-  for (const chunk of chunks) {
-    await pool.query(
-      `INSERT INTO transcript_chunks (media_id, chunk_index, start_time, end_time, content)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [mediaId, chunk.chunk_index, chunk.start_time, chunk.end_time, chunk.content]
-    );
+  // DELETE + INSERT must be atomic: a failure mid-write previously left a media
+  // item with a partial set of chunks. Run both in one transaction, and insert
+  // every chunk in a single multi-row statement (chunk counts are in the tens,
+  // far under Postgres' parameter limit).
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM transcript_chunks WHERE media_id=$1", [mediaId]);
+
+    if (chunks.length > 0) {
+      const values = [];
+      const params = [];
+      chunks.forEach((chunk, i) => {
+        const o = i * 5;
+        values.push(`($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5})`);
+        params.push(mediaId, chunk.chunk_index, chunk.start_time, chunk.end_time, chunk.content);
+      });
+      await client.query(
+        `INSERT INTO transcript_chunks (media_id, chunk_index, start_time, end_time, content)
+         VALUES ${values.join(", ")}`,
+        params
+      );
+    }
+
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
   }
-  console.log(`[BE:svc] saveChunks mediaId=${mediaId} ✓ ${chunks.length} chunks written`);
+
+  logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} ✓ ${chunks.length} chunks written`);
   return chunks.length;
 };
 
 export const getTranscriptByMediaId = async (mediaId) => {
-  console.log(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId}`);
+  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId}`);
   const [transcript, chunks] = await Promise.all([
     pool.query("SELECT * FROM transcripts WHERE media_id=$1", [mediaId]),
     // Explicit columns (not SELECT *) so the embedding vector(1536) — added in
@@ -328,11 +350,11 @@ export const getTranscriptByMediaId = async (mediaId) => {
   ]);
 
   if (transcript.rows.length === 0) {
-    console.log(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not found`);
-    throw new Error("Transcript not found");
+    logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not found`);
+    throw notFound("Transcript not found");
   }
 
-  console.log(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✓ status=${transcript.rows[0].status} chunks=${chunks.rows.length}`);
+  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✓ status=${transcript.rows[0].status} chunks=${chunks.rows.length}`);
   return {
     ...transcript.rows[0],
     chunks: chunks.rows,
@@ -359,35 +381,35 @@ export const updateTranscript = async (mediaId, data) => {
       mediaId,
     ]
   );
-  if (result.rows.length === 0) throw new Error("Transcript not found");
+  if (result.rows.length === 0) throw notFound("Transcript not found");
   return result.rows[0];
 };
 
 export const triggerPipeline = async (mediaId) => {
-  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} → look up media`);
+  logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} → look up media`);
   const media = await pool.query(
     "SELECT id, s3_key, media_type FROM media_items WHERE id=$1",
     [mediaId]
   );
   if (media.rows.length === 0) {
-    console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ media not found`);
-    throw new Error("Media not found");
+    logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ media not found`);
+    throw notFound("Media not found");
   }
   if (media.rows[0].media_type === "text") {
-    console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ text media`);
-    throw new Error("Transcription is not available for text media");
+    logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ text media`);
+    throw badRequest("Transcription is not available for text media");
   }
-  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${media.rows[0].media_type} s3Key=${media.rows[0].s3_key}`);
+  logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${media.rows[0].media_type} s3Key=${media.rows[0].s3_key}`);
 
   await pool.query(
     `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
      ON CONFLICT (media_id) DO UPDATE SET status='pending', updated_at=NOW()`,
     [mediaId]
   );
-  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
+  logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
 
   const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key });
-  console.log(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ job queued id=${job.id}`);
+  logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ job queued id=${job.id}`);
   return { queued: true, mediaId, jobId: job.id };
 };
 
@@ -408,7 +430,11 @@ const SEMANTIC_SNIPPET_CHARS = 200;
 // hybrid fetches more candidates than it returns so the reranker has a pool to
 // reorder; the LLM then picks the best SEARCH_LIMIT.
 const CANDIDATE_LIMIT = 40;
-const RERANK_PREVIEW_WORDS = 100;
+// Chunks are ~CHUNK_WORDS (500) long. The reranker must see the WHOLE chunk, not
+// a slice — judging relevance on the first 100 words missed content that sat
+// later in the chunk and depressed scores. 600 covers a full chunk with margin;
+// 40 candidates × ~600 words stays well within gpt-4o's context window.
+const RERANK_PREVIEW_WORDS = 600;
 // Below this rerank relevance a hit is treated as noise and hidden entirely.
 const RELEVANCE_FLOOR = 0.1;
 
@@ -582,16 +608,16 @@ const searchHybrid = async (query) => {
   // search never breaks (those rows keep their cosine `similarity`).
   try {
     const reranked = await rerankByRelevance(query, result.rows);
-    console.log(`[BE:svc] searchHybrid ✓ reranked ${result.rows.length} → ${reranked.length}`);
+    logger.debug(`[BE:svc] searchHybrid ✓ reranked ${result.rows.length} → ${reranked.length}`);
     return reranked;
   } catch (err) {
-    console.error(`[BE:svc] searchHybrid ⚠ rerank failed (non-fatal) — ${err.message}`);
+    logger.warn(`[BE:svc] searchHybrid rerank failed (non-fatal) — ${err.message}`);
     return result.rows.slice(0, SEARCH_LIMIT);
   }
 };
 
 export const searchTranscripts = async (query, mode = "hybrid") => {
-  console.log(`[BE:svc] searchTranscripts mode=${mode} q="${query}"`);
+  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length}`);
   if (mode === "keyword") return searchKeyword(query);
   if (mode === "semantic") return searchSemantic(query);
   return searchHybrid(query);

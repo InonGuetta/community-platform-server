@@ -1,21 +1,16 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { pool } from "../db/pool.js";
+import { conflict, unauthorized, notFound } from "../lib/AppError.js";
 
 const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8.U8nJ.JtbCmHkY2Z9Y6XYC8N7yL3a";
 
 const normalizeEmail = (email) => email.trim().toLowerCase();
 
-const makeError = (message, code) => {
-  const err = new Error(message);
-  err.code = code;
-  return err;
-};
-
 export const register = async (email, password, displayName) => {
   const normalizedEmail = normalizeEmail(email);
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
-  if (existing.rows.length > 0) throw makeError("Email already in use", "EMAIL_TAKEN");
+  if (existing.rows.length > 0) throw conflict("Email already in use", "EMAIL_TAKEN");
 
   const password_hash = await bcrypt.hash(password, 12);
   const result = await pool.query(
@@ -35,7 +30,7 @@ export const login = async (email, password) => {
   // Always run bcrypt.compare so response time doesn't leak whether the email exists.
   const hashToCompare = user?.password_hash || DUMMY_BCRYPT_HASH;
   const valid = await bcrypt.compare(password, hashToCompare);
-  if (!user || !valid) throw makeError("Invalid credentials", "INVALID_CREDENTIALS");
+  if (!user || !valid) throw unauthorized("Invalid credentials");
 
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
   const { password_hash, ...safeUser } = user;
@@ -72,6 +67,6 @@ export const getMe = async (userId) => {
     "SELECT id, email, role, display_name, avatar_url, created_at FROM users WHERE id=$1 AND is_active=TRUE",
     [userId]
   );
-  if (result.rows.length === 0) throw new Error("User not found");
+  if (result.rows.length === 0) throw notFound("User not found");
   return result.rows[0];
 };

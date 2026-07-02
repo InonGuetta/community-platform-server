@@ -1,5 +1,6 @@
-import OpenAI from "openai";
 import { pool } from "../db/pool.js";
+import { makeOpenAI } from "../lib/openaiClient.js";
+import { logger } from "../lib/logger.js";
 
 // Same embedding model + dims as migration 010's vector(1536) column. Changing
 // the model means changing the column dimension, so keep them in lockstep.
@@ -12,11 +13,7 @@ const EMBED_BATCH = 100;
 // 5 retries: embedding a long backfill shares the org's per-minute token budget
 // with the rest of the pipeline. A 429 returns Retry-After; the SDK waits and
 // retries so batches self-pace.
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  timeout: 5 * 60 * 1000,
-  maxRetries: 5,
-});
+const openai = makeOpenAI(5);
 
 // pgvector accepts a vector literal as the text "[f1,f2,...]" cast with ::vector.
 export const toVectorLiteral = (arr) => `[${arr.join(",")}]`;
@@ -51,10 +48,10 @@ export const embedChunksForMedia = async (mediaId) => {
     [mediaId]
   );
   if (rows.length === 0) {
-    console.log(`[BE:svc] embedChunksForMedia mediaId=${mediaId} — nothing to embed`);
+    logger.debug(`[BE:svc] embedChunksForMedia mediaId=${mediaId} — nothing to embed`);
     return 0;
   }
-  console.log(`[BE:svc] embedChunksForMedia mediaId=${mediaId} — embedding ${rows.length} chunk(s)`);
+  logger.debug(`[BE:svc] embedChunksForMedia mediaId=${mediaId} — embedding ${rows.length} chunk(s)`);
   const vectors = await embedTexts(rows.map((r) => r.content));
   for (let i = 0; i < rows.length; i++) {
     await pool.query(
@@ -62,6 +59,6 @@ export const embedChunksForMedia = async (mediaId) => {
       [toVectorLiteral(vectors[i]), rows[i].id]
     );
   }
-  console.log(`[BE:svc] embedChunksForMedia mediaId=${mediaId} ✓ ${rows.length} chunk(s) embedded`);
+  logger.debug(`[BE:svc] embedChunksForMedia mediaId=${mediaId} ✓ ${rows.length} chunk(s) embedded`);
   return rows.length;
 };

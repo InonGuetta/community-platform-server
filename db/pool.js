@@ -1,4 +1,5 @@
 import { Pool } from "pg";
+import { logger } from "../lib/logger.js";
 
 if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
 
@@ -19,5 +20,5 @@ export const pool = new Pool({
 // process if nothing listens. Log and swallow — the next acquire opens a fresh
 // connection.
 pool.on("error", (err) => {
-  console.error("[pg pool] idle client error:", err.message);
+  logger.error("[pg pool] idle client error:", err.message);
 });

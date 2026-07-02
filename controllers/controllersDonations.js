@@ -1,17 +1,26 @@
 import Stripe from "stripe";
 import * as servicesDonations from "../services/servicesDonations.js";
+import { badRequest } from "../lib/AppError.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
+// Stripe caps a single charge well below this; the floor keeps out zero/negative
+// amounts and the ceiling rejects obviously bogus values before they hit Stripe.
+const MIN_AMOUNT_CENTS = 100; // ₪1.00
+const MAX_AMOUNT_CENTS = 1_000_000; // ₪10,000.00
+const ALLOWED_CURRENCIES = new Set(["ILS", "USD", "EUR"]);
+
 export const createIntent = async (req, res) => {
-  try {
-    const { amountCents, currency = "ILS", type } = req.body;
-    if (!amountCents || !type) return res.status(400).json({ message: "amountCents and type are required" });
-    const result = await servicesDonations.createPaymentIntent(req.user.id, amountCents, currency, type);
-    res.status(201).json(result);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
+  const { amountCents, currency = "ILS", type } = req.body;
+  if (!type) throw badRequest("type is required");
+  if (!Number.isInteger(amountCents) || amountCents < MIN_AMOUNT_CENTS || amountCents > MAX_AMOUNT_CENTS) {
+    throw badRequest("amountCents must be a whole number between 100 and 1000000");
   }
+  if (!ALLOWED_CURRENCIES.has(currency.toUpperCase())) {
+    throw badRequest(`Unsupported currency: ${currency}`);
+  }
+  const result = await servicesDonations.createPaymentIntent(req.user.id, amountCents, currency, type);
+  res.status(201).json(result);
 };
 
 export const handleWebhook = async (req, res) => {
@@ -36,10 +45,6 @@ export const handleWebhook = async (req, res) => {
 };
 
 export const getMyHistory = async (req, res) => {
-  try {
-    const donations = await servicesDonations.getDonationsByUser(req.user.id);
-    res.status(200).json(donations);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  const donations = await servicesDonations.getDonationsByUser(req.user.id);
+  res.status(200).json(donations);
 };

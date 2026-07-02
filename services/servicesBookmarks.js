@@ -1,4 +1,5 @@
 import { pool } from "../db/pool.js";
+import { notFound } from "../lib/AppError.js";
 
 export const getBookmarksByUser = async (userId, mediaId) => {
   let query = "SELECT * FROM bookmarks WHERE user_id=$1";
@@ -25,7 +26,7 @@ export const updateBookmark = async (id, userId, note) => {
     "UPDATE bookmarks SET note=$1 WHERE id=$2 AND user_id=$3 RETURNING *",
     [note, id, userId]
   );
-  if (result.rows.length === 0) throw new Error("Bookmark not found");
+  if (result.rows.length === 0) throw notFound("Bookmark not found");
   return result.rows[0];
 };
 
@@ -34,6 +35,6 @@ export const deleteBookmark = async (id, userId) => {
     "DELETE FROM bookmarks WHERE id=$1 AND user_id=$2 RETURNING id",
     [id, userId]
   );
-  if (result.rows.length === 0) throw new Error("Bookmark not found");
+  if (result.rows.length === 0) throw notFound("Bookmark not found");
   return { deleted: true, id };
 };

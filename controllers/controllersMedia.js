@@ -1,21 +1,17 @@
 import * as servicesMedia from "../services/servicesMedia.js";
-import { S3Client, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import mammoth from "mammoth";
+import sanitizeHtml from "sanitize-html";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { s3, s3Configured } from "../lib/storage.js";
+import { logger } from "../lib/logger.js";
+import { badRequest } from "../lib/AppError.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_UPLOAD_DIR = path.join(__dirname, "../uploads");
-
-const s3Configured = () => !!(
-  process.env.AWS_REGION &&
-  process.env.S3_BUCKET &&
-  process.env.AWS_ACCESS_KEY_ID &&
-  process.env.AWS_SECRET_ACCESS_KEY
-);
-const s3 = new S3Client({ region: process.env.AWS_REGION || "us-east-1" });
 
 const MIME_TYPES = {
   pdf: "application/pdf",
@@ -33,6 +29,14 @@ const getMimeType = (filename) => {
   return MIME_TYPES[ext] || "application/octet-stream";
 };
 
+// Lecturers/admins manage the library and may see unpublished drafts; everyone
+// else only sees published items.
+const isPrivileged = (user) => user?.role === "lecturer" || user?.role === "admin";
+
+// s3_key is an internal storage pointer — never ship it to the client. Streaming
+// and downloading go through the dedicated /:id/stream and /:id/download routes.
+const publicMedia = ({ s3_key, ...rest }) => rest;
+
 // Build a Content-Disposition that forces a download and keeps a friendly,
 // UTF-8-safe filename (titles may be Hebrew). filename* carries the real name;
 // filename is an ASCII fallback for older clients.
@@ -43,100 +47,83 @@ const downloadDisposition = (title, ext) => {
 };
 
 export const getAllMedia = async (req, res) => {
-  try {
-    const { type, published, search } = req.query;
-    const items = await servicesMedia.getAllMedia({
-      type,
-      published: published !== undefined ? published === "true" : undefined,
-      search,
-    });
-    res.status(200).json(items);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  const { type, published, search } = req.query;
+  // Non-privileged users are locked to published items regardless of the query
+  // they send; only lecturers/admins may filter (or list everything).
+  const publishedFilter = isPrivileged(req.user)
+    ? (published !== undefined ? published === "true" : undefined)
+    : true;
+  const items = await servicesMedia.getAllMedia({ type, published: publishedFilter, search });
+  res.status(200).json(items.map(publicMedia));
 };
 
 export const getMediaById = async (req, res) => {
-  try {
-    const item = await servicesMedia.getMediaById(req.params.id);
-    res.status(200).json(item);
-  } catch (err) {
-    res.status(404).json({ message: err.message });
+  const item = await servicesMedia.getMediaById(req.params.id);
+  if (!item.is_published && !isPrivileged(req.user)) {
+    return res.status(404).json({ message: "Media not found" });
   }
+  res.status(200).json(publicMedia(item));
 };
 
 export const createMedia = async (req, res) => {
-  try {
-    const { title, description, mediaType } = req.body ?? {};
-    if (!req.file) return res.status(400).json({ message: "File is required" });
-    if (!title) return res.status(400).json({ message: "Title is required" });
-    if (!["video", "audio", "text"].includes(mediaType))
-      return res.status(400).json({ message: `Invalid media type: "${mediaType}"` });
+  const { title, description, mediaType } = req.body ?? {};
+  if (!req.file) throw badRequest("File is required");
+  if (!title) throw badRequest("Title is required");
+  if (!["video", "audio", "text"].includes(mediaType)) throw badRequest(`Invalid media type: "${mediaType}"`);
 
-    const ext = req.file.originalname.split(".").pop();
-    const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-    let s3Key;
+  const ext = req.file.originalname.split(".").pop();
+  const filename = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+  let s3Key;
 
-    if (s3Configured()) {
-      s3Key = `uploads/${filename}`;
-      await new Upload({
-        client: s3,
-        params: {
-          Bucket: process.env.S3_BUCKET,
-          Key: s3Key,
-          Body: req.file.buffer,
-          ContentType: req.file.mimetype,
-        },
-      }).done();
-    } else {
-      s3Key = `local/${filename}`;
-      await fs.promises.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
-      await fs.promises.writeFile(path.join(LOCAL_UPLOAD_DIR, filename), req.file.buffer);
-    }
-
-    const item = await servicesMedia.createMedia({
-      uploaderId: req.user.id,
-      title,
-      description,
-      mediaType,
-      s3Key,
-    });
-    res.status(201).json(item);
-  } catch (err) {
-    console.error("[createMedia error]", err);
-    res.status(400).json({ message: err.message });
+  if (s3Configured()) {
+    s3Key = `uploads/${filename}`;
+    await new Upload({
+      client: s3,
+      params: {
+        Bucket: process.env.S3_BUCKET,
+        Key: s3Key,
+        Body: req.file.buffer,
+        ContentType: req.file.mimetype,
+      },
+    }).done();
+  } else {
+    s3Key = `local/${filename}`;
+    await fs.promises.mkdir(LOCAL_UPLOAD_DIR, { recursive: true });
+    await fs.promises.writeFile(path.join(LOCAL_UPLOAD_DIR, filename), req.file.buffer);
   }
+
+  const item = await servicesMedia.createMedia({
+    uploaderId: req.user.id,
+    title,
+    description,
+    mediaType,
+    s3Key,
+  });
+  res.status(201).json(publicMedia(item));
 };
 
 export const updateMedia = async (req, res) => {
-  try {
-    const item = await servicesMedia.updateMedia(req.params.id, req.body);
-    res.status(200).json(item);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
+  const item = await servicesMedia.updateMedia(req.params.id, req.body);
+  res.status(200).json(publicMedia(item));
 };
 
 export const deleteMedia = async (req, res) => {
-  try {
-    const item = await servicesMedia.getMediaById(req.params.id);
+  const item = await servicesMedia.getMediaById(req.params.id);
 
-    if (item.s3_key.startsWith("local/")) {
-      const filePath = path.join(LOCAL_UPLOAD_DIR, item.s3_key.slice("local/".length));
-      await fs.promises.unlink(filePath).catch(() => {});
-    } else {
-      try {
-        await s3.send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key }));
-      } catch (s3Err) {
-        console.error(`S3 delete failed for key ${item.s3_key}:`, s3Err.message);
-      }
+  if (item.s3_key.startsWith("local/")) {
+    const filePath = path.join(LOCAL_UPLOAD_DIR, item.s3_key.slice("local/".length));
+    await fs.promises.unlink(filePath).catch(() => {});
+  } else {
+    // Best-effort: a failed object delete shouldn't block removing the DB row.
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key }));
+    } catch (s3Err) {
+      logger.warn(`S3 delete failed for key ${item.s3_key}: ${s3Err.message}`);
     }
-
-    const result = await servicesMedia.deleteMedia(req.params.id);
-    res.status(200).json(result);
-  } catch (err) {
-    res.status(404).json({ message: err.message });
   }
+
+  const result = await servicesMedia.deleteMedia(req.params.id);
+  res.status(200).json(result);
 };
 
 const WORD_MIMES = new Set([
@@ -146,15 +133,31 @@ const WORD_MIMES = new Set([
 const isWordFile = (filename) => /\.(doc|docx)$/i.test(filename);
 
 const convertWordToHtml = async (buffer) => {
-  const { value: html } = await mammoth.convertToHtml({ buffer });
+  const { value: rawHtml } = await mammoth.convertToHtml({ buffer });
+  // The DOCX is untrusted user content and we serve the result as text/html, so
+  // sanitize before embedding: strip scripts/styles/handlers, keep only safe
+  // formatting tags. Allow data: image URIs since mammoth inlines images.
+  const html = sanitizeHtml(rawHtml, {
+    allowedTags: [
+      "p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre",
+      "ul", "ol", "li", "strong", "em", "b", "i", "u", "sup", "sub", "a",
+      "img", "table", "thead", "tbody", "tr", "td", "th", "span",
+    ],
+    allowedAttributes: { a: ["href", "title"], img: ["src", "alt"] },
+    allowedSchemes: ["http", "https", "mailto"],
+    allowedSchemesByTag: { img: ["http", "https", "data"] },
+  });
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <style>body{font-family:sans-serif;line-height:1.6;padding:24px;max-width:800px;margin:0 auto}</style>
 </head><body>${html}</body></html>`;
 };
 
-export const streamMedia = async (req, res) => {
+export const streamMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
+    if (!item.is_published && !isPrivileged(req.user)) {
+      return res.status(404).json({ message: "Media not found" });
+    }
 
     if (item.s3_key.startsWith("local/")) {
       const filename = item.s3_key.slice("local/".length);
@@ -230,13 +233,16 @@ export const streamMedia = async (req, res) => {
       s3Response.Body.pipe(res);
     }
   } catch (err) {
-    res.status(404).json({ message: err.message });
+    next(err);
   }
 };
 
-export const downloadMedia = async (req, res) => {
+export const downloadMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
+    if (!item.is_published && !isPrivileged(req.user)) {
+      return res.status(404).json({ message: "Media not found" });
+    }
     const ext = item.s3_key.split(".").pop();
     res.set("Content-Disposition", downloadDisposition(item.title, ext));
 
@@ -256,25 +262,17 @@ export const downloadMedia = async (req, res) => {
       s3Response.Body.pipe(res);
     }
   } catch (err) {
-    res.status(404).json({ message: err.message });
+    next(err);
   }
 };
 
 export const getProgress = async (req, res) => {
-  try {
-    const progress = await servicesMedia.getWatchProgress(req.user.id, req.params.id);
-    res.status(200).json(progress);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  const progress = await servicesMedia.getWatchProgress(req.user.id, req.params.id);
+  res.status(200).json(progress);
 };
 
 export const saveProgress = async (req, res) => {
-  try {
-    const { positionSeconds } = req.body;
-    const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
-    res.status(200).json(progress);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
+  const { positionSeconds } = req.body;
+  const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
+  res.status(200).json(progress);
 };

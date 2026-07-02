@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { pool } from "../db/pool.js";
+import { notFound, forbidden } from "../lib/AppError.js";
 
 export const createSession = async (hostId, data) => {
   const { title, sessionType, maxParticipants } = data;
@@ -29,7 +30,7 @@ export const getSessionById = async (id) => {
      WHERE s.id=$1`,
     [id]
   );
-  if (result.rows.length === 0) throw new Error("Session not found");
+  if (result.rows.length === 0) throw notFound("Session not found");
   return result.rows[0];
 };
 
@@ -38,7 +39,7 @@ export const endSession = async (id, hostId) => {
     "UPDATE live_sessions SET is_active=FALSE, ended_at=NOW() WHERE id=$1 AND host_id=$2 RETURNING *",
     [id, hostId]
   );
-  if (result.rows.length === 0) throw new Error("Session not found or not authorized");
+  if (result.rows.length === 0) throw forbidden("Session not found or not authorized");
   return result.rows[0];
 };
 
@@ -47,6 +48,6 @@ export const saveRecording = async (id, hostId, s3Key) => {
     "UPDATE live_sessions SET recording_s3_key=$1 WHERE id=$2 AND host_id=$3 RETURNING *",
     [s3Key, id, hostId]
   );
-  if (result.rows.length === 0) throw new Error("Session not found or not authorized");
+  if (result.rows.length === 0) throw forbidden("Session not found or not authorized");
   return result.rows[0];
 };

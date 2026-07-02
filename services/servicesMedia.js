@@ -1,4 +1,5 @@
 import { pool } from "../db/pool.js";
+import { notFound } from "../lib/AppError.js";
 
 export const getAllMedia = async (filters = {}) => {
   let query = `SELECT m.*, u.display_name AS uploader_name
@@ -31,7 +32,7 @@ export const getMediaById = async (id) => {
      WHERE m.id=$1`,
     [id]
   );
-  if (result.rows.length === 0) throw new Error("Media not found");
+  if (result.rows.length === 0) throw notFound("Media not found");
   return result.rows[0];
 };
 
@@ -58,13 +59,13 @@ export const updateMedia = async (id, data) => {
     WHERE id=$6 RETURNING *`,
     [title, description, isPublished, thumbnailUrl, durationSeconds, id]
   );
-  if (result.rows.length === 0) throw new Error("Media not found");
+  if (result.rows.length === 0) throw notFound("Media not found");
   return result.rows[0];
 };
 
 export const deleteMedia = async (id) => {
   const result = await pool.query("DELETE FROM media_items WHERE id=$1 RETURNING id", [id]);
-  if (result.rows.length === 0) throw new Error("Media not found");
+  if (result.rows.length === 0) throw notFound("Media not found");
   return { deleted: true, id };
 };
 
