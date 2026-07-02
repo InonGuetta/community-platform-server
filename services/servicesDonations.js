@@ -1,5 +1,6 @@
 import Stripe from "stripe";
 import { pool } from "../db/pool.js";
+import { notFound } from "../lib/AppError.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -24,7 +25,7 @@ export const updateDonationStatus = async (stripePaymentIntent, status) => {
     "UPDATE donations SET status=$1 WHERE stripe_payment_intent=$2 RETURNING *",
     [status, stripePaymentIntent]
   );
-  if (result.rows.length === 0) throw new Error("Donation not found");
+  if (result.rows.length === 0) throw notFound("Donation not found");
   return result.rows[0];
 };
 
