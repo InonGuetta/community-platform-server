@@ -11,10 +11,11 @@ Copy `.env.example` to `.env` first. The server validates its environment at
 boot and refuses to start with a single message listing everything that is
 missing, so a bad `.env` fails immediately instead of at the first request.
 
-## Tests
+## Tests and linting
 
 ```bash
 npm test
+npm run lint
 ```
 
 Plain `node --test`, no dependencies. They need no database, Redis or network:

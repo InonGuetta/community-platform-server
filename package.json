@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
+    "lint": "eslint .",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "worker:transcription": "node --watch queue/workers/transcriptionWorker.js",
@@ -37,6 +38,9 @@
     "stripe": "^14.0.0"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0"
+    "@eslint/js": "^9.39.5",
+    "concurrently": "^9.0.0",
+    "eslint": "^9.39.5",
+    "globals": "^17.8.0"
   }
 }
