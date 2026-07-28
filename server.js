@@ -1,4 +1,7 @@
 import "dotenv/config";
+// Must stay directly after dotenv/config and above every other import — see the
+// header of lib/checkEnv.js for why the position is load-bearing.
+import "./lib/checkEnv.js";
 import express from "express";
 import { createServer } from "http";
 import cors from "cors";

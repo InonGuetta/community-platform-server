@@ -4,6 +4,7 @@ import { verifyToken } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
+import { logger } from "../lib/logger.js";
 
 const router = Router();
 const upload = multer({
@@ -31,14 +32,15 @@ const canManage = requireRole("lecturer", "admin");
 
 router.get("/get-all", controllersMedia.getAllMedia);
 router.get("/:id", validateIntParam("id"), controllersMedia.getMediaById);
+// multer reports a rejected file (wrong type, over the size limit) through its
+// own callback rather than as an AppError, so it needs this wrapper to become a
+// 400 instead of falling through to the generic 500 handler.
 router.post("/upload", canManage, (req, res, next) => {
   upload.single("file")(req, res, (err) => {
     if (err) {
-      console.error("[upload] multer error:", err.message);
+      logger.warn(`[upload] rejected: ${err.message}`);
       return res.status(400).json({ message: err.message });
     }
-    console.log("[upload] file:", req.file ? `${req.file.originalname} (${req.file.mimetype}, ${req.file.size}B)` : "MISSING");
-    console.log("[upload] body:", req.body);
     next();
   });
 }, controllersMedia.createMedia);
