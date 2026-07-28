@@ -3,6 +3,8 @@
 ## Running
 
 ```bash
+npm run migrate        # apply db/migrations — required after pulling schema changes
+npm run seed           # create the first admin (needs SEED_ADMIN_PASSWORD)
 npm start              # API server
 npm run workers        # transcription + LLM workers (separate processes)
 ```
