@@ -3,7 +3,6 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { fileURLToPath } from "url";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
@@ -13,11 +12,8 @@ import { pool } from "../../db/pool.js";
 import { saveChunks } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
-import { s3, s3Configured } from "../../lib/storage.js";
+import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOCAL_UPLOAD_DIR = path.join(__dirname, "../../uploads");
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
 // comfortably under Whisper's 25MB limit, with margin for VBR jitter.
