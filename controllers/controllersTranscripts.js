@@ -1,10 +1,11 @@
 import * as servicesTranscripts from "../services/servicesTranscripts.js";
 import { logger } from "../lib/logger.js";
+import { isPrivileged } from "../lib/permissions.js";
 import { badRequest } from "../lib/AppError.js";
 
 export const getTranscript = async (req, res) => {
   const { mediaId } = req.params;
-  const transcript = await servicesTranscripts.getTranscriptByMediaId(mediaId);
+  const transcript = await servicesTranscripts.getTranscriptByMediaId(mediaId, isPrivileged(req.user));
   logger.debug(`[BE:ctrl] GET /transcripts/${mediaId} ✓ status=${transcript.status} chunks=${transcript.chunks?.length ?? 0}`);
   res.status(200).json(transcript);
 };
@@ -38,6 +39,6 @@ export const searchTranscripts = async (req, res) => {
   // Default to hybrid; ignore anything unrecognised rather than 400 so a stray
   // mode value can't break search.
   const mode = SEARCH_MODES.has(req.query.mode) ? req.query.mode : "hybrid";
-  const results = await servicesTranscripts.searchTranscripts(q, mode);
+  const results = await servicesTranscripts.searchTranscripts(q, mode, isPrivileged(req.user));
   res.status(200).json(results);
 };

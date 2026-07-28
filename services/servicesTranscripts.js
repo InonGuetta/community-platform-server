@@ -337,8 +337,20 @@ export const saveChunks = async (mediaId, segments) => {
   return chunks.length;
 };
 
-export const getTranscriptByMediaId = async (mediaId) => {
-  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId}`);
+// A transcript inherits the visibility of its media item. Without this check a
+// student who knows (or guesses) a media id could read the full text of an
+// unpublished draft straight from this endpoint, bypassing the is_published
+// gate that /api/media enforces. Unknown media and hidden media return the same
+// 404 so the endpoint doesn't reveal which ids exist.
+export const getTranscriptByMediaId = async (mediaId, canSeeUnpublished = false) => {
+  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} privileged=${canSeeUnpublished}`);
+
+  const media = await pool.query("SELECT is_published FROM media_items WHERE id=$1", [mediaId]);
+  if (media.rows.length === 0 || (!media.rows[0].is_published && !canSeeUnpublished)) {
+    logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not visible`);
+    throw notFound("Transcript not found");
+  }
+
   const [transcript, chunks] = await Promise.all([
     pool.query("SELECT * FROM transcripts WHERE media_id=$1", [mediaId]),
     // Explicit columns (not SELECT *) so the embedding vector(1536) — added in
@@ -525,7 +537,18 @@ const SELECT_COLS = `
   c.media_id, c.chunk_index, c.start_time, c.end_time, c.content,
   m.title AS media_title`;
 
-const searchKeyword = async (query) => {
+// Visibility predicate, shared by all three modes. A chunk is searchable when
+// its media item is published, or when the caller may see drafts. The boolean
+// is a bound parameter rather than string-built SQL so the query text stays
+// identical for every caller and stays in the plan cache.
+//
+// CRITICAL for hybrid: this has to sit INSIDE each ranking CTE, not only in the
+// final SELECT. The CTEs take the top FUSE_DEPTH candidates first — filtering
+// afterwards would let hidden chunks consume candidate slots and silently hand
+// a student a shorter, worse-ranked list rather than an equivalent one.
+const VISIBLE = (privilegedParam) => `(m.is_published OR ${privilegedParam}::boolean)`;
+
+const searchKeyword = async (query, canSeeUnpublished) => {
   const result = await pool.query(
     `SELECT
        ${SELECT_COLS},
@@ -534,14 +557,15 @@ const searchKeyword = async (query) => {
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
+       AND ${VISIBLE("$2")}
      ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
      LIMIT ${SEARCH_LIMIT}`,
-    [query]
+    [query, canSeeUnpublished]
   );
   return result.rows;
 };
 
-const searchSemantic = async (query) => {
+const searchSemantic = async (query, canSeeUnpublished) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
   const result = await pool.query(
     `SELECT
@@ -551,19 +575,21 @@ const searchSemantic = async (query) => {
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE c.embedding IS NOT NULL
+       AND ${VISIBLE("$2")}
      ORDER BY c.embedding <=> $1::vector
      LIMIT ${SEARCH_LIMIT}`,
-    [queryVector]
+    [queryVector, canSeeUnpublished]
   );
   return result.rows;
 };
 
-const searchHybrid = async (query) => {
+const searchHybrid = async (query, canSeeUnpublished) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
-  // $1 = query text (FTS), $2 = query embedding (vector). Each CTE ranks its own
-  // top FUSE_DEPTH; the FULL OUTER JOIN unions the two id sets and RRF sums the
-  // reciprocal ranks. ts_headline highlights the FTS terms (semantic-only hits
-  // simply have no terms to highlight, which is fine).
+  // $1 = query text (FTS), $2 = query embedding (vector), $3 = may see drafts.
+  // Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN unions the two id
+  // sets and RRF sums the reciprocal ranks. ts_headline highlights the FTS terms
+  // (semantic-only hits simply have no terms to highlight, which is fine).
+  // Both CTEs join media_items solely to apply the visibility predicate.
   const result = await pool.query(
     `WITH kw AS (
        SELECT c.id,
@@ -571,7 +597,9 @@ const searchHybrid = async (query) => {
            ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
          ) AS rank
        FROM transcript_chunks c
+       JOIN media_items m ON c.media_id = m.id
        WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
+         AND ${VISIBLE("$3")}
        ORDER BY rank
        LIMIT ${FUSE_DEPTH}
      ),
@@ -579,7 +607,9 @@ const searchHybrid = async (query) => {
        SELECT c.id,
          row_number() OVER (ORDER BY c.embedding <=> $2::vector) AS rank
        FROM transcript_chunks c
+       JOIN media_items m ON c.media_id = m.id
        WHERE c.embedding IS NOT NULL
+         AND ${VISIBLE("$3")}
        ORDER BY c.embedding <=> $2::vector
        LIMIT ${FUSE_DEPTH}
      ),
@@ -600,7 +630,7 @@ const searchHybrid = async (query) => {
      JOIN media_items m ON c.media_id = m.id
      ORDER BY f.score DESC
      LIMIT ${CANDIDATE_LIMIT}`,
-    [query, queryVector]
+    [query, queryVector, canSeeUnpublished]
   );
 
   // Rerank the candidates with GPT-4o for true relevance ordering + scoring.
@@ -616,9 +646,9 @@ const searchHybrid = async (query) => {
   }
 };
 
-export const searchTranscripts = async (query, mode = "hybrid") => {
-  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length}`);
-  if (mode === "keyword") return searchKeyword(query);
-  if (mode === "semantic") return searchSemantic(query);
-  return searchHybrid(query);
+export const searchTranscripts = async (query, mode = "hybrid", canSeeUnpublished = false) => {
+  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length} privileged=${canSeeUnpublished}`);
+  if (mode === "keyword") return searchKeyword(query, canSeeUnpublished);
+  if (mode === "semantic") return searchSemantic(query, canSeeUnpublished);
+  return searchHybrid(query, canSeeUnpublished);
 };

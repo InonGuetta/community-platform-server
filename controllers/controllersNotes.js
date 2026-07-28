@@ -1,4 +1,5 @@
 import * as servicesNotes from "../services/servicesNotes.js";
+import { optionalId, optionalSeconds } from "../lib/validate.js";
 
 export const getNotes = async (req, res) => {
   const notes = await servicesNotes.getNotesByUser(req.user.id);
@@ -6,8 +7,13 @@ export const getNotes = async (req, res) => {
 };
 
 export const createNote = async (req, res) => {
-  const { title, body, mediaId, timestampSeconds } = req.body;
-  const note = await servicesNotes.createNote(req.user.id, { title, body, mediaId, timestampSeconds });
+  const { title, body, mediaId, timestampSeconds } = req.body ?? {};
+  const note = await servicesNotes.createNote(req.user.id, {
+    title,
+    body,
+    mediaId: optionalId(mediaId, "mediaId"),
+    timestampSeconds: optionalSeconds(timestampSeconds, "timestampSeconds"),
+  });
   res.status(201).json(note);
 };
 

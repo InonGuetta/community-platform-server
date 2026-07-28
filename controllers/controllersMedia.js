@@ -9,6 +9,8 @@ import { pipeline } from "stream/promises";
 import { fileURLToPath } from "url";
 import { s3, s3Configured } from "../lib/storage.js";
 import { logger } from "../lib/logger.js";
+import { isPrivileged } from "../lib/permissions.js";
+import { requireSeconds, optionalBoolean } from "../lib/validate.js";
 import { badRequest, notFound } from "../lib/AppError.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,10 +31,6 @@ const getMimeType = (filename) => {
   const ext = filename.split(".").pop().toLowerCase();
   return MIME_TYPES[ext] || "application/octet-stream";
 };
-
-// Lecturers/admins manage the library and may see unpublished drafts; everyone
-// else only sees published items.
-const isPrivileged = (user) => user?.role === "lecturer" || user?.role === "admin";
 
 // s3_key is an internal storage pointer — never ship it to the client. Streaming
 // and downloading go through the dedicated /:id/stream and /:id/download routes.
@@ -104,7 +102,11 @@ export const createMedia = async (req, res) => {
 };
 
 export const updateMedia = async (req, res) => {
-  const item = await servicesMedia.updateMedia(req.params.id, req.body);
+  const { isPublished, ...rest } = req.body ?? {};
+  const item = await servicesMedia.updateMedia(req.params.id, {
+    ...rest,
+    isPublished: optionalBoolean(isPublished, "isPublished"),
+  });
   res.status(200).json(publicMedia(item));
 };
 
@@ -345,7 +347,7 @@ export const getProgress = async (req, res) => {
 };
 
 export const saveProgress = async (req, res) => {
-  const { positionSeconds } = req.body;
+  const positionSeconds = requireSeconds(req.body?.positionSeconds, "positionSeconds");
   const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
   res.status(200).json(progress);
 };
