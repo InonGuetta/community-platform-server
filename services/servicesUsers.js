@@ -6,8 +6,10 @@ const ROLES = new Set(["student", "lecturer", "admin"]);
 const normalizeEmail = (email) => email.trim().toLowerCase();
 
 export const getAllUsers = async () => {
+  // Admins manage every account here, including inactive ones — otherwise a
+  // deactivated user would vanish from the list and could never be reactivated.
   const result = await pool.query(
-    "SELECT id, email, role, display_name, avatar_url, created_at, is_active FROM users WHERE is_active=TRUE ORDER BY created_at DESC"
+    "SELECT id, email, role, display_name, avatar_url, created_at, is_active FROM users ORDER BY created_at DESC"
   );
   return result.rows;
 };

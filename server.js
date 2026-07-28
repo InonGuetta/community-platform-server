@@ -15,6 +15,7 @@ import routersMedia from "./routes/routersMedia.js";
 import routersSessions from "./routes/routersSessions.js";
 import routersTranscripts from "./routes/routersTranscripts.js";
 import routersBookmarks from "./routes/routersBookmarks.js";
+import routersNotes from "./routes/routersNotes.js";
 import routersDonations from "./routes/routersDonations.js";
 import routersAdmin from "./routes/routersAdmin.js";
 
@@ -46,6 +47,7 @@ app.use("/api/media", routersMedia);
 app.use("/api/sessions", routersSessions);
 app.use("/api/transcripts", routersTranscripts);
 app.use("/api/bookmarks", routersBookmarks);
+app.use("/api/notes", routersNotes);
 app.use("/api/donations", routersDonations);
 app.use("/api/admin", routersAdmin);
 
@@ -91,5 +93,14 @@ httpServer.on("error", (err) => {
     logger.error("HTTP server error:", err);
   }
 });
+
+// Node's default keepAliveTimeout (5s) is shorter than the idle gap a real user
+// leaves between requests (typing a password, thinking). When that timer fires,
+// this server closes the socket; the Vite dev proxy's pooled connection doesn't
+// find out until it tries to reuse it, and the write lands on a dead socket as
+// ECONNRESET — surfaced to the browser as a 500 on an otherwise-fine request.
+// headersTimeout must stay above keepAliveTimeout or Node throws at startup.
+httpServer.keepAliveTimeout = 65000;
+httpServer.headersTimeout = 66000;
 
 httpServer.listen(PORT, () => logger.info(`Server on port ${PORT}`));
