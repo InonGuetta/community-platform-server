@@ -197,8 +197,19 @@ const runGenerateKeyPointHeadings = async (mediaId) => {
     const analysis = await analyzeTranscript(rawText);
     keyPoints = Array.isArray(analysis.key_points) ? analysis.key_points : [];
     if (keyPoints.length === 0) throw badRequest("AI analysis produced no key points");
+    // Leave the status alone while the LLM job is still in flight. This path
+    // regenerates the analysis on demand, and marking it 'done' underneath a
+    // running job would stop the client polling just before that job writes its
+    // own summary — reintroducing exactly the gap 'analyzing' was added to
+    // close. Otherwise this call *is* what produced the analysis, so 'done' is
+    // correct, including recovering a transcript left at 'error'.
     await pool.query(
-      "UPDATE transcripts SET ai_summary=$1, ai_key_points=$2, status='done', updated_at=NOW() WHERE media_id=$3",
+      `UPDATE transcripts SET
+         ai_summary=$1,
+         ai_key_points=$2,
+         status = CASE WHEN status = 'analyzing' THEN status ELSE 'done' END,
+         updated_at=NOW()
+       WHERE media_id=$3`,
       [analysis.summary, JSON.stringify(keyPoints), mediaId]
     );
     logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);

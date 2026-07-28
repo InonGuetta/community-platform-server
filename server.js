@@ -56,12 +56,18 @@ app.use("/api/notes", routersNotes);
 app.use("/api/donations", routersDonations);
 app.use("/api/admin", routersAdmin);
 
+// Unauthenticated by design — a probe has to reach it. So it reports only
+// whether the service is usable: the raw driver message used to go out with it,
+// which tells an anonymous caller about the database behind this.
+// 503 rather than 500, matching how errorHandler classifies a dependency that
+// is unreachable rather than a fault in the request.
 app.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    logger.error(`[health] database check failed: ${err.message}`);
+    res.status(503).json({ ok: false });
   }
 });
 
