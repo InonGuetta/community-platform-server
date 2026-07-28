@@ -190,7 +190,7 @@ const isClientAbort = (err) =>
 // By the time we get here the headers are already on the wire, so a failure can
 // no longer become a JSON error response. Destroying the connection is the only
 // correct move: the client sees a truncated response and retries the range.
-const streamToResponse = async (source, res, context) => {
+export const streamToResponse = async (source, res, context) => {
   try {
     await pipeline(source, res);
   } catch (err) {
@@ -211,9 +211,11 @@ const streamToResponse = async (source, res, context) => {
 // a deliberately huge end value to mean "the rest". Answering 416 to those broke
 // seeking. A suffix range ("bytes=-500" — the LAST 500 bytes) is also handled
 // properly here; it used to be misread as "bytes=0-500".
-const RANGE_UNSATISFIABLE = Symbol("range-unsatisfiable");
+// Exported for the range tests: the seek behaviour here is easy to break and
+// the failure is a player that silently refuses to scrub.
+export const RANGE_UNSATISFIABLE = Symbol("range-unsatisfiable");
 
-const parseRange = (header, size) => {
+export const parseRange = (header, size) => {
   const match = /^bytes=(\d*)-(\d*)$/.exec(header || "");
   if (!match) return null;
 

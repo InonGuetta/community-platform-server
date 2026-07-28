@@ -11,6 +11,21 @@ Copy `.env.example` to `.env` first. The server validates its environment at
 boot and refuses to start with a single message listing everything that is
 missing, so a bad `.env` fails immediately instead of at the first request.
 
+## Tests
+
+```bash
+npm test
+```
+
+Plain `node --test`, no dependencies. They need no database, Redis or network:
+the pool and client objects are stubbed per test, and `test/setup.js` sets
+placeholder credentials so a run can never reach live infrastructure.
+
+They cover the failures that are silent rather than loud — input that used to
+reach Postgres as a 500, the guard that stops the last admin being removed,
+byte-range parsing for media seeking, and the webhook's decision about when
+Stripe should retry.
+
 ## Running under a supervisor
 
 The server shuts down gracefully on `SIGTERM` / `SIGINT`: it stops accepting new
