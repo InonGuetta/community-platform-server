@@ -14,6 +14,7 @@ import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
+import { installWorkerLifecycle } from "./workerLifecycle.js";
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
 // comfortably under Whisper's 25MB limit, with margin for VBR jitter.
@@ -169,8 +170,10 @@ transcriptionQueue.process(async (job) => {
       logger.error(`[WORKER:transcription] ⚠ embedding failed (non-fatal) mediaId=${mediaId} — ${embedErr.message}`);
     }
 
-    const fullText = allSegments.map((s) => s.text).join(" ");
-    const llmJob = await llmQueue.add({ mediaId, rawText: fullText });
+    // Only the id: the text is already in transcript_chunks, and putting a
+    // multi-hour transcript in the job body meant Redis held a second copy of
+    // every transcript indefinitely. The LLM worker reads it back from there.
+    const llmJob = await llmQueue.add({ mediaId });
     logger.info(`[WORKER:transcription] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms — queued LLM job id=${llmJob.id}`);
   } catch (err) {
     logger.error(`[WORKER:transcription] ✗ FAILED mediaId=${mediaId} ${Date.now() - t0}ms — ${err.message}`);
@@ -194,5 +197,39 @@ transcriptionQueue.process(async (job) => {
 transcriptionQueue.on("error", (err) => {
   logger.error(`[WORKER:transcription] queue error:`, err.message);
 });
+
+// The per-job `finally` removes the segment directory, but that only runs if
+// the process survives to reach it. A crash or a hard kill leaves the segments
+// behind — a few MB per orphaned run, on a disk that now also holds every
+// upload. Sweep once at startup; the age cut-off is well past the longest
+// plausible job so a concurrently-running worker's directory is never touched.
+const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
+
+const sweepStaleTempDirs = async () => {
+  const tmp = os.tmpdir();
+  try {
+    const entries = await fs.promises.readdir(tmp);
+    const cutoff = Date.now() - STALE_TEMP_AGE_MS;
+    let removed = 0;
+    for (const entry of entries.filter((e) => e.startsWith("transcribe-"))) {
+      const full = path.join(tmp, entry);
+      try {
+        const stat = await fs.promises.stat(full);
+        if (stat.mtimeMs < cutoff) {
+          await fs.promises.rm(full, { recursive: true, force: true });
+          removed++;
+        }
+      } catch {
+        // Being read or removed by someone else — skip it.
+      }
+    }
+    if (removed > 0) logger.info(`[WORKER:transcription] swept ${removed} stale temp dir(s)`);
+  } catch (err) {
+    logger.warn(`[WORKER:transcription] temp sweep skipped: ${err.message}`);
+  }
+};
+
+sweepStaleTempDirs();
+installWorkerLifecycle("transcription", transcriptionQueue);
 
 logger.info("[WORKER:transcription] Transcription worker started, waiting for jobs...");

@@ -3,7 +3,8 @@ import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { embedQuery, toVectorLiteral } from "./servicesEmbeddings.js";
 import { makeOpenAI } from "../lib/openaiClient.js";
 import { logger } from "../lib/logger.js";
-import { notFound, badRequest } from "../lib/AppError.js";
+import { withExclusive } from "../lib/inFlight.js";
+import { notFound, badRequest, conflict } from "../lib/AppError.js";
 
 const CHUNK_WORDS = 500;
 
@@ -35,7 +36,14 @@ const correctTextBatch = async (text) => {
   return response.choices[0].message.content.trim();
 };
 
-export const fixHebrewTranscript = async (mediaId) => {
+export const fixHebrewTranscript = (mediaId) =>
+  withExclusive(
+    `fix-hebrew:${mediaId}`,
+    () => runFixHebrewTranscript(mediaId),
+    "Hebrew correction is already running for this media"
+  );
+
+const runFixHebrewTranscript = async (mediaId) => {
   logger.debug(`[BE:svc] fixHebrewTranscript mediaId=${mediaId}`);
   const existing = await pool.query("SELECT edited_text FROM transcripts WHERE media_id=$1", [mediaId]);
   if (existing.rows.length === 0) throw notFound("Transcript not found");
@@ -154,7 +162,14 @@ const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" 
 
 const HEADING_PREVIEW_WORDS = 120;
 
-export const generateKeyPointHeadings = async (mediaId) => {
+export const generateKeyPointHeadings = (mediaId) =>
+  withExclusive(
+    `key-point-headings:${mediaId}`,
+    () => runGenerateKeyPointHeadings(mediaId),
+    "Heading generation is already running for this media"
+  );
+
+const runGenerateKeyPointHeadings = async (mediaId) => {
   logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId}`);
   const transcript = await pool.query(
     "SELECT ai_key_points FROM transcripts WHERE media_id=$1",
@@ -373,6 +388,17 @@ export const getTranscriptByMediaId = async (mediaId, canSeeUnpublished = false)
   };
 };
 
+// The transcript text, rebuilt from the saved chunks. Lets a job carry only a
+// mediaId instead of the whole text, and means a retry reads the CURRENT state
+// rather than a snapshot taken when the job was queued.
+export const getTranscriptText = async (mediaId) => {
+  const { rows } = await pool.query(
+    "SELECT content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
+    [mediaId]
+  );
+  return rows.map((r) => r.content).join("\n\n");
+};
+
 export const updateTranscript = async (mediaId, data) => {
   const { editedText, aiSummary, aiChapters, aiKeyPoints, status } = data;
   const result = await pool.query(
@@ -413,6 +439,24 @@ export const triggerPipeline = async (mediaId) => {
   }
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${media.rows[0].media_type} s3Key=${media.rows[0].s3_key}`);
 
+  // A fixed job id per media item is what stops a double-click from paying for
+  // two full transcriptions. Bull ignores an add() whose id already exists.
+  //
+  // The catch: finished jobs are now retained (removeOnComplete keeps a window),
+  // so the id stays taken after a successful run and a legitimate re-trigger
+  // would be silently swallowed. So inspect it first — refuse while the job is
+  // still live, and clear a finished one to free the id for a fresh run.
+  const jobId = `media:${mediaId}`;
+  const existing = await transcriptionQueue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (["active", "waiting", "delayed"].includes(state)) {
+      logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ already ${state}`);
+      throw conflict("Transcription is already running for this media", "ALREADY_QUEUED");
+    }
+    await existing.remove();
+  }
+
   await pool.query(
     `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
      ON CONFLICT (media_id) DO UPDATE SET status='pending', updated_at=NOW()`,
@@ -420,7 +464,7 @@ export const triggerPipeline = async (mediaId) => {
   );
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
 
-  const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key });
+  const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key }, { jobId });
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ job queued id=${job.id}`);
   return { queued: true, mediaId, jobId: job.id };
 };

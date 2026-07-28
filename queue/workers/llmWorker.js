@@ -1,16 +1,22 @@
 import "dotenv/config";
 import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
-import { analyzeTranscript } from "../../services/servicesTranscripts.js";
+import { analyzeTranscript, getTranscriptText } from "../../services/servicesTranscripts.js";
 import { logger } from "../../lib/logger.js";
+import { installWorkerLifecycle } from "./workerLifecycle.js";
 
 llmQueue.process(async (job) => {
-  const { mediaId, rawText } = job.data;
+  const { mediaId } = job.data;
   const t0 = Date.now();
-  logger.info(`[WORKER:llm] ── job picked up jobId=${job.id} mediaId=${mediaId} textLen=${rawText.length}`);
+  logger.info(`[WORKER:llm] ── job picked up jobId=${job.id} mediaId=${mediaId}`);
 
   try {
-    logger.debug(`[WORKER:llm] step 1/2 — analysing transcript`);
+    // Read from the DB rather than the job body. Jobs queued by an older worker
+    // still carry rawText; it is ignored, and reading the chunks gives the same
+    // text, so both shapes work.
+    const rawText = await getTranscriptText(mediaId);
+    if (!rawText.trim()) throw new Error(`No transcript chunks found for mediaId=${mediaId}`);
+    logger.debug(`[WORKER:llm] step 1/2 — analysing transcript (${rawText.length} chars)`);
     // analyzeTranscript handles long lectures via map-reduce so no single call
     // exceeds the TPM limit (the bug that silently broke multi-hour audio).
     const parsed = await analyzeTranscript(rawText);
@@ -50,5 +56,7 @@ llmQueue.process(async (job) => {
 llmQueue.on("error", (err) => {
   logger.error(`[WORKER:llm] queue error:`, err.message);
 });
+
+installWorkerLifecycle("llm", llmQueue);
 
 logger.info("[WORKER:llm] LLM worker started, waiting for jobs...");

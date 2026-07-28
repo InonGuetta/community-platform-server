@@ -1,5 +1,6 @@
 import Stripe from "stripe";
 import * as servicesDonations from "../services/servicesDonations.js";
+import { logger } from "../lib/logger.js";
 import { badRequest } from "../lib/AppError.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -32,15 +33,29 @@ export const handleWebhook = async (req, res) => {
     return res.status(400).json({ message: `Webhook error: ${err.message}` });
   }
 
+  const STATUS_BY_EVENT = {
+    "payment_intent.succeeded": "completed",
+    "payment_intent.payment_failed": "failed",
+  };
+
   try {
-    if (event.type === "payment_intent.succeeded") {
-      await servicesDonations.updateDonationStatus(event.data.object.id, "completed");
-    } else if (event.type === "payment_intent.payment_failed") {
-      await servicesDonations.updateDonationStatus(event.data.object.id, "failed");
+    const status = STATUS_BY_EVENT[event.type];
+    if (status) {
+      const updated = await servicesDonations.updateDonationStatus(event.data.object.id, status);
+      // No row updated: an intent we never recorded, or one already completed
+      // (a redelivery). Neither is an error, and both are 200 — answering 5xx
+      // would put Stripe into a retry loop over something that can never
+      // succeed. Previously this threw and became a permanent retry storm.
+      if (!updated) {
+        logger.info(`[webhook] ${event.type} for ${event.data.object.id}: no update applied`);
+      }
     }
     res.status(200).json({ received: true });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    // A genuine failure — the database being unreachable, say. Here a retry is
+    // exactly what we want, so this one really is a 500.
+    logger.error(`[webhook] ${event.type} failed, asking Stripe to retry: ${err.message}`);
+    res.status(500).json({ message: "Webhook processing failed" });
   }
 };
 
