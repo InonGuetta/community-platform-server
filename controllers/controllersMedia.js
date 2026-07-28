@@ -5,10 +5,11 @@ import mammoth from "mammoth";
 import sanitizeHtml from "sanitize-html";
 import fs from "fs";
 import path from "path";
+import { pipeline } from "stream/promises";
 import { fileURLToPath } from "url";
 import { s3, s3Configured } from "../lib/storage.js";
 import { logger } from "../lib/logger.js";
-import { badRequest } from "../lib/AppError.js";
+import { badRequest, notFound } from "../lib/AppError.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOCAL_UPLOAD_DIR = path.join(__dirname, "../uploads");
@@ -152,6 +153,142 @@ const convertWordToHtml = async (buffer) => {
 </head><body>${html}</body></html>`;
 };
 
+// The DB row outlived the file/object it points at (deleted from disk, removed
+// from the bucket). That's a 404 for the caller, not a server fault — which is
+// what it used to surface as.
+const STORAGE_NOT_FOUND = new Set(["ENOENT", "NoSuchKey", "NotFound"]);
+const isStorageNotFound = (err) =>
+  STORAGE_NOT_FOUND.has(err?.code) ||
+  STORAGE_NOT_FOUND.has(err?.name) ||
+  err?.$metadata?.httpStatusCode === 404;
+
+// The client hung up: the user seeked, closed the tab or navigated away. On a
+// media player this is constant and completely normal, so it must not be logged
+// as an error or the log fills with noise and hides the real failures.
+const CLIENT_ABORT_CODES = new Set(["ERR_STREAM_PREMATURE_CLOSE", "ECONNRESET", "EPIPE"]);
+const isClientAbort = (err) =>
+  CLIENT_ABORT_CODES.has(err?.code) || err?.message === "aborted";
+
+// Send a source stream to the response with cleanup on BOTH sides.
+//
+// .pipe() neither forwards errors nor destroys the source when the destination
+// dies, so every seek or closed tab used to leave the file handle (or the S3
+// socket) open — a steady leak on a server whose whole job is streaming media.
+// pipeline() tears down both ends however it ends.
+//
+// By the time we get here the headers are already on the wire, so a failure can
+// no longer become a JSON error response. Destroying the connection is the only
+// correct move: the client sees a truncated response and retries the range.
+const streamToResponse = async (source, res, context) => {
+  try {
+    await pipeline(source, res);
+  } catch (err) {
+    if (isClientAbort(err)) {
+      logger.debug(`[stream] client disconnected during ${context}`);
+    } else {
+      logger.error(`[stream] failed during ${context}: ${err.message}`);
+    }
+    res.destroy();
+  }
+};
+
+// Returns null when there is no usable Range header, RANGE_UNSATISFIABLE when
+// the request starts past the end of the file, or { start, end } otherwise.
+//
+// `end` is clamped to the last byte instead of rejected: RFC 9110 says a range
+// overshooting the file is satisfied by what exists, and players routinely send
+// a deliberately huge end value to mean "the rest". Answering 416 to those broke
+// seeking. A suffix range ("bytes=-500" — the LAST 500 bytes) is also handled
+// properly here; it used to be misread as "bytes=0-500".
+const RANGE_UNSATISFIABLE = Symbol("range-unsatisfiable");
+
+const parseRange = (header, size) => {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header || "");
+  if (!match) return null;
+
+  const [, rawStart, rawEnd] = match;
+  if (rawStart === "" && rawEnd === "") return null;
+
+  if (rawStart === "") {
+    const suffixLength = Number(rawEnd);
+    if (suffixLength <= 0) return RANGE_UNSATISFIABLE;
+    return { start: Math.max(0, size - suffixLength), end: size - 1 };
+  }
+
+  const start = Number(rawStart);
+  if (start >= size) return RANGE_UNSATISFIABLE;
+
+  const end = rawEnd === "" ? size - 1 : Math.min(Number(rawEnd), size - 1);
+  if (end < start) return RANGE_UNSATISFIABLE;
+
+  return { start, end };
+};
+
+const streamLocalFile = async (item, req, res) => {
+  const filename = item.s3_key.slice("local/".length);
+  const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+
+  if (isWordFile(filename)) {
+    const buffer = await fs.promises.readFile(filePath);
+    const html = await convertWordToHtml(buffer);
+    return res.set("Content-Type", "text/html; charset=utf-8").send(html);
+  }
+
+  const stat = await fs.promises.stat(filePath);
+  const range = parseRange(req.headers.range, stat.size);
+
+  if (range === RANGE_UNSATISFIABLE) {
+    return res.status(416).set("Content-Range", `bytes */${stat.size}`).end();
+  }
+
+  // Advertise range support even without a Range header, so the browser knows
+  // seeking is possible and starts sending Range requests.
+  res.set("Content-Type", getMimeType(filename));
+  res.set("Accept-Ranges", "bytes");
+  res.set("Content-Disposition", "inline");
+
+  if (range) {
+    res.status(206);
+    res.set("Content-Range", `bytes ${range.start}-${range.end}/${stat.size}`);
+    res.set("Content-Length", range.end - range.start + 1);
+    return streamToResponse(fs.createReadStream(filePath, range), res, `stream media ${item.id}`);
+  }
+
+  res.set("Content-Length", stat.size);
+  return streamToResponse(fs.createReadStream(filePath), res, `stream media ${item.id}`);
+};
+
+const streamS3Object = async (item, req, res) => {
+  // S3 applies the Range itself and answers 206 + Content-Range when it honored
+  // it, so the header is passed through untouched.
+  const range = req.headers.range;
+  const s3Response = await s3.send(
+    new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET,
+      Key: item.s3_key,
+      ...(range ? { Range: range } : {}),
+    })
+  );
+  const contentType = s3Response.ContentType || "application/octet-stream";
+
+  if (WORD_MIMES.has(contentType)) {
+    const chunks = [];
+    for await (const chunk of s3Response.Body) chunks.push(chunk);
+    const html = await convertWordToHtml(Buffer.concat(chunks));
+    return res.set("Content-Type", "text/html; charset=utf-8").send(html);
+  }
+
+  res.set("Content-Type", contentType);
+  res.set("Accept-Ranges", "bytes");
+  res.set("Content-Disposition", "inline");
+  if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
+  if (range && s3Response.ContentRange) {
+    res.status(206);
+    res.set("Content-Range", s3Response.ContentRange);
+  }
+  return streamToResponse(s3Response.Body, res, `stream media ${item.id}`);
+};
+
 export const streamMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
@@ -159,80 +296,13 @@ export const streamMedia = async (req, res, next) => {
       return res.status(404).json({ message: "Media not found" });
     }
 
-    if (item.s3_key.startsWith("local/")) {
-      const filename = item.s3_key.slice("local/".length);
-      const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
-
-      if (isWordFile(filename)) {
-        const buffer = await fs.promises.readFile(filePath);
-        const html = await convertWordToHtml(buffer);
-        return res.set("Content-Type", "text/html; charset=utf-8").send(html);
-      }
-
-      const stat = await fs.promises.stat(filePath);
-      const contentType = getMimeType(filename);
-      const range = req.headers.range;
-
-      // A Range request means the player is seeking. Answer 206 with just the
-      // requested byte slice; without this, <audio>/<video> can't scrub.
-      if (range) {
-        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-        if (match) {
-          const start = match[1] ? parseInt(match[1], 10) : 0;
-          const end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
-
-          if (start > end || start >= stat.size || end >= stat.size) {
-            return res.status(416).set("Content-Range", `bytes */${stat.size}`).end();
-          }
-
-          res.status(206);
-          res.set("Content-Type", contentType);
-          res.set("Content-Range", `bytes ${start}-${end}/${stat.size}`);
-          res.set("Accept-Ranges", "bytes");
-          res.set("Content-Length", end - start + 1);
-          res.set("Content-Disposition", "inline");
-          return fs.createReadStream(filePath, { start, end }).pipe(res);
-        }
-      }
-
-      // No Range: send the whole file, but advertise range support so the
-      // browser knows seeking is possible and will start sending Range requests.
-      res.set("Content-Type", contentType);
-      res.set("Content-Length", stat.size);
-      res.set("Accept-Ranges", "bytes");
-      res.set("Content-Disposition", "inline");
-      fs.createReadStream(filePath).pipe(res);
-    } else {
-      const range = req.headers.range;
-      const s3Response = await s3.send(
-        new GetObjectCommand({
-          Bucket: process.env.S3_BUCKET,
-          Key: item.s3_key,
-          ...(range ? { Range: range } : {}),
-        })
-      );
-      const contentType = s3Response.ContentType || "application/octet-stream";
-
-      if (WORD_MIMES.has(contentType)) {
-        const chunks = [];
-        for await (const chunk of s3Response.Body) chunks.push(chunk);
-        const buffer = Buffer.concat(chunks);
-        const html = await convertWordToHtml(buffer);
-        return res.set("Content-Type", "text/html; charset=utf-8").send(html);
-      }
-
-      res.set("Content-Type", contentType);
-      res.set("Accept-Ranges", "bytes");
-      res.set("Content-Disposition", "inline");
-      if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
-      // S3 returns 206 + Content-Range when it honored the Range header.
-      if (range && s3Response.ContentRange) {
-        res.status(206);
-        res.set("Content-Range", s3Response.ContentRange);
-      }
-      s3Response.Body.pipe(res);
-    }
+    return item.s3_key.startsWith("local/")
+      ? await streamLocalFile(item, req, res)
+      : await streamS3Object(item, req, res);
   } catch (err) {
+    // Only reachable before the headers went out — streamToResponse handles
+    // everything after that itself.
+    if (isStorageNotFound(err)) return next(notFound("Media file not found"));
     next(err);
   }
 };
@@ -244,24 +314,27 @@ export const downloadMedia = async (req, res, next) => {
       return res.status(404).json({ message: "Media not found" });
     }
     const ext = item.s3_key.split(".").pop();
-    res.set("Content-Disposition", downloadDisposition(item.title, ext));
 
     if (item.s3_key.startsWith("local/")) {
       const filename = item.s3_key.slice("local/".length);
       const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+      // stat first: a missing file must become a 404 before any header is set.
       const stat = await fs.promises.stat(filePath);
+      res.set("Content-Disposition", downloadDisposition(item.title, ext));
       res.set("Content-Type", getMimeType(filename));
       res.set("Content-Length", stat.size);
-      fs.createReadStream(filePath).pipe(res);
-    } else {
-      const s3Response = await s3.send(
-        new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key })
-      );
-      res.set("Content-Type", s3Response.ContentType || "application/octet-stream");
-      if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
-      s3Response.Body.pipe(res);
+      return streamToResponse(fs.createReadStream(filePath), res, `download media ${item.id}`);
     }
+
+    const s3Response = await s3.send(
+      new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: item.s3_key })
+    );
+    res.set("Content-Disposition", downloadDisposition(item.title, ext));
+    res.set("Content-Type", s3Response.ContentType || "application/octet-stream");
+    if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
+    return streamToResponse(s3Response.Body, res, `download media ${item.id}`);
   } catch (err) {
+    if (isStorageNotFound(err)) return next(notFound("Media file not found"));
     next(err);
   }
 };

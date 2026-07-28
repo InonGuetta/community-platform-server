@@ -13,6 +13,8 @@ const tokenFromHandshake = (socket) => {
   return null;
 };
 
+// Returns the io instance so the caller can close it during shutdown —
+// websockets are long-lived and would otherwise hold the process open.
 export const initSockets = (httpServer) => {
   const io = new Server(httpServer, {
     cors: { origin: process.env.CLIENT_URL || "http://localhost:5173", credentials: true },
@@ -76,4 +78,6 @@ export const initSockets = (httpServer) => {
       });
     });
   });
+
+  return io;
 };
