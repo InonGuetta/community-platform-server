@@ -153,14 +153,19 @@ transcriptionQueue.process(async (job) => {
     const chunkCount = await saveChunks(mediaId, allSegments);
     logger.debug(`[WORKER:transcription] step 5/6 ✓ ${chunkCount} DB chunks saved`);
 
+    // 'analyzing', not 'done': the transcript itself is finished, but the
+    // summary and key points are produced by the LLM job queued below. Marking
+    // it done here ended the client's polling before that work existed, so the
+    // summary panel stayed empty until someone reloaded the page. The LLM
+    // worker moves it to 'done'.
     await pool.query(
-      "UPDATE transcripts SET status='done', updated_at=NOW() WHERE media_id=$1",
+      "UPDATE transcripts SET status='analyzing', updated_at=NOW() WHERE media_id=$1",
       [mediaId]
     );
-    logger.debug(`[WORKER:transcription] step 6/6 ✓ status='done' set in DB`);
+    logger.debug(`[WORKER:transcription] step 6/6 ✓ status='analyzing' set in DB`);
 
     // Best-effort: embed the freshly-saved chunks for semantic search. This must
-    // never fail the job — the transcript is already saved and status='done'. A
+    // never fail the job — the transcript is already saved and status is past
     // missed embedding is recoverable later (the LLM headings path and the
     // backfill script both re-embed only the chunks WHERE embedding IS NULL).
     try {
