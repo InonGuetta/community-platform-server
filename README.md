@@ -29,6 +29,48 @@ reach Postgres as a 500, the guard that stops the last admin being removed,
 byte-range parsing for media seeking, and the webhook's decision about when
 Stripe should retry.
 
+## Media storage
+
+Without S3 credentials, uploads are written to `uploads/` on the server's own
+disk. That works, but it means the media — the one thing here that cannot be
+regenerated, unlike a transcript — lives on a single machine with no backup.
+
+Storage is recorded per row, as a `local/` or `uploads/` prefix on `s3_key`, so
+**configuring S3 only affects new uploads**. Anything already stored locally
+stays there until it is moved:
+
+```bash
+npm run migrate:uploads-to-s3 -- --dry            # preview
+npm run migrate:uploads-to-s3                     # copy, keep local copies
+npm run migrate:uploads-to-s3 -- --delete-local   # copy, then remove them
+```
+
+Safe to re-run; each file is committed separately, so an interrupted run
+resumes.
+
+### What to create in AWS
+
+1. A bucket. **Keep it private** — the app streams objects through its own
+   authenticated routes, so nothing needs public access.
+2. An IAM user whose policy covers the bucket's objects. Multipart permissions
+   are needed because large uploads stream in parts:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:AbortMultipartUpload"
+    ],
+    "Resource": "arn:aws:s3:::YOUR_BUCKET/*"
+  }]
+}
+```
+
+3. Fill in `AWS_REGION`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`. The server logs which mode it is in at startup.
+
 ## Running under a supervisor
 
 The server shuts down gracefully on `SIGTERM` / `SIGINT`: it stops accepting new

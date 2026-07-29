@@ -11,6 +11,7 @@
     "worker:llm": "node --watch queue/workers/llmWorker.js",
     "migrate": "node db/migrate.js",
     "seed": "node db/seed.js",
+    "migrate:uploads-to-s3": "node db/migrateUploadsToS3.js",
     "backfill:embeddings": "node db/backfillEmbeddings.js",
     "fix:stale-sessions": "node db/closeStaleSessions.js",
     "workers": "concurrently -n transcription,llm -c blue,magenta \"npm:worker:transcription\" \"npm:worker:llm\""
