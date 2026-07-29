@@ -3,7 +3,7 @@ import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
 import { analyzeTranscript, getTranscriptText } from "../../services/servicesTranscripts.js";
 import { logger } from "../../lib/logger.js";
-import { installWorkerLifecycle } from "./workerLifecycle.js";
+import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 llmQueue.process(async (job) => {
   const { mediaId } = job.data;
@@ -57,10 +57,7 @@ llmQueue.process(async (job) => {
   }
 });
 
-llmQueue.on("error", (err) => {
-  logger.error(`[WORKER:llm] queue error:`, err.message);
-});
-
+installQueueErrorLogging("llm", llmQueue);
 installWorkerLifecycle("llm", llmQueue);
 
 logger.info("[WORKER:llm] LLM worker started, waiting for jobs...");

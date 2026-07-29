@@ -1,6 +1,53 @@
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
 
+// Host and port only — REDIS_URL can carry a password.
+const redisTarget = () => {
+  try {
+    const url = new URL(process.env.REDIS_URL);
+    return `${url.hostname}:${url.port || 6379}`;
+  } catch {
+    return "the configured REDIS_URL";
+  }
+};
+
+const CONNECTION_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "EHOSTUNREACH", "EAI_AGAIN"]);
+const REPEAT_SUMMARY_MS = 30_000;
+
+// Queue errors used to be logged as `queue error:` followed by err.message —
+// which is empty for a connection failure, so an unreachable Redis produced an
+// endless run of lines saying nothing at all. That is the single most likely
+// thing to go wrong here, and it was the one case the log could not explain.
+//
+// Reports the cause and what it means, then goes quiet: Bull retries
+// continuously, so without throttling this emits several lines a second and
+// buries everything else in the terminal.
+export const installQueueErrorLogging = (name, queue) => {
+  let suppressed = 0;
+  let lastReportedAt = 0;
+
+  queue.on("error", (err) => {
+    const now = Date.now();
+    if (now - lastReportedAt < REPEAT_SUMMARY_MS) {
+      suppressed++;
+      return;
+    }
+
+    const alsoSuppressed = suppressed > 0 ? ` (${suppressed} identical since the last report)` : "";
+    if (CONNECTION_CODES.has(err?.code)) {
+      logger.error(
+        `[WORKER:${name}] cannot reach Redis at ${redisTarget()} — ${err.code}. ` +
+        `No jobs can be picked up until it is running.${alsoSuppressed}`
+      );
+    } else {
+      logger.error(`[WORKER:${name}] queue error: ${err?.message || err?.code || err}${alsoSuppressed}`);
+    }
+
+    suppressed = 0;
+    lastReportedAt = now;
+  });
+};
+
 // Shared shutdown handling for the queue workers. The API server got this in
 // wave 1; the workers were still killed outright.
 //

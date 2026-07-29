@@ -14,7 +14,7 @@ import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
-import { installWorkerLifecycle } from "./workerLifecycle.js";
+import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
 // comfortably under Whisper's 25MB limit, with margin for VBR jitter.
@@ -199,9 +199,7 @@ transcriptionQueue.process(async (job) => {
   }
 });
 
-transcriptionQueue.on("error", (err) => {
-  logger.error(`[WORKER:transcription] queue error:`, err.message);
-});
+installQueueErrorLogging("transcription", transcriptionQueue);
 
 // The per-job `finally` removes the segment directory, but that only runs if
 // the process survives to reach it. A crash or a hard kill leaves the segments
