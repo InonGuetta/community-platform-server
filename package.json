@@ -3,11 +3,17 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "test": "node --test",
+    "lint": "eslint .",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "worker:transcription": "node --watch queue/workers/transcriptionWorker.js",
     "worker:llm": "node --watch queue/workers/llmWorker.js",
+    "migrate": "node db/migrate.js",
+    "seed": "node db/seed.js",
+    "migrate:uploads-to-s3": "node db/migrateUploadsToS3.js",
     "backfill:embeddings": "node db/backfillEmbeddings.js",
+    "fix:stale-sessions": "node db/closeStaleSessions.js",
     "workers": "concurrently -n transcription,llm -c blue,magenta \"npm:worker:transcription\" \"npm:worker:llm\""
   },
   "dependencies": {
@@ -25,7 +31,7 @@
     "helmet": "^7.0.0",
     "jsonwebtoken": "^9.0.0",
     "mammoth": "^1.12.0",
-    "multer": "^1.4.4",
+    "multer": "^2.2.0",
     "openai": "^4.0.0",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
@@ -35,6 +41,9 @@
     "stripe": "^14.0.0"
   },
   "devDependencies": {
-    "concurrently": "^9.0.0"
+    "@eslint/js": "^9.39.5",
+    "concurrently": "^9.0.0",
+    "eslint": "^9.39.5",
+    "globals": "^17.8.0"
   }
 }

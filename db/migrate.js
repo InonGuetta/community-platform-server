@@ -13,6 +13,8 @@ const files = [
   "008_add_google_oauth.sql",
   "009_add_key_point_headings.sql",
   "010_add_embeddings.sql",
+  "011_create_notes.sql",
+  "012_add_analyzing_status.sql",
 ];
 
 async function migrate() {

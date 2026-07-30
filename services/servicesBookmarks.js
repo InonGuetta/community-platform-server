@@ -1,14 +1,22 @@
 import { pool } from "../db/pool.js";
 import { notFound } from "../lib/AppError.js";
 
+// Joined to media so the notebook can show which lecture each bookmark came
+// from without a request per bookmark. Ordering by title first groups a
+// cross-lecture list by lecture; for the media-scoped call every row shares one
+// title, so it collapses to the timestamp ordering NotesPanel relies on.
 export const getBookmarksByUser = async (userId, mediaId) => {
-  let query = "SELECT * FROM bookmarks WHERE user_id=$1";
+  let query = `
+    SELECT b.*, m.title AS media_title, m.media_type
+    FROM bookmarks b
+    LEFT JOIN media_items m ON m.id = b.media_id
+    WHERE b.user_id=$1`;
   const params = [userId];
   if (mediaId) {
     params.push(mediaId);
-    query += ` AND media_id=$${params.length}`;
+    query += ` AND b.media_id=$${params.length}`;
   }
-  query += " ORDER BY timestamp_seconds ASC";
+  query += " ORDER BY m.title NULLS LAST, b.timestamp_seconds ASC";
   const result = await pool.query(query, params);
   return result.rows;
 };

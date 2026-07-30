@@ -1,16 +1,24 @@
 import * as servicesBookmarks from "../services/servicesBookmarks.js";
+import { requireSeconds, optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";
 
 export const getBookmarks = async (req, res) => {
-  const { mediaId } = req.query;
+  const mediaId = optionalId(req.query.mediaId, "mediaId");
   const bookmarks = await servicesBookmarks.getBookmarksByUser(req.user.id, mediaId);
   res.status(200).json(bookmarks);
 };
 
 export const createBookmark = async (req, res) => {
-  const { mediaId, timestampSeconds, note } = req.body;
-  if (!mediaId || timestampSeconds === undefined) throw badRequest("mediaId and timestampSeconds are required");
-  const bookmark = await servicesBookmarks.createBookmark(req.user.id, mediaId, timestampSeconds, note);
+  const { mediaId, timestampSeconds, note } = req.body ?? {};
+  if (mediaId === undefined || timestampSeconds === undefined) {
+    throw badRequest("mediaId and timestampSeconds are required");
+  }
+  const bookmark = await servicesBookmarks.createBookmark(
+    req.user.id,
+    optionalId(mediaId, "mediaId"),
+    requireSeconds(timestampSeconds, "timestampSeconds"),
+    note
+  );
   res.status(201).json(bookmark);
 };
 

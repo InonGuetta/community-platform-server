@@ -2,6 +2,12 @@ import { pool } from "../db/pool.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { llmQueue } from "../queue/llmQueue.js";
 
+const withTimeout = (promise, ms) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+  ]);
+
 export const getStats = async () => {
   const [users, media, donations] = await Promise.all([
     pool.query("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE is_active) AS active FROM users"),
@@ -19,26 +25,30 @@ export const getStats = async () => {
   };
 };
 
+const getQueueCounts = async (queue) => {
+  try {
+    const [waiting, active, completed, failed] = await withTimeout(
+      Promise.all([
+        queue.getWaitingCount(),
+        queue.getActiveCount(),
+        queue.getCompletedCount(),
+        queue.getFailedCount(),
+      ]),
+      500
+    );
+    return { waiting, active, completed, failed };
+  } catch {
+    return null;
+  }
+};
+
 export const getQueueStatus = async () => {
-  const [transcriptionCounts, llmCounts] = await Promise.all([
-    Promise.all([
-      transcriptionQueue.getWaitingCount(),
-      transcriptionQueue.getActiveCount(),
-      transcriptionQueue.getCompletedCount(),
-      transcriptionQueue.getFailedCount(),
-    ]),
-    Promise.all([
-      llmQueue.getWaitingCount(),
-      llmQueue.getActiveCount(),
-      llmQueue.getCompletedCount(),
-      llmQueue.getFailedCount(),
-    ]),
+  const [transcription, llm] = await Promise.all([
+    getQueueCounts(transcriptionQueue),
+    getQueueCounts(llmQueue),
   ]);
 
-  return {
-    transcription: { waiting: transcriptionCounts[0], active: transcriptionCounts[1], completed: transcriptionCounts[2], failed: transcriptionCounts[3] },
-    llm: { waiting: llmCounts[0], active: llmCounts[1], completed: llmCounts[2], failed: llmCounts[3] },
-  };
+  return { transcription, llm };
 };
 
 export const getSystemHealth = async () => {
@@ -50,7 +60,7 @@ export const getSystemHealth = async () => {
   } catch {}
 
   try {
-    const client = await transcriptionQueue.client;
+    const client = await withTimeout(transcriptionQueue.client, 500);
     checks.redis = client.status === "ready";
   } catch {}
 

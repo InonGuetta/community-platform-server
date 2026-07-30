@@ -17,13 +17,25 @@ const searchLimiter = rateLimit({
   message: { message: "Too many searches, please try again in a minute" },
 });
 
+// The two on-demand AI routes run synchronously inside the request and issue a
+// GPT-4o call per batch — a three-hour transcript is roughly a dozen paid calls
+// over several minutes. The in-flight lock stops the same media being processed
+// twice at once; this caps how fast the whole library can be worked through.
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many AI requests, please try again in a minute" },
+});
+
 router.use(verifyToken);
 
 router.get("/search", searchLimiter, controllersTranscripts.searchTranscripts);
 router.get("/:mediaId", validateIntParam("mediaId"), controllersTranscripts.getTranscript);
 router.put("/:mediaId", requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.updateTranscript);
 router.post("/:mediaId/trigger", requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.triggerPipeline);
-router.post("/:mediaId/fix-hebrew", requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.fixHebrew);
-router.post("/:mediaId/key-point-headings", requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.generateKeyPointHeadings);
+router.post("/:mediaId/fix-hebrew", aiLimiter, requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.fixHebrew);
+router.post("/:mediaId/key-point-headings", aiLimiter, requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.generateKeyPointHeadings);
 
 export default router;

@@ -3,21 +3,18 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { fileURLToPath } from "url";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { transcriptionQueue } from "../transcriptionQueue.js";
 import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
-import { saveChunks } from "../../services/servicesTranscripts.js";
+import { saveChunks, reconcileMissingTranscripts } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
-import { s3, s3Configured } from "../../lib/storage.js";
+import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOCAL_UPLOAD_DIR = path.join(__dirname, "../../uploads");
+import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
 // comfortably under Whisper's 25MB limit, with margin for VBR jitter.
@@ -156,14 +153,19 @@ transcriptionQueue.process(async (job) => {
     const chunkCount = await saveChunks(mediaId, allSegments);
     logger.debug(`[WORKER:transcription] step 5/6 ✓ ${chunkCount} DB chunks saved`);
 
+    // 'analyzing', not 'done': the transcript itself is finished, but the
+    // summary and key points are produced by the LLM job queued below. Marking
+    // it done here ended the client's polling before that work existed, so the
+    // summary panel stayed empty until someone reloaded the page. The LLM
+    // worker moves it to 'done'.
     await pool.query(
-      "UPDATE transcripts SET status='done', updated_at=NOW() WHERE media_id=$1",
+      "UPDATE transcripts SET status='analyzing', updated_at=NOW() WHERE media_id=$1",
       [mediaId]
     );
-    logger.debug(`[WORKER:transcription] step 6/6 ✓ status='done' set in DB`);
+    logger.debug(`[WORKER:transcription] step 6/6 ✓ status='analyzing' set in DB`);
 
     // Best-effort: embed the freshly-saved chunks for semantic search. This must
-    // never fail the job — the transcript is already saved and status='done'. A
+    // never fail the job — the transcript is already saved and status is past
     // missed embedding is recoverable later (the LLM headings path and the
     // backfill script both re-embed only the chunks WHERE embedding IS NULL).
     try {
@@ -173,8 +175,10 @@ transcriptionQueue.process(async (job) => {
       logger.error(`[WORKER:transcription] ⚠ embedding failed (non-fatal) mediaId=${mediaId} — ${embedErr.message}`);
     }
 
-    const fullText = allSegments.map((s) => s.text).join(" ");
-    const llmJob = await llmQueue.add({ mediaId, rawText: fullText });
+    // Only the id: the text is already in transcript_chunks, and putting a
+    // multi-hour transcript in the job body meant Redis held a second copy of
+    // every transcript indefinitely. The LLM worker reads it back from there.
+    const llmJob = await llmQueue.add({ mediaId });
     logger.info(`[WORKER:transcription] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms — queued LLM job id=${llmJob.id}`);
   } catch (err) {
     logger.error(`[WORKER:transcription] ✗ FAILED mediaId=${mediaId} ${Date.now() - t0}ms — ${err.message}`);
@@ -195,8 +199,77 @@ transcriptionQueue.process(async (job) => {
   }
 });
 
-transcriptionQueue.on("error", (err) => {
-  logger.error(`[WORKER:transcription] queue error:`, err.message);
+installQueueErrorLogging("transcription", transcriptionQueue);
+
+// The per-job `finally` removes the segment directory, but that only runs if
+// the process survives to reach it. A crash or a hard kill leaves the segments
+// behind — a few MB per orphaned run, on a disk that now also holds every
+// upload. Sweep once at startup; the age cut-off is well past the longest
+// plausible job so a concurrently-running worker's directory is never touched.
+const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
+
+const sweepStaleTempDirs = async () => {
+  const tmp = os.tmpdir();
+  try {
+    const entries = await fs.promises.readdir(tmp);
+    const cutoff = Date.now() - STALE_TEMP_AGE_MS;
+    let removed = 0;
+    for (const entry of entries.filter((e) => e.startsWith("transcribe-"))) {
+      const full = path.join(tmp, entry);
+      try {
+        const stat = await fs.promises.stat(full);
+        if (stat.mtimeMs < cutoff) {
+          await fs.promises.rm(full, { recursive: true, force: true });
+          removed++;
+        }
+      } catch {
+        // Being read or removed by someone else — skip it.
+      }
+    }
+    if (removed > 0) logger.info(`[WORKER:transcription] swept ${removed} stale temp dir(s)`);
+  } catch (err) {
+    logger.warn(`[WORKER:transcription] temp sweep skipped: ${err.message}`);
+  }
+};
+
+sweepStaleTempDirs();
+
+// Catch up on anything stranded while the queue was unreachable.
+//
+// On 'ready' rather than at startup, because the queue being *usable* is the
+// thing that matters and that is not the same moment as the process starting:
+// ioredis emits this on the first successful connection and again after every
+// reconnect, so a Redis that was down at boot — or that disappeared for two days
+// — still triggers the sweep the moment it comes back.
+//
+// Only the worker installs this. The API server holds a queue client too, and
+// running it in both would have two processes racing to queue the same jobs.
+const RECONCILE_DEBOUNCE_MS = 60_000;
+let lastReconcileAt = 0;
+
+transcriptionQueue.client.on("ready", async () => {
+  // A flapping connection re-emits 'ready' repeatedly. The DB sweep behind this
+  // is cheap, but the jobs it queues are not, so collapse bursts.
+  if (Date.now() - lastReconcileAt < RECONCILE_DEBOUNCE_MS) return;
+  lastReconcileAt = Date.now();
+
+  try {
+    const { found, queued, deferred } = await reconcileMissingTranscripts();
+    if (found === 0) {
+      logger.debug("[WORKER:transcription] reconcile — nothing stranded");
+    } else {
+      logger.info(
+        `[WORKER:transcription] reconcile — queued ${queued.length} of ${found} stranded media` +
+        `${deferred ? ` (${deferred} deferred to the next run)` : ""}`
+      );
+    }
+  } catch (err) {
+    // Never fatal: the worker's real job is processing the queue, and a failed
+    // catch-up sweep must not stop it from doing that.
+    logger.error(`[WORKER:transcription] reconcile failed (non-fatal) — ${err.message}`);
+  }
 });
+
+installWorkerLifecycle("transcription", transcriptionQueue);
 
 logger.info("[WORKER:transcription] Transcription worker started, waiting for jobs...");

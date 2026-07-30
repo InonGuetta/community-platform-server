@@ -3,7 +3,8 @@ import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { embedQuery, toVectorLiteral } from "./servicesEmbeddings.js";
 import { makeOpenAI } from "../lib/openaiClient.js";
 import { logger } from "../lib/logger.js";
-import { notFound, badRequest } from "../lib/AppError.js";
+import { withExclusive } from "../lib/inFlight.js";
+import { notFound, badRequest, conflict } from "../lib/AppError.js";
 
 const CHUNK_WORDS = 500;
 
@@ -35,7 +36,14 @@ const correctTextBatch = async (text) => {
   return response.choices[0].message.content.trim();
 };
 
-export const fixHebrewTranscript = async (mediaId) => {
+export const fixHebrewTranscript = (mediaId) =>
+  withExclusive(
+    `fix-hebrew:${mediaId}`,
+    () => runFixHebrewTranscript(mediaId),
+    "Hebrew correction is already running for this media"
+  );
+
+const runFixHebrewTranscript = async (mediaId) => {
   logger.debug(`[BE:svc] fixHebrewTranscript mediaId=${mediaId}`);
   const existing = await pool.query("SELECT edited_text FROM transcripts WHERE media_id=$1", [mediaId]);
   if (existing.rows.length === 0) throw notFound("Transcript not found");
@@ -154,7 +162,14 @@ const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" 
 
 const HEADING_PREVIEW_WORDS = 120;
 
-export const generateKeyPointHeadings = async (mediaId) => {
+export const generateKeyPointHeadings = (mediaId) =>
+  withExclusive(
+    `key-point-headings:${mediaId}`,
+    () => runGenerateKeyPointHeadings(mediaId),
+    "Heading generation is already running for this media"
+  );
+
+const runGenerateKeyPointHeadings = async (mediaId) => {
   logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId}`);
   const transcript = await pool.query(
     "SELECT ai_key_points FROM transcripts WHERE media_id=$1",
@@ -182,8 +197,19 @@ export const generateKeyPointHeadings = async (mediaId) => {
     const analysis = await analyzeTranscript(rawText);
     keyPoints = Array.isArray(analysis.key_points) ? analysis.key_points : [];
     if (keyPoints.length === 0) throw badRequest("AI analysis produced no key points");
+    // Leave the status alone while the LLM job is still in flight. This path
+    // regenerates the analysis on demand, and marking it 'done' underneath a
+    // running job would stop the client polling just before that job writes its
+    // own summary — reintroducing exactly the gap 'analyzing' was added to
+    // close. Otherwise this call *is* what produced the analysis, so 'done' is
+    // correct, including recovering a transcript left at 'error'.
     await pool.query(
-      "UPDATE transcripts SET ai_summary=$1, ai_key_points=$2, status='done', updated_at=NOW() WHERE media_id=$3",
+      `UPDATE transcripts SET
+         ai_summary=$1,
+         ai_key_points=$2,
+         status = CASE WHEN status = 'analyzing' THEN status ELSE 'done' END,
+         updated_at=NOW()
+       WHERE media_id=$3`,
       [analysis.summary, JSON.stringify(keyPoints), mediaId]
     );
     logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);
@@ -337,8 +363,20 @@ export const saveChunks = async (mediaId, segments) => {
   return chunks.length;
 };
 
-export const getTranscriptByMediaId = async (mediaId) => {
-  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId}`);
+// A transcript inherits the visibility of its media item. Without this check a
+// student who knows (or guesses) a media id could read the full text of an
+// unpublished draft straight from this endpoint, bypassing the is_published
+// gate that /api/media enforces. Unknown media and hidden media return the same
+// 404 so the endpoint doesn't reveal which ids exist.
+export const getTranscriptByMediaId = async (mediaId, canSeeUnpublished = false) => {
+  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} privileged=${canSeeUnpublished}`);
+
+  const media = await pool.query("SELECT is_published FROM media_items WHERE id=$1", [mediaId]);
+  if (media.rows.length === 0 || (!media.rows[0].is_published && !canSeeUnpublished)) {
+    logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not visible`);
+    throw notFound("Transcript not found");
+  }
+
   const [transcript, chunks] = await Promise.all([
     pool.query("SELECT * FROM transcripts WHERE media_id=$1", [mediaId]),
     // Explicit columns (not SELECT *) so the embedding vector(1536) — added in
@@ -359,6 +397,17 @@ export const getTranscriptByMediaId = async (mediaId) => {
     ...transcript.rows[0],
     chunks: chunks.rows,
   };
+};
+
+// The transcript text, rebuilt from the saved chunks. Lets a job carry only a
+// mediaId instead of the whole text, and means a retry reads the CURRENT state
+// rather than a snapshot taken when the job was queued.
+export const getTranscriptText = async (mediaId) => {
+  const { rows } = await pool.query(
+    "SELECT content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
+    [mediaId]
+  );
+  return rows.map((r) => r.content).join("\n\n");
 };
 
 export const updateTranscript = async (mediaId, data) => {
@@ -401,6 +450,24 @@ export const triggerPipeline = async (mediaId) => {
   }
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${media.rows[0].media_type} s3Key=${media.rows[0].s3_key}`);
 
+  // A fixed job id per media item is what stops a double-click from paying for
+  // two full transcriptions. Bull ignores an add() whose id already exists.
+  //
+  // The catch: finished jobs are now retained (removeOnComplete keeps a window),
+  // so the id stays taken after a successful run and a legitimate re-trigger
+  // would be silently swallowed. So inspect it first — refuse while the job is
+  // still live, and clear a finished one to free the id for a fresh run.
+  const jobId = `media:${mediaId}`;
+  const existing = await transcriptionQueue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (["active", "waiting", "delayed"].includes(state)) {
+      logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ already ${state}`);
+      throw conflict("Transcription is already running for this media", "ALREADY_QUEUED");
+    }
+    await existing.remove();
+  }
+
   await pool.query(
     `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
      ON CONFLICT (media_id) DO UPDATE SET status='pending', updated_at=NOW()`,
@@ -408,9 +475,98 @@ export const triggerPipeline = async (mediaId) => {
   );
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
 
-  const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key });
+  const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key }, { jobId });
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ job queued id=${job.id}`);
   return { queued: true, mediaId, jobId: job.id };
+};
+
+// ── Reconciliation ───────────────────────────────────────────────────────────
+// Media that should have a transcript but has nothing to show for it.
+//
+// triggerPipeline talks to Redis (getJob) BEFORE it writes the 'pending' row, so
+// a trigger issued while the queue is down leaves no trace at all: no row, no
+// job, and nothing in the UI to say a transcription was ever asked for. That is
+// how an upload sat untranscribed for two days without anyone noticing.
+//
+// Deliberately narrow — only the two states that are unambiguously stranded:
+//   * no transcripts row at all
+//   * a row at 'pending' with no live job (the trigger died between the INSERT
+//     and the add(), or the job vanished with the queue's Redis data)
+// 'processing' is left alone: another worker may legitimately be on it, and
+// re-queuing would pay for the same audio twice. 'error' is left alone too —
+// that job already ran and was already billed, and retrying it automatically on
+// every reconnect would re-buy the same failure on a loop. Both stay behind the
+// lecturer's deliberate press of "הפעל תמלול".
+const stranded = `
+  SELECT m.id
+  FROM media_items m
+  LEFT JOIN transcripts t ON t.media_id = m.id
+  WHERE m.media_type <> 'text'
+    AND (t.media_id IS NULL OR t.status = 'pending')
+  ORDER BY m.id`;
+
+// Each queued job is a real Whisper bill, so a sweep that suddenly finds a lot
+// of work is far more likely to be a mistake (a restored backup, a bad
+// migration) than a genuine backlog. Queue a bounded batch and say what was
+// held back; the next reconnect picks up where this left off.
+const MAX_RECONCILE_PER_RUN = Number(process.env.MAX_RECONCILE_PER_RUN) || 10;
+
+// getJob/add have no timeout of their own: if Redis disappears mid-sweep they
+// hang indefinitely instead of rejecting, which would strand the exclusive lock
+// and silently disable every future reconcile until the worker restarts — in a
+// feature whose whole point is surviving exactly that. Bound the wait so a queue
+// that dies underneath us costs one skipped item, not all of them. The abandoned
+// call is still observed by the race, so its late rejection is never unhandled.
+const TRIGGER_TIMEOUT_MS = 10_000;
+
+const triggerWithTimeout = (mediaId) => {
+  let timer;
+  return Promise.race([
+    triggerPipeline(mediaId),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("queue did not respond in time")), TRIGGER_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
+
+export const reconcileMissingTranscripts = () =>
+  withExclusive(
+    "reconcile-transcripts",
+    runReconcileMissingTranscripts,
+    "Reconciliation is already running"
+  );
+
+const runReconcileMissingTranscripts = async () => {
+  const { rows } = await pool.query(stranded);
+  if (rows.length === 0) return { found: 0, queued: [], skipped: [], deferred: 0 };
+
+  const batch = rows.slice(0, MAX_RECONCILE_PER_RUN);
+  const deferred = rows.length - batch.length;
+  logger.info(`[BE:svc] reconcile — ${rows.length} media without a usable transcript, taking ${batch.length}`);
+
+  const queued = [];
+  const skipped = [];
+  for (const { id } of batch) {
+    try {
+      // Reuse the real trigger rather than re-implementing it: it owns the job
+      // id convention, the 'already running' check and the 'pending' write, and
+      // a second copy of that logic here is exactly how the two drift apart.
+      await triggerWithTimeout(id);
+      queued.push(id);
+    } catch (err) {
+      // One unqueueable item must not abandon the rest of the sweep. A conflict
+      // is the normal, healthy outcome — the job is already live.
+      skipped.push({ mediaId: id, reason: err.message });
+      logger.debug(`[BE:svc] reconcile mediaId=${id} skipped — ${err.message}`);
+    }
+  }
+
+  logger.info(
+    `[BE:svc] reconcile ✓ queued ${queued.length}${queued.length ? ` (media ${queued.join(", ")})` : ""}` +
+    `${skipped.length ? `, skipped ${skipped.length}` : ""}` +
+    `${deferred ? `, ${deferred} left for the next run` : ""}`
+  );
+  return { found: rows.length, queued, skipped, deferred };
 };
 
 // ── Transcript search ────────────────────────────────────────────────────────
@@ -525,7 +681,18 @@ const SELECT_COLS = `
   c.media_id, c.chunk_index, c.start_time, c.end_time, c.content,
   m.title AS media_title`;
 
-const searchKeyword = async (query) => {
+// Visibility predicate, shared by all three modes. A chunk is searchable when
+// its media item is published, or when the caller may see drafts. The boolean
+// is a bound parameter rather than string-built SQL so the query text stays
+// identical for every caller and stays in the plan cache.
+//
+// CRITICAL for hybrid: this has to sit INSIDE each ranking CTE, not only in the
+// final SELECT. The CTEs take the top FUSE_DEPTH candidates first — filtering
+// afterwards would let hidden chunks consume candidate slots and silently hand
+// a student a shorter, worse-ranked list rather than an equivalent one.
+const VISIBLE = (privilegedParam) => `(m.is_published OR ${privilegedParam}::boolean)`;
+
+const searchKeyword = async (query, canSeeUnpublished) => {
   const result = await pool.query(
     `SELECT
        ${SELECT_COLS},
@@ -534,14 +701,15 @@ const searchKeyword = async (query) => {
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
+       AND ${VISIBLE("$2")}
      ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
      LIMIT ${SEARCH_LIMIT}`,
-    [query]
+    [query, canSeeUnpublished]
   );
   return result.rows;
 };
 
-const searchSemantic = async (query) => {
+const searchSemantic = async (query, canSeeUnpublished) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
   const result = await pool.query(
     `SELECT
@@ -551,19 +719,21 @@ const searchSemantic = async (query) => {
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE c.embedding IS NOT NULL
+       AND ${VISIBLE("$2")}
      ORDER BY c.embedding <=> $1::vector
      LIMIT ${SEARCH_LIMIT}`,
-    [queryVector]
+    [queryVector, canSeeUnpublished]
   );
   return result.rows;
 };
 
-const searchHybrid = async (query) => {
+const searchHybrid = async (query, canSeeUnpublished) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
-  // $1 = query text (FTS), $2 = query embedding (vector). Each CTE ranks its own
-  // top FUSE_DEPTH; the FULL OUTER JOIN unions the two id sets and RRF sums the
-  // reciprocal ranks. ts_headline highlights the FTS terms (semantic-only hits
-  // simply have no terms to highlight, which is fine).
+  // $1 = query text (FTS), $2 = query embedding (vector), $3 = may see drafts.
+  // Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN unions the two id
+  // sets and RRF sums the reciprocal ranks. ts_headline highlights the FTS terms
+  // (semantic-only hits simply have no terms to highlight, which is fine).
+  // Both CTEs join media_items solely to apply the visibility predicate.
   const result = await pool.query(
     `WITH kw AS (
        SELECT c.id,
@@ -571,7 +741,9 @@ const searchHybrid = async (query) => {
            ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
          ) AS rank
        FROM transcript_chunks c
+       JOIN media_items m ON c.media_id = m.id
        WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
+         AND ${VISIBLE("$3")}
        ORDER BY rank
        LIMIT ${FUSE_DEPTH}
      ),
@@ -579,7 +751,9 @@ const searchHybrid = async (query) => {
        SELECT c.id,
          row_number() OVER (ORDER BY c.embedding <=> $2::vector) AS rank
        FROM transcript_chunks c
+       JOIN media_items m ON c.media_id = m.id
        WHERE c.embedding IS NOT NULL
+         AND ${VISIBLE("$3")}
        ORDER BY c.embedding <=> $2::vector
        LIMIT ${FUSE_DEPTH}
      ),
@@ -600,7 +774,7 @@ const searchHybrid = async (query) => {
      JOIN media_items m ON c.media_id = m.id
      ORDER BY f.score DESC
      LIMIT ${CANDIDATE_LIMIT}`,
-    [query, queryVector]
+    [query, queryVector, canSeeUnpublished]
   );
 
   // Rerank the candidates with GPT-4o for true relevance ordering + scoring.
@@ -616,9 +790,9 @@ const searchHybrid = async (query) => {
   }
 };
 
-export const searchTranscripts = async (query, mode = "hybrid") => {
-  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length}`);
-  if (mode === "keyword") return searchKeyword(query);
-  if (mode === "semantic") return searchSemantic(query);
-  return searchHybrid(query);
+export const searchTranscripts = async (query, mode = "hybrid", canSeeUnpublished = false) => {
+  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length} privileged=${canSeeUnpublished}`);
+  if (mode === "keyword") return searchKeyword(query, canSeeUnpublished);
+  if (mode === "semantic") return searchSemantic(query, canSeeUnpublished);
+  return searchHybrid(query, canSeeUnpublished);
 };

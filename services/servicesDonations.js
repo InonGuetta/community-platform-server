@@ -1,6 +1,5 @@
 import Stripe from "stripe";
 import { pool } from "../db/pool.js";
-import { notFound } from "../lib/AppError.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -20,13 +19,22 @@ export const createPaymentIntent = async (donorId, amountCents, currency, type) 
   return { donation: result.rows[0], clientSecret: paymentIntent.client_secret };
 };
 
+// Returns the updated row, or null when nothing was applied — either the
+// payment intent is unknown to us, or the donation is already completed.
+//
+// `status <> 'completed'` makes this safe to call more than once and guards the
+// ordering hazard: Stripe can redeliver an event, and a delayed
+// payment_intent.payment_failed arriving after a success must not flip a paid
+// donation back to failed. Not throwing is deliberate — see the webhook
+// controller for why a missing donation must not become an error.
 export const updateDonationStatus = async (stripePaymentIntent, status) => {
   const result = await pool.query(
-    "UPDATE donations SET status=$1 WHERE stripe_payment_intent=$2 RETURNING *",
+    `UPDATE donations SET status=$1
+     WHERE stripe_payment_intent=$2 AND status <> 'completed'
+     RETURNING *`,
     [status, stripePaymentIntent]
   );
-  if (result.rows.length === 0) throw notFound("Donation not found");
-  return result.rows[0];
+  return result.rows[0] || null;
 };
 
 export const getDonationsByUser = async (userId) => {

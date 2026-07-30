@@ -34,6 +34,24 @@ export const getSessionById = async (id) => {
   return result.rows[0];
 };
 
+// The socket layer knows a room by its token, not its id.
+export const getSessionByRoomToken = async (roomToken) => {
+  const result = await pool.query("SELECT * FROM live_sessions WHERE room_token=$1", [roomToken]);
+  return result.rows[0] || null;
+};
+
+// One statement does both the authorization and the state change: the WHERE
+// clause IS the "only the host may end this" check, so there is no window
+// between deciding and acting. Returns null when the caller isn't the host.
+export const endSessionByRoomToken = async (roomToken, hostId) => {
+  const result = await pool.query(
+    `UPDATE live_sessions SET is_active=FALSE, ended_at=NOW()
+     WHERE room_token=$1 AND host_id=$2 RETURNING *`,
+    [roomToken, hostId]
+  );
+  return result.rows[0] || null;
+};
+
 export const endSession = async (id, hostId) => {
   const result = await pool.query(
     "UPDATE live_sessions SET is_active=FALSE, ended_at=NOW() WHERE id=$1 AND host_id=$2 RETURNING *",
