@@ -10,6 +10,10 @@ process.env.STRIPE_SECRET_KEY ||= "sk_test_placeholder";
 process.env.GOOGLE_CLIENT_ID ||= "test-client-id";
 process.env.GOOGLE_CLIENT_SECRET ||= "test-client-secret";
 
+// Tests that exercise error paths log by design; at the default "debug" level
+// that buries the actual test output. Overridable for a run that needs to see it.
+process.env.LOG_LEVEL ||= "error";
+
 // Replaces pool.query for one test and restores it afterwards. The pool is a
 // shared object, so this has to be undone or the next test inherits the stub.
 export const stubPoolQuery = (pool, impl) => {

@@ -480,6 +480,95 @@ export const triggerPipeline = async (mediaId) => {
   return { queued: true, mediaId, jobId: job.id };
 };
 
+// ── Reconciliation ───────────────────────────────────────────────────────────
+// Media that should have a transcript but has nothing to show for it.
+//
+// triggerPipeline talks to Redis (getJob) BEFORE it writes the 'pending' row, so
+// a trigger issued while the queue is down leaves no trace at all: no row, no
+// job, and nothing in the UI to say a transcription was ever asked for. That is
+// how an upload sat untranscribed for two days without anyone noticing.
+//
+// Deliberately narrow — only the two states that are unambiguously stranded:
+//   * no transcripts row at all
+//   * a row at 'pending' with no live job (the trigger died between the INSERT
+//     and the add(), or the job vanished with the queue's Redis data)
+// 'processing' is left alone: another worker may legitimately be on it, and
+// re-queuing would pay for the same audio twice. 'error' is left alone too —
+// that job already ran and was already billed, and retrying it automatically on
+// every reconnect would re-buy the same failure on a loop. Both stay behind the
+// lecturer's deliberate press of "הפעל תמלול".
+const stranded = `
+  SELECT m.id
+  FROM media_items m
+  LEFT JOIN transcripts t ON t.media_id = m.id
+  WHERE m.media_type <> 'text'
+    AND (t.media_id IS NULL OR t.status = 'pending')
+  ORDER BY m.id`;
+
+// Each queued job is a real Whisper bill, so a sweep that suddenly finds a lot
+// of work is far more likely to be a mistake (a restored backup, a bad
+// migration) than a genuine backlog. Queue a bounded batch and say what was
+// held back; the next reconnect picks up where this left off.
+const MAX_RECONCILE_PER_RUN = Number(process.env.MAX_RECONCILE_PER_RUN) || 10;
+
+// getJob/add have no timeout of their own: if Redis disappears mid-sweep they
+// hang indefinitely instead of rejecting, which would strand the exclusive lock
+// and silently disable every future reconcile until the worker restarts — in a
+// feature whose whole point is surviving exactly that. Bound the wait so a queue
+// that dies underneath us costs one skipped item, not all of them. The abandoned
+// call is still observed by the race, so its late rejection is never unhandled.
+const TRIGGER_TIMEOUT_MS = 10_000;
+
+const triggerWithTimeout = (mediaId) => {
+  let timer;
+  return Promise.race([
+    triggerPipeline(mediaId),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("queue did not respond in time")), TRIGGER_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+};
+
+export const reconcileMissingTranscripts = () =>
+  withExclusive(
+    "reconcile-transcripts",
+    runReconcileMissingTranscripts,
+    "Reconciliation is already running"
+  );
+
+const runReconcileMissingTranscripts = async () => {
+  const { rows } = await pool.query(stranded);
+  if (rows.length === 0) return { found: 0, queued: [], skipped: [], deferred: 0 };
+
+  const batch = rows.slice(0, MAX_RECONCILE_PER_RUN);
+  const deferred = rows.length - batch.length;
+  logger.info(`[BE:svc] reconcile — ${rows.length} media without a usable transcript, taking ${batch.length}`);
+
+  const queued = [];
+  const skipped = [];
+  for (const { id } of batch) {
+    try {
+      // Reuse the real trigger rather than re-implementing it: it owns the job
+      // id convention, the 'already running' check and the 'pending' write, and
+      // a second copy of that logic here is exactly how the two drift apart.
+      await triggerWithTimeout(id);
+      queued.push(id);
+    } catch (err) {
+      // One unqueueable item must not abandon the rest of the sweep. A conflict
+      // is the normal, healthy outcome — the job is already live.
+      skipped.push({ mediaId: id, reason: err.message });
+      logger.debug(`[BE:svc] reconcile mediaId=${id} skipped — ${err.message}`);
+    }
+  }
+
+  logger.info(
+    `[BE:svc] reconcile ✓ queued ${queued.length}${queued.length ? ` (media ${queued.join(", ")})` : ""}` +
+    `${skipped.length ? `, skipped ${skipped.length}` : ""}` +
+    `${deferred ? `, ${deferred} left for the next run` : ""}`
+  );
+  return { found: rows.length, queued, skipped, deferred };
+};
+
 // ── Transcript search ────────────────────────────────────────────────────────
 // Three modes, all returning the SAME row shape so the client never needs to
 // branch on mode: { media_id, chunk_index, start_time, end_time, content,

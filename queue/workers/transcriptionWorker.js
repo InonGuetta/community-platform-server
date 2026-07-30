@@ -9,7 +9,7 @@ import ffmpeg from "fluent-ffmpeg";
 import { transcriptionQueue } from "../transcriptionQueue.js";
 import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
-import { saveChunks } from "../../services/servicesTranscripts.js";
+import { saveChunks, reconcileMissingTranscripts } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
@@ -233,6 +233,43 @@ const sweepStaleTempDirs = async () => {
 };
 
 sweepStaleTempDirs();
+
+// Catch up on anything stranded while the queue was unreachable.
+//
+// On 'ready' rather than at startup, because the queue being *usable* is the
+// thing that matters and that is not the same moment as the process starting:
+// ioredis emits this on the first successful connection and again after every
+// reconnect, so a Redis that was down at boot — or that disappeared for two days
+// — still triggers the sweep the moment it comes back.
+//
+// Only the worker installs this. The API server holds a queue client too, and
+// running it in both would have two processes racing to queue the same jobs.
+const RECONCILE_DEBOUNCE_MS = 60_000;
+let lastReconcileAt = 0;
+
+transcriptionQueue.client.on("ready", async () => {
+  // A flapping connection re-emits 'ready' repeatedly. The DB sweep behind this
+  // is cheap, but the jobs it queues are not, so collapse bursts.
+  if (Date.now() - lastReconcileAt < RECONCILE_DEBOUNCE_MS) return;
+  lastReconcileAt = Date.now();
+
+  try {
+    const { found, queued, deferred } = await reconcileMissingTranscripts();
+    if (found === 0) {
+      logger.debug("[WORKER:transcription] reconcile — nothing stranded");
+    } else {
+      logger.info(
+        `[WORKER:transcription] reconcile — queued ${queued.length} of ${found} stranded media` +
+        `${deferred ? ` (${deferred} deferred to the next run)` : ""}`
+      );
+    }
+  } catch (err) {
+    // Never fatal: the worker's real job is processing the queue, and a failed
+    // catch-up sweep must not stop it from doing that.
+    logger.error(`[WORKER:transcription] reconcile failed (non-fatal) — ${err.message}`);
+  }
+});
+
 installWorkerLifecycle("transcription", transcriptionQueue);
 
 logger.info("[WORKER:transcription] Transcription worker started, waiting for jobs...");
