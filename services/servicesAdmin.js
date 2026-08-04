@@ -1,3 +1,4 @@
+// @ts-check
 import { pool } from "../db/pool.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { llmQueue } from "../queue/llmQueue.js";

@@ -1,0 +1,48 @@
+name: CI
+
+# Every push and every pull request. The tests are fast (a few seconds) and
+# hermetic — test/setup.js assigns placeholder values for every variable read at
+# import time, so nothing here reaches a real database, Redis, S3 bucket or
+# OpenAI account. That is what makes it safe to run on a fork's pull request.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Do not cancel the other version when one fails: knowing whether a
+      # failure is version-specific is the reason for testing two.
+      fail-fast: false
+      matrix:
+        # 20 is the oldest release this is expected to run on; 22 is what a
+        # current deployment would use. Development happens on 23, so the
+        # matrix is what catches a syntax or API that is newer than the floor.
+        node: [20, 22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` and not `npm install`: it installs exactly what the lockfile
+      # pins, so a run cannot silently pick up a newer transitive dependency and
+      # produce a result that does not match anyone's machine.
+      - run: npm ci
+
+      - run: npm run lint
+
+      # Type checking is opt-in per file (a "// @ts-check" comment), so this
+      # verifies the files that have opted in and says nothing about the rest.
+      # Its job is to stop an already-checked file from regressing as the set
+      # grows — see the header of jsconfig.json.
+      - run: npm run typecheck
+
+      - run: npm test

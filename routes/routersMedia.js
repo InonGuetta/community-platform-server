@@ -77,6 +77,7 @@ router.put("/update/:id", canManage, validateIntParam("id"), controllersMedia.up
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
 router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
 router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);
+router.get("/:id/download/audio", validateIntParam("id"), controllersMedia.downloadMediaAudio);
 router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
 router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);
 

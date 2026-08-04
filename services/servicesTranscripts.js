@@ -1,5 +1,9 @@
+// @ts-check
 import { pool } from "../db/pool.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
+import { llmQueue } from "../queue/llmQueue.js";
+import { chunkTextByParagraph } from "../lib/textChunks.js";
+import { isExtractableText } from "../lib/mediaFormats.js";
 import { embedQuery, toVectorLiteral } from "./servicesEmbeddings.js";
 import { makeOpenAI } from "../lib/openaiClient.js";
 import { logger } from "../lib/logger.js";
@@ -91,10 +95,21 @@ const ANALYSIS_MAP_PROMPT = `אתה מקבל קטע מתוך תמלול של ה�
 // scales with length so a 3-hour lecture (~22k words) gets ~10–15 sections, not
 // a fixed 3, while a short clip stays at 3. The model picks the exact number
 // within this range based on how many distinct topics actually exist.
-const keyPointRange = (wordCount) => {
+//
+// A book is where the previous version broke down. It clamped `max` to 20 but
+// derived `min` from the raw length, so a 250k-word book produced min=136 with
+// max=20 — and the prompt then asked the model for "between 136 and 20 points",
+// which is not a range at all. `max` is now computed first and `min` is clamped
+// beneath it, so the pair is ordered for any length.
+const MAX_KEY_POINTS = 20;
+// Books get a higher ceiling than lectures: 20 points over 400 pages is a table
+// of contents with most of the chapters missing.
+export const MAX_KEY_POINTS_TEXT = 30;
+
+const keyPointRange = (wordCount, cap = MAX_KEY_POINTS) => {
   const target = Math.round(wordCount / 1800);
-  const min = Math.max(3, target - 2);
-  const max = Math.min(20, Math.max(min + 2, target + 3));
+  const max = Math.min(cap, Math.max(5, target + 3));
+  const min = Math.max(3, Math.min(target - 2, max - 2));
   return { min, max };
 };
 
@@ -120,23 +135,83 @@ const summarizeBatch = async (text) => {
   return r.choices[0].message.content.trim();
 };
 
-export const analyzeTranscript = async (rawText) => {
-  const words = rawText.split(/\s+/);
-  const { min, max } = keyPointRange(words.length);
-  let input = rawText;
+// How many map calls may be in flight at once.
+//
+// The map stage used to be a plain sequential loop, which is fine for the six
+// batches a long lecture produces and painful for the fifty a book produces —
+// fifty round trips end to end is most of an hour. Concurrency is bounded
+// rather than unbounded because these calls share the org's per-minute token
+// budget: three 5,000-word batches in flight is ~22k tokens against a 30k TPM
+// limit, so this stays under it in the normal case and the SDK's Retry-After
+// handling absorbs the rest.
+const MAP_CONCURRENCY = Number(process.env.LLM_MAP_CONCURRENCY) || 3;
 
-  if (words.length > ANALYSIS_BATCH_WORDS) {
-    const batches = [];
-    for (let i = 0; i < words.length; i += ANALYSIS_BATCH_WORDS) {
-      batches.push(words.slice(i, i + ANALYSIS_BATCH_WORDS).join(" "));
+// A ceiling on the fold below, purely as a stop against a pathological input
+// that somehow never shrinks. Two levels already cover a 250k-word book.
+const MAX_FOLD_DEPTH = 4;
+
+// Run `fn` over `items` with at most `limit` concurrent calls, preserving input
+// order in the output. Order matters: the partial summaries are fed back to the
+// model as a sequential account of the text, so shuffling them would scramble
+// the narrative and the order of the key points derived from it.
+const mapWithConcurrency = async (items, limit, fn) => {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runner = async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index], index);
     }
-    logger.debug(`[BE:svc] analyzeTranscript — long text ${words.length} words → ${batches.length} batch(es) (map)`);
-    const partials = [];
-    for (let i = 0; i < batches.length; i++) {
-      logger.debug(`[BE:svc]   map ${i + 1}/${batches.length} → GPT-4o`);
-      partials.push(await summarizeBatch(batches[i]));
-    }
-    input = partials.join("\n\n");
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, runner));
+  return results;
+};
+
+const splitIntoBatches = (words, size) => {
+  const batches = [];
+  for (let i = 0; i < words.length; i += size) {
+    batches.push(words.slice(i, i + size).join(" "));
+  }
+  return batches;
+};
+
+// Condense text to a shorter text of ordered partial summaries.
+const foldOnce = async (text, depth) => {
+  const batches = splitIntoBatches(text.split(/\s+/), ANALYSIS_BATCH_WORDS);
+  logger.debug(`[BE:svc] analyzeTranscript — fold ${depth}: ${batches.length} batch(es), concurrency ${MAP_CONCURRENCY}`);
+  let done = 0;
+  const partials = await mapWithConcurrency(batches, MAP_CONCURRENCY, async (batch) => {
+    const summary = await summarizeBatch(batch);
+    logger.debug(`[BE:svc]   fold ${depth}: ${++done}/${batches.length} ✓`);
+    return summary;
+  });
+  return partials.join("\n\n");
+};
+
+// `keyPointCap` lets a book ask for more sections than a lecture; everything
+// else about the analysis is identical for both.
+export const analyzeTranscript = async (rawText, keyPointCap = MAX_KEY_POINTS) => {
+  const wordCount = rawText.trim() ? rawText.trim().split(/\s+/).length : 0;
+  const { min, max } = keyPointRange(wordCount, keyPointCap);
+
+  // Fold REPEATEDLY rather than once. One pass was enough for a lecture, and in
+  // practice is still enough for most books — 50 batches condense to ~3k words,
+  // which fits. But that is a property of how tersely the model happens to
+  // summarise, not a guarantee, and the single-pass version had no recourse if
+  // the condensed text was still too long: it sent it anyway and the call died
+  // on the token limit. Looping costs nothing when one pass suffices and is the
+  // difference between working and failing when it does not.
+  let input = rawText;
+  let depth = 0;
+  while (
+    (input.trim() ? input.trim().split(/\s+/).length : 0) > ANALYSIS_BATCH_WORDS &&
+    depth < MAX_FOLD_DEPTH
+  ) {
+    input = await foldOnce(input, ++depth);
+  }
+  if (depth > 0) {
+    logger.debug(`[BE:svc] analyzeTranscript — ${wordCount} words condensed in ${depth} fold(s) → ${input.split(/\s+/).length} words`);
   }
 
   const r = await openai.chat.completions.create({
@@ -323,29 +398,49 @@ const splitSegmentsToChunks = (segments) => {
   return chunks;
 };
 
-export const saveChunks = async (mediaId, segments) => {
-  const chunks = splitSegmentsToChunks(segments);
-  logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} — ${segments.length} segments → ${chunks.length} chunks`);
+// Replace a media item's chunks atomically.
+//
+// DELETE + INSERT must be atomic: a failure mid-write previously left a media
+// item with a partial set of chunks. Both run in one transaction, and every
+// chunk goes in a single multi-row statement.
+//
+// One writer for both sources. Audio chunks carry start_time/end_time and no
+// character offsets; document chunks carry char_start/char_end and no times.
+// Each simply leaves the other's columns null — which is what migration 013
+// made possible, and what keeps there from being two copies of this transaction
+// drifting apart.
+//
+// Batched because a book is not a lecture: a 250k-word book is ~500 chunks at
+// 7 parameters each, and Postgres caps a statement at 65535 parameters. The
+// audio path never came close and so never needed this.
+const INSERT_BATCH = 500;
 
-  // DELETE + INSERT must be atomic: a failure mid-write previously left a media
-  // item with a partial set of chunks. Run both in one transaction, and insert
-  // every chunk in a single multi-row statement (chunk counts are in the tens,
-  // far under Postgres' parameter limit).
+const writeChunks = async (mediaId, chunks) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("DELETE FROM transcript_chunks WHERE media_id=$1", [mediaId]);
 
-    if (chunks.length > 0) {
+    for (let offset = 0; offset < chunks.length; offset += INSERT_BATCH) {
+      const batch = chunks.slice(offset, offset + INSERT_BATCH);
       const values = [];
       const params = [];
-      chunks.forEach((chunk, i) => {
-        const o = i * 5;
-        values.push(`($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5})`);
-        params.push(mediaId, chunk.chunk_index, chunk.start_time, chunk.end_time, chunk.content);
+      batch.forEach((chunk, i) => {
+        const o = i * 7;
+        values.push(`($${o + 1}, $${o + 2}, $${o + 3}, $${o + 4}, $${o + 5}, $${o + 6}, $${o + 7})`);
+        params.push(
+          mediaId,
+          chunk.chunk_index,
+          chunk.start_time ?? null,
+          chunk.end_time ?? null,
+          chunk.content,
+          chunk.char_start ?? null,
+          chunk.char_end ?? null
+        );
       });
       await client.query(
-        `INSERT INTO transcript_chunks (media_id, chunk_index, start_time, end_time, content)
+        `INSERT INTO transcript_chunks
+           (media_id, chunk_index, start_time, end_time, content, char_start, char_end)
          VALUES ${values.join(", ")}`,
         params
       );
@@ -358,8 +453,24 @@ export const saveChunks = async (mediaId, segments) => {
   } finally {
     client.release();
   }
+  return chunks.length;
+};
 
+export const saveChunks = async (mediaId, segments) => {
+  const chunks = splitSegmentsToChunks(segments);
+  logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} — ${segments.length} segments → ${chunks.length} chunks`);
+  await writeChunks(mediaId, chunks);
   logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} ✓ ${chunks.length} chunks written`);
+  return chunks.length;
+};
+
+// The document equivalent of saveChunks: paragraph-aligned chunks with
+// character offsets instead of timestamps.
+export const saveTextChunks = async (mediaId, text) => {
+  const chunks = chunkTextByParagraph(text);
+  logger.debug(`[BE:svc] saveTextChunks mediaId=${mediaId} — ${text.length} chars → ${chunks.length} chunks`);
+  await writeChunks(mediaId, chunks);
+  logger.debug(`[BE:svc] saveTextChunks mediaId=${mediaId} ✓ ${chunks.length} chunks written`);
   return chunks.length;
 };
 
@@ -444,11 +555,23 @@ export const triggerPipeline = async (mediaId) => {
     logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ media not found`);
     throw notFound("Media not found");
   }
-  if (media.rows[0].media_type === "text") {
-    logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ text media`);
-    throw badRequest("Transcription is not available for text media");
+
+  const { s3_key: s3Key, media_type: mediaType } = media.rows[0];
+  const isText = mediaType === "text";
+
+  // Documents skip transcription entirely and go straight to the LLM queue,
+  // whose worker extracts the text and then summarises it. Refusing a format we
+  // cannot read HERE — before a row is written or a job queued — is what turns
+  // "the summary silently never appeared" into an error the lecturer sees the
+  // instant they press the button.
+  if (isText && !isExtractableText(s3Key)) {
+    logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ unsupported text format ${s3Key}`);
+    throw badRequest("לא ניתן להפיק סיכום מקובץ מסוג זה. נתמכים: PDF, DOCX, TXT.");
   }
-  logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${media.rows[0].media_type} s3Key=${media.rows[0].s3_key}`);
+
+  const queue = isText ? llmQueue : transcriptionQueue;
+  const label = isText ? "Summary" : "Transcription";
+  logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${mediaType} s3Key=${s3Key} queue=${isText ? "llm" : "transcription"}`);
 
   // A fixed job id per media item is what stops a double-click from paying for
   // two full transcriptions. Bull ignores an add() whose id already exists.
@@ -457,25 +580,31 @@ export const triggerPipeline = async (mediaId) => {
   // so the id stays taken after a successful run and a legitimate re-trigger
   // would be silently swallowed. So inspect it first — refuse while the job is
   // still live, and clear a finished one to free the id for a fresh run.
+  //
+  // The id is scoped per queue, so a document's `media:7` and a lecture's
+  // `media:7` never collide — they are different queues and cannot both apply
+  // to the same media item anyway.
   const jobId = `media:${mediaId}`;
-  const existing = await transcriptionQueue.getJob(jobId);
+  const existing = await queue.getJob(jobId);
   if (existing) {
     const state = await existing.getState();
     if (["active", "waiting", "delayed"].includes(state)) {
       logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ already ${state}`);
-      throw conflict("Transcription is already running for this media", "ALREADY_QUEUED");
+      throw conflict(`${label} is already running for this media`, "ALREADY_QUEUED");
     }
     await existing.remove();
   }
 
+  // error_message is cleared alongside the status: a stale "this file is a scan"
+  // must not sit next to a fresh run that is still in progress.
   await pool.query(
     `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
-     ON CONFLICT (media_id) DO UPDATE SET status='pending', updated_at=NOW()`,
+     ON CONFLICT (media_id) DO UPDATE SET status='pending', error_message=NULL, updated_at=NOW()`,
     [mediaId]
   );
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
 
-  const job = await transcriptionQueue.add({ mediaId, s3Key: media.rows[0].s3_key }, { jobId });
+  const job = await queue.add({ mediaId, s3Key }, { jobId });
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ job queued id=${job.id}`);
   return { queued: true, mediaId, jobId: job.id };
 };
@@ -497,6 +626,12 @@ export const triggerPipeline = async (mediaId) => {
 // that job already ran and was already billed, and retrying it automatically on
 // every reconnect would re-buy the same failure on a loop. Both stay behind the
 // lecturer's deliberate press of "הפעל תמלול".
+//
+// media_type='text' is excluded DELIBERATELY, and this is now a cost decision
+// rather than a limitation. Books have no transcripts row until someone asks for
+// a summary, so including them here would make every Redis reconnect look at an
+// entire library of documents that have "no usable transcript" and queue a paid
+// LLM run for each one. Summarising a book stays behind an explicit press.
 const stranded = `
   SELECT m.id
   FROM media_items m

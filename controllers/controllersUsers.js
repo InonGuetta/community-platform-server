@@ -1,3 +1,4 @@
+// @ts-check
 import * as servicesUsers from "../services/servicesUsers.js";
 
 export const getAllUsers = async (req, res) => {

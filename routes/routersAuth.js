@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import passport from "../config/passport.js";
 import { verifyToken } from "../middleware/auth.js";
 import * as controllersAuth from "../controllers/controllersAuth.js";
+import { env } from "../lib/env.js";
 
 const router = Router();
 
@@ -21,7 +22,7 @@ router.get("/me", verifyToken, controllersAuth.getMe);
 
 router.get("/google", passport.authenticate("google", { scope: ["profile", "email"], session: false }));
 router.get("/google/callback",
-  passport.authenticate("google", { session: false, failureRedirect: `${process.env.CLIENT_URL || "http://localhost:5173"}/sign-in?error=google_failed` }),
+  passport.authenticate("google", { session: false, failureRedirect: `${env.clientUrl}/sign-in?error=google_failed` }),
   controllersAuth.googleCallback
 );
 

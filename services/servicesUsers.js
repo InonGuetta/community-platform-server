@@ -1,3 +1,4 @@
+// @ts-check
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict } from "../lib/AppError.js";
@@ -70,6 +71,22 @@ const assertAdminRemains = async (client, id, current, { role, isActive }) => {
 // Shared by updateUser and deleteUser: both mutate a user row and both have to
 // pass the last-admin guard, inside one transaction so the guard and the write
 // can't be separated.
+//
+// Every field is optional, and that is the contract the UPDATE below relies on:
+// each column is written with COALESCE, so an absent field leaves the column
+// alone. Spelled out because deleteUser passes only { isActive } — without the
+// annotation the parameter's shape is inferred from updateUser's fuller object
+// and that call reads as missing four required fields.
+/**
+ * @param {number|string} id
+ * @param {{
+ *   email?: string|null,
+ *   role?: string|null,
+ *   displayName?: string|null,
+ *   avatarUrl?: string|null,
+ *   isActive?: boolean|null,
+ * }} fields
+ */
 const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive }) => {
   const client = await pool.connect();
   try {

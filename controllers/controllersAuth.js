@@ -1,13 +1,15 @@
+// @ts-check
 import jwt from "jsonwebtoken";
 import * as servicesAuth from "../services/servicesAuth.js";
 import { badRequest } from "../lib/AppError.js";
+import { env } from "../lib/env.js";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 const cookieOptions = () => ({
   httpOnly: true,
   sameSite: "lax",
-  secure: process.env.NODE_ENV === "production",
+  secure: env.isProduction,
   maxAge: SEVEN_DAYS_MS,
   path: "/",
 });
@@ -33,10 +35,9 @@ export const login = async (req, res) => {
 
 export const googleCallback = (req, res) => {
   const user = req.user;
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, env.jwtSecret, { expiresIn: "7d" });
   setAuthCookie(res, token);
-  const clientUrl = process.env.CLIENT_URL || "http://localhost:5173";
-  res.redirect(`${clientUrl}/auth/google/callback`);
+  res.redirect(`${env.clientUrl}/auth/google/callback`);
 };
 
 export const logout = (req, res) => {

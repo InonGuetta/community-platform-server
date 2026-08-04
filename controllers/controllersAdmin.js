@@ -1,3 +1,4 @@
+// @ts-check
 import * as servicesAdmin from "../services/servicesAdmin.js";
 
 export const getStats = async (req, res) => {

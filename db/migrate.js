@@ -15,6 +15,9 @@ const files = [
   "010_add_embeddings.sql",
   "011_create_notes.sql",
   "012_add_analyzing_status.sql",
+  "013_text_media_summaries.sql",
+  "014_create_courses.sql",
+  "015_create_likes.sql",
 ];
 
 async function migrate() {

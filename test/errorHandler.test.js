@@ -10,7 +10,9 @@ const run = (err) => {
     status(code) { sent.status = code; return this; },
     json(body) { sent.body = body; return this; },
   };
-  errorHandler(err, { method: "POST", originalUrl: "/api/auth/login" }, res, () => { sent.next = true; });
+  // `path` and not just `originalUrl`: the handler logs the path deliberately,
+  // to keep the query string (where user input lands) out of the error log.
+  errorHandler(err, { method: "POST", path: "/api/auth/login", originalUrl: "/api/auth/login" }, res, () => { sent.next = true; });
   return sent;
 };
 

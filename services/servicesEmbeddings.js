@@ -1,3 +1,4 @@
+// @ts-check
 import { pool } from "../db/pool.js";
 import { makeOpenAI } from "../lib/openaiClient.js";
 import { logger } from "../lib/logger.js";

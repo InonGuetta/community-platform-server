@@ -5,6 +5,8 @@
   "scripts": {
     "test": "node --test",
     "lint": "eslint .",
+    "typecheck": "tsc -p jsconfig.json --noEmit",
+    "smoke": "node scripts/smoke.js",
     "start": "node server.js",
     "dev": "node --watch server.js",
     "worker:transcription": "node --watch queue/workers/transcriptionWorker.js",
@@ -13,7 +15,9 @@
     "seed": "node db/seed.js",
     "migrate:uploads-to-s3": "node db/migrateUploadsToS3.js",
     "backfill:embeddings": "node db/backfillEmbeddings.js",
+    "extract:preview": "node scripts/extractPreview.js",
     "fix:stale-sessions": "node db/closeStaleSessions.js",
+    "fix:publish-existing": "node db/publishExistingMedia.js",
     "workers": "concurrently -n transcription,llm -c blue,magenta \"npm:worker:transcription\" \"npm:worker:llm\""
   },
   "dependencies": {
@@ -35,6 +39,7 @@
     "openai": "^4.0.0",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.16.3",
     "sanitize-html": "^2.17.5",
     "socket.io": "^4.0.0",
@@ -42,8 +47,14 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.1.2",
     "concurrently": "^9.0.0",
     "eslint": "^9.39.5",
-    "globals": "^17.8.0"
+    "globals": "^17.8.0",
+    "supertest": "^7.2.2",
+    "typescript": "^7.0.2"
   }
 }

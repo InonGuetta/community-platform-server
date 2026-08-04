@@ -1,0 +1,48 @@
+{
+  // Type checking for plain JavaScript — no build step, no .ts files, nothing
+  // emitted. `npm run typecheck` runs tsc in --noEmit mode purely to report
+  // mistakes, and the editor uses the same settings so the feedback matches.
+  //
+  // The important setting is checkJs: false. Checking is OPT-IN per file, via a
+  // "// @ts-check" comment at the top. Turning it on repository-wide would
+  // produce hundreds of errors at once and the only practical response would be
+  // to switch it back off; opting in file by file means every file that carries
+  // the comment is genuinely clean, and the set only grows.
+  //
+  // Currently opted in: lib/, middleware/, sockets/, services/, controllers/
+  // and app.js — 42 files, zero errors. Not yet: db/, queue/, routes/ and the
+  // scripts. Add "// @ts-check" to one, run `npm run typecheck`, fix what it
+  // says. The whole set above cost three real fixes, all of which turned an
+  // undocumented assumption into a stated one.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    // The package is "type": "module", so this has to match or every relative
+    // import with a .js extension is reported as unresolvable.
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    // Off for now. The value in this first pass is catching wrong property
+    // names and wrong argument counts; turning strict on would bury those under
+    // null-check noise on code that has been running correctly for months.
+    "strict": false,
+    "noImplicitAny": false,
+    // Third-party .d.ts files are not ours to fix, and checking them adds
+    // seconds to every run for errors nobody here can act on.
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "lib/**/*.js",
+    "middleware/**/*.js",
+    "sockets/**/*.js",
+    "app.js",
+    "services/**/*.js",
+    "controllers/**/*.js",
+    // Declaration files only — see types/socket-io.d.ts for what and why.
+    "types/**/*.d.ts"
+  ],
+  "exclude": ["node_modules", "uploads", "dist"]
+}

@@ -2,76 +2,17 @@ import "dotenv/config";
 // Must stay directly after dotenv/config and above every other import — see the
 // header of lib/checkEnv.js for why the position is load-bearing.
 import "./lib/checkEnv.js";
-import express from "express";
 import { createServer } from "http";
-import cors from "cors";
-import helmet from "helmet";
-import cookieParser from "cookie-parser";
-import passport from "./config/passport.js";
+import { createApp } from "./app.js";
 import { pool } from "./db/pool.js";
 import { transcriptionQueue } from "./queue/transcriptionQueue.js";
 import { llmQueue } from "./queue/llmQueue.js";
 import { initSockets } from "./sockets/socketManager.js";
-import { errorHandler } from "./middleware/errorHandler.js";
 import { logger } from "./lib/logger.js";
-import routersAuth from "./routes/routersAuth.js";
-import routersUsers from "./routes/routersUsers.js";
-import routersMedia from "./routes/routersMedia.js";
-import routersSessions from "./routes/routersSessions.js";
-import routersTranscripts from "./routes/routersTranscripts.js";
-import routersBookmarks from "./routes/routersBookmarks.js";
-import routersNotes from "./routes/routersNotes.js";
-import routersDonations from "./routes/routersDonations.js";
-import routersAdmin from "./routes/routersAdmin.js";
 
-const app = express();
-
-app.use(helmet());
-app.use(cors({ origin: process.env.CLIENT_URL || "http://localhost:5173", credentials: true }));
-
-// Stripe verifies the webhook signature against the raw request body, so it must
-// NOT be JSON-parsed. Skip the global parser for that one route; the donations
-// router re-parses it with express.raw(). Every other route still gets JSON.
-//
-// limit: a saved transcript carries the full edited text in the body. A multi-hour
-// Hebrew lecture is hundreds of KB (UTF-8 Hebrew is ~2 bytes/char), well past the
-// 100KB body-parser default — which silently rejected the PUT with 413 and lost
-// the edit. 20mb leaves ample headroom for any realistic transcript.
-const jsonParser = express.json({ limit: "20mb" });
-app.use((req, res, next) => {
-  if (req.originalUrl === "/api/donations/webhook") return next();
-  jsonParser(req, res, next);
-});
-
-app.use(cookieParser());
-app.use(passport.initialize());
-
-app.use("/api/auth", routersAuth);
-app.use("/api/users", routersUsers);
-app.use("/api/media", routersMedia);
-app.use("/api/sessions", routersSessions);
-app.use("/api/transcripts", routersTranscripts);
-app.use("/api/bookmarks", routersBookmarks);
-app.use("/api/notes", routersNotes);
-app.use("/api/donations", routersDonations);
-app.use("/api/admin", routersAdmin);
-
-// Unauthenticated by design — a probe has to reach it. So it reports only
-// whether the service is usable: the raw driver message used to go out with it,
-// which tells an anonymous caller about the database behind this.
-// 503 rather than 500, matching how errorHandler classifies a dependency that
-// is unreachable rather than a fault in the request.
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({ ok: true });
-  } catch (err) {
-    logger.error(`[health] database check failed: ${err.message}`);
-    res.status(503).json({ ok: false });
-  }
-});
-
-app.use(errorHandler);
+// The application itself lives in app.js, so the tests can exercise the real
+// middleware chain without any of the process lifecycle below.
+const app = createApp();
 
 const httpServer = createServer(app);
 const io = initSockets(httpServer);
