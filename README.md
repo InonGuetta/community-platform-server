@@ -13,6 +13,32 @@ Copy `.env.example` to `.env` first. The server validates its environment at
 boot and refuses to start with a single message listing everything that is
 missing, so a bad `.env` fails immediately instead of at the first request.
 
+## Summarising documents
+
+Audio and video go through Whisper; documents (`media_type='text'` — PDF, DOCX,
+TXT) skip transcription and go straight to the LLM worker, which extracts the
+text itself and then follows the identical summary path.
+
+Before summarising a real book, check what extraction actually produced:
+
+```bash
+npm run extract:preview -- "C:/path/to/book.pdf"
+```
+
+No database, no Redis, no OpenAI, no cost. It prints the word/chunk counts, an
+estimate of how many LLM calls a real run would make, and the text itself. This
+exists because Hebrew in a PDF can come out with the letters reversed or a
+commentary column woven through the main text — and none of that is visible from
+a summary that reads plausibly. **Read the output before paying for a run.**
+
+A scanned PDF (images, no text layer) is detected and rejected with an
+explanation rather than summarised into confident nonsense. OCR is not supported.
+Legacy `.doc` is refused too — re-save as `.docx`.
+
+Unlike transcription, a document is never queued automatically: the reconcile
+sweep deliberately ignores text media, so summarising a book always takes an
+explicit press of "הפק סיכום".
+
 ## Tests and linting
 
 ```bash

@@ -5,6 +5,7 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { pool } from "./pool.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { getMimeType } from "../lib/mediaFormats.js";
+import { env } from "../lib/env.js";
 
 // Moves media that predates S3 out of the local uploads directory.
 //
@@ -29,7 +30,7 @@ const uploadOne = async (filename, filePath) => {
   await new Upload({
     client: s3,
     params: {
-      Bucket: process.env.S3_BUCKET,
+      Bucket: env.s3Bucket,
       Key: key,
       Body: fs.createReadStream(filePath),
       ContentType: getMimeType(filename),

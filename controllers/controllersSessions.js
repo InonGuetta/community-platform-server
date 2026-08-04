@@ -1,3 +1,4 @@
+// @ts-check
 import * as servicesSessions from "../services/servicesSessions.js";
 import { badRequest } from "../lib/AppError.js";
 

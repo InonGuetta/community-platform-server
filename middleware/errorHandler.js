@@ -1,4 +1,7 @@
+// @ts-check
 import { logger } from "../lib/logger.js";
+import { ERROR_CODES } from "../lib/AppError.js";
+import { env } from "../lib/env.js";
 
 // Postgres SQLSTATEs / Node errno codes that indicate the DB connection
 // itself died (idle drop, cold pool, network reset). Surfacing these as
@@ -41,17 +44,28 @@ export const errorHandler = (err, req, res, next) => {
   // else is unexpected: log the stack, return a generic message, and only reveal
   // the real message outside production.
   if (err?.expose && err.statusCode) {
-    return res.status(err.statusCode).json({ message: err.message });
+    // `code` is spread in only when present, so an AppError constructed without
+    // one still answers exactly the body it always did.
+    return res.status(err.statusCode).json({
+      message: err.message,
+      ...(err.code && { code: err.code }),
+    });
   }
 
   if (isDbConnError(err)) {
-    logger.warn(`DB connection error on ${req.method} ${req.originalUrl}: ${err.message}`);
-    return res.status(503).json({ message: "Database temporarily unavailable, please retry" });
+    logger.warn(`DB connection error on ${req.method} ${req.path}: ${err.message}`);
+    return res.status(503).json({
+      message: "Database temporarily unavailable, please retry",
+      code: ERROR_CODES.DB_UNAVAILABLE,
+    });
   }
 
-  logger.error(`Unhandled error on ${req.method} ${req.originalUrl}:`, err.stack || err);
+  // req.path rather than originalUrl: the query string is where user input
+  // lands (?search=…, ?code=… on the OAuth callback), and this line goes to the
+  // log at error level where it is kept the longest.
+  logger.error(`Unhandled error on ${req.method} ${req.path}:`, err.stack || err);
 
-  const body = { message: "Internal server error" };
-  if (process.env.NODE_ENV !== "production") body.error = err.message;
+  const body = { message: "Internal server error", code: ERROR_CODES.INTERNAL };
+  if (!env.isProduction) body.error = err.message;
   res.status(500).json(body);
 };

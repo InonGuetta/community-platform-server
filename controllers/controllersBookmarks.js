@@ -1,3 +1,4 @@
+// @ts-check
 import * as servicesBookmarks from "../services/servicesBookmarks.js";
 import { requireSeconds, optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";

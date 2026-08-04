@@ -1,3 +1,4 @@
+// @ts-check
 import * as servicesNotes from "../services/servicesNotes.js";
 import { optionalId, optionalSeconds } from "../lib/validate.js";
 

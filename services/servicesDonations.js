@@ -1,3 +1,4 @@
+// @ts-check
 import Stripe from "stripe";
 import { pool } from "../db/pool.js";
 

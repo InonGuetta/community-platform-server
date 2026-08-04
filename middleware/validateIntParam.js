@@ -1,3 +1,4 @@
+// @ts-check
 // Guard for numeric route params (our ids are SERIAL/INT). Without this a
 // non-numeric id like /api/media/abc reaches Postgres as "invalid input syntax
 // for integer" and surfaces as a confusing 500. Reject it early with a clean 400.

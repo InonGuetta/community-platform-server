@@ -1,3 +1,4 @@
+// @ts-check
 import Stripe from "stripe";
 import * as servicesDonations from "../services/servicesDonations.js";
 import { logger } from "../lib/logger.js";

@@ -1,7 +1,9 @@
+// @ts-check
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { pool } from "../db/pool.js";
 import { conflict, unauthorized, notFound } from "../lib/AppError.js";
+import { env } from "../lib/env.js";
 
 const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8.U8nJ.JtbCmHkY2Z9Y6XYC8N7yL3a";
 
@@ -18,7 +20,7 @@ export const register = async (email, password, displayName) => {
     [normalizedEmail, password_hash, displayName]
   );
   const user = result.rows[0];
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, env.jwtSecret, { expiresIn: "7d" });
   return { user, token };
 };
 
@@ -32,7 +34,7 @@ export const login = async (email, password) => {
   const valid = await bcrypt.compare(password, hashToCompare);
   if (!user || !valid) throw unauthorized("Invalid credentials");
 
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
+  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, env.jwtSecret, { expiresIn: "7d" });
   const { password_hash, ...safeUser } = user;
   return { user: safeUser, token };
 };

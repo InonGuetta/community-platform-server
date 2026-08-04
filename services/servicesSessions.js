@@ -1,3 +1,4 @@
+// @ts-check
 import { randomUUID } from "crypto";
 import { pool } from "../db/pool.js";
 import { notFound, forbidden } from "../lib/AppError.js";

@@ -1,5 +1,7 @@
+// @ts-check
 import jwt from "jsonwebtoken";
 import { pool } from "../db/pool.js";
+import { env } from "../lib/env.js";
 
 // Verify the JWT, then re-check the user against the DB on every request. The
 // token is valid for 7 days and carries a role snapshot; without this lookup a
@@ -12,7 +14,7 @@ export const verifyToken = async (req, res, next) => {
 
   let payload;
   try {
-    payload = jwt.verify(token, process.env.JWT_SECRET);
+    payload = jwt.verify(token, env.jwtSecret);
   } catch {
     return res.status(401).json({ message: "Invalid token" });
   }

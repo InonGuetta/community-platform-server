@@ -14,6 +14,7 @@ import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
+import { env } from "../../lib/env.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
@@ -44,7 +45,7 @@ const resolveSourcePath = async (s3Key) => {
     throw new Error(`S3 not configured but s3_key is remote: ${s3Key}`);
   }
   const { Body } = await s3.send(
-    new GetObjectCommand({ Bucket: process.env.S3_BUCKET, Key: s3Key })
+    new GetObjectCommand({ Bucket: env.s3Bucket, Key: s3Key })
   );
   const tmpPath = path.join(os.tmpdir(), `src-${randomUUID()}${path.extname(s3Key)}`);
   await fs.promises.writeFile(tmpPath, Buffer.concat(await collect(Body)));

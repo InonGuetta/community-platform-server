@@ -1,3 +1,4 @@
+// @ts-check
 import { pool } from "../db/pool.js";
 import { notFound } from "../lib/AppError.js";
 
