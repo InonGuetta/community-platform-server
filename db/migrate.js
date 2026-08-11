@@ -1,3 +1,4 @@
+// @ts-check
 import "dotenv/config";
 import { readFileSync } from "fs";
 import { pool } from "./pool.js";
@@ -18,6 +19,7 @@ const files = [
   "013_text_media_summaries.sql",
   "014_create_courses.sql",
   "015_create_likes.sql",
+  "016_create_saves.sql",
 ];
 
 async function migrate() {

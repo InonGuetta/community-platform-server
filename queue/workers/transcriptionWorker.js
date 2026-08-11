@@ -1,8 +1,10 @@
+// @ts-check
 import "dotenv/config";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
+import { pipeline } from "stream/promises";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
@@ -27,15 +29,26 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // middlebox issue (AV/firewall/ISP DPI); the SDK still waits and retries.
 const openai = makeOpenAI(3);
 
-const collect = async (stream) => {
-  const chunks = [];
-  for await (const chunk of stream) chunks.push(chunk);
-  return chunks;
-};
+// Cleanup that must never itself become the reason a job fails. Declared here
+// rather than beside their other callers below because resolveSourcePath needs
+// them too.
+const safeUnlink = (p) => fs.promises.unlink(p).catch(() => {});
+const safeRmDir = (p) => fs.promises.rm(p, { recursive: true, force: true }).catch(() => {});
 
 // Get a local filesystem path for the source media. Local uploads are already
 // on disk; S3 objects are streamed down to a temp file first. Returns
 // { path, isTemp } so the caller knows whether to delete it afterwards.
+//
+// STREAMED to disk, never buffered. This used to collect the whole object into
+// an array of chunks and Buffer.concat it, which holds the entire file in the
+// heap twice at the moment of the concat — for the multi-hour lectures this
+// pipeline exists to serve, that is gigabytes, and Node's default heap limit
+// kills the process before ffmpeg is ever reached. The failure mode was the
+// worst kind: the worker dies without running its own catch, so nothing writes
+// status='error' and the row sits at 'processing' forever while the page polls
+// it for two hours. lib/storage.js already says buffering "would not be [fine]
+// for media"; controllersMedia.resolveSeekablePath already streams. This is now
+// the third place that agrees.
 const resolveSourcePath = async (s3Key) => {
   if (s3Key.startsWith("local/")) {
     const filename = s3Key.slice("local/".length);
@@ -48,7 +61,16 @@ const resolveSourcePath = async (s3Key) => {
     new GetObjectCommand({ Bucket: env.s3Bucket, Key: s3Key })
   );
   const tmpPath = path.join(os.tmpdir(), `src-${randomUUID()}${path.extname(s3Key)}`);
-  await fs.promises.writeFile(tmpPath, Buffer.concat(await collect(Body)));
+  try {
+    await pipeline(/** @type {import("stream").Readable} */ (Body), fs.createWriteStream(tmpPath));
+  } catch (err) {
+    // A download cut off half-way leaves a partial file the caller never learns
+    // about — it only receives a path on success, so nothing else would remove
+    // it. Truncated media is also worse than none: ffmpeg would happily segment
+    // whatever arrived and we would transcribe half a lecture and call it done.
+    await safeUnlink(tmpPath);
+    throw new Error(`could not download ${s3Key} from S3: ${err.message}`);
+  }
   return { path: tmpPath, isTemp: true };
 };
 
@@ -104,9 +126,6 @@ const transcribeSegment = async (filePath, offsetSeconds) => {
     end: s.end + offsetSeconds,
   }));
 };
-
-const safeUnlink = (p) => fs.promises.unlink(p).catch(() => {});
-const safeRmDir = (p) => fs.promises.rm(p, { recursive: true, force: true }).catch(() => {});
 
 transcriptionQueue.process(async (job) => {
   const { mediaId, s3Key } = job.data;
@@ -187,9 +206,24 @@ transcriptionQueue.process(async (job) => {
     if (err.code) logger.error(`[WORKER:transcription]   err.code:`, err.code);
     if (err.cause) logger.error(`[WORKER:transcription]   cause:`, err.cause?.message || err.cause, "code:", err.cause?.code);
     if (err.response?.data) logger.error(`[WORKER:transcription]   openai response:`, err.response.data);
+    // The stack, for the errors the fields above cannot describe. An OpenAI or
+    // ffmpeg failure identifies itself in its message; a TypeError raised inside
+    // saveChunks does not, and the message alone gives no way to find the line —
+    // in a job that took an hour and cost real money to reach.
+    if (err.stack) logger.debug(`[WORKER:transcription]   stack:`, err.stack);
+
+    // .catch, not a bare await: the failures that get here are frequently
+    // accompanied by an unreachable database (the pool is the thing most likely
+    // to be down alongside everything else), and an UPDATE that throws inside a
+    // catch block REPLACES the original error. The log would then report a
+    // connection timeout for a job that actually died in ffmpeg, and Bull would
+    // record the wrong reason, because `throw err` below never runs. This is the
+    // shape llmWorker already uses.
     await pool.query(
       "UPDATE transcripts SET status='error', updated_at=NOW() WHERE media_id=$1",
       [mediaId]
+    ).catch((dbErr) =>
+      logger.error(`[WORKER:transcription]   could not set status='error': ${dbErr.message} — the row stays at 'processing'`)
     );
     throw err;
   } finally {
@@ -202,12 +236,18 @@ transcriptionQueue.process(async (job) => {
 
 installQueueErrorLogging("transcription", transcriptionQueue);
 
-// The per-job `finally` removes the segment directory, but that only runs if
-// the process survives to reach it. A crash or a hard kill leaves the segments
-// behind — a few MB per orphaned run, on a disk that now also holds every
-// upload. Sweep once at startup; the age cut-off is well past the longest
-// plausible job so a concurrently-running worker's directory is never touched.
+// The per-job `finally` removes the segment directory AND the downloaded
+// source, but that only runs if the process survives to reach it. A crash or a
+// hard kill leaves both behind, on a disk that now also holds every upload.
+// Sweep once at startup; the age cut-off is well past the longest plausible job
+// so a concurrently-running worker's files are never touched.
+//
+// Both prefixes, not just the segments: `src-` is the staged copy of the
+// original upload and is by far the larger of the two — a whole lecture video
+// against a few MB of 64kbps mp3 — so sweeping only `transcribe-` reclaimed the
+// smaller half and left the reason the disk filled up sitting there.
 const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
+const TEMP_PREFIXES = ["transcribe-", "src-"];
 
 const sweepStaleTempDirs = async () => {
   const tmp = os.tmpdir();
@@ -215,7 +255,7 @@ const sweepStaleTempDirs = async () => {
     const entries = await fs.promises.readdir(tmp);
     const cutoff = Date.now() - STALE_TEMP_AGE_MS;
     let removed = 0;
-    for (const entry of entries.filter((e) => e.startsWith("transcribe-"))) {
+    for (const entry of entries.filter((e) => TEMP_PREFIXES.some((p) => e.startsWith(p)))) {
       const full = path.join(tmp, entry);
       try {
         const stat = await fs.promises.stat(full);
@@ -227,7 +267,7 @@ const sweepStaleTempDirs = async () => {
         // Being read or removed by someone else — skip it.
       }
     }
-    if (removed > 0) logger.info(`[WORKER:transcription] swept ${removed} stale temp dir(s)`);
+    if (removed > 0) logger.info(`[WORKER:transcription] swept ${removed} stale temp file(s)/dir(s)`);
   } catch (err) {
     logger.warn(`[WORKER:transcription] temp sweep skipped: ${err.message}`);
   }

@@ -1,31 +1,44 @@
 // @ts-check
 import { pool } from "../db/pool.js";
 
+// Both reads below take the SAME `includeUnpublished`, decided once in the
+// controller from isPrivileged(req.user) — the helper that already governs
+// whether the archive, the media page and the stream hand out drafts.
+//
+// Previously only the first of the two filtered drafts, so the two disagreed:
+// the button said אהבתי on an item the likes page refused to show, and a
+// lecturer's own draft could never light its button at all (the row was already
+// there, so pressing again was a no-op). One flag for both keeps the answer the
+// same wherever it is asked. See servicesSaves.js, which has the same pair.
+
 // Returns the liked MEDIA rows, not the like rows: the likes page renders the
 // same cards as the archive, so it needs what those cards read (title, type,
 // publish state, ownership). `liked_at` rides along so the list can be ordered
 // by when the user liked it rather than when the lecture was uploaded.
-//
-// Unpublished items are filtered out. An item can be liked and then withdrawn
-// from publication, and the archive would no longer show it — leaving it here
-// would make the likes page the one screen that still hands it out.
-export const getLikedMediaByUser = async (userId) => {
+export const getLikedMediaByUser = async (userId, includeUnpublished = false) => {
   const result = await pool.query(
     `SELECT m.*, l.created_at AS liked_at
      FROM likes l
      JOIN media_items m ON m.id = l.media_id
-     WHERE l.user_id = $1 AND m.is_published = TRUE
+     WHERE l.user_id = $1 AND ($2 OR m.is_published = TRUE)
      ORDER BY l.created_at DESC`,
-    [userId]
+    [userId, includeUnpublished]
   );
   return result.rows;
 };
 
 // Just the media ids. The media page needs to know whether ONE item is liked,
 // and the archive would need it for many; shipping the id set once is cheaper
-// than a per-item request and is small enough to hold in the client store.
-export const getLikedMediaIds = async (userId) => {
-  const result = await pool.query("SELECT media_id FROM likes WHERE user_id=$1", [userId]);
+// than a per-item request and is small enough to hold in the client store. The
+// join exists only for the visibility test.
+export const getLikedMediaIds = async (userId, includeUnpublished = false) => {
+  const result = await pool.query(
+    `SELECT l.media_id
+     FROM likes l
+     JOIN media_items m ON m.id = l.media_id
+     WHERE l.user_id = $1 AND ($2 OR m.is_published = TRUE)`,
+    [userId, includeUnpublished]
+  );
   return result.rows.map((r) => r.media_id);
 };
 

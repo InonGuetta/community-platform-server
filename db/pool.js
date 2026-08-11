@@ -1,3 +1,4 @@
+// @ts-check
 import { Pool } from "pg";
 import { logger, debugEnabled } from "../lib/logger.js";
 
@@ -91,9 +92,9 @@ const timed = async (label, original, text, params) => {
 
 pool.query = instrument("pg", pool.query.bind(pool));
 
-// Transactions (servicesUsers, servicesTranscripts) take a client out of the
-// pool and run their statements on it, so without this they would be the only
-// SQL in the app that never appears in the log.
+// Transactions (servicesUsers, services/transcripts/chunks.js) take a client out
+// of the pool and run their statements on it, so without this they would be the
+// only SQL in the app that never appears in the log.
 //
 // The guard matters: pg RECYCLES clients, so the same object comes back on a
 // later checkout. Wrapping unconditionally would wrap the wrapper, again on

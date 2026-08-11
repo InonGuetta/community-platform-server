@@ -1,3 +1,4 @@
+// @ts-check
 import "dotenv/config";
 // Must stay directly after dotenv/config and above every other import — see the
 // header of lib/checkEnv.js for why the position is load-bearing.
@@ -69,7 +70,12 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 
 // An unhandled rejection is usually one broken path rather than a poisoned
 // process, so it is logged (with the stack) and the server keeps serving.
-process.on("unhandledRejection", (err) => logger.error("unhandledRejection:", err?.stack || err));
+// `instanceof Error` rather than `err?.stack || err`: a promise can be rejected
+// with anything — a string, undefined — and the old form printed "undefined" for
+// those, losing the only notice we get.
+process.on("unhandledRejection", (err) =>
+  logger.error("unhandledRejection:", err instanceof Error ? err.stack : err)
+);
 
 // After an uncaughtException the process state is undefined, so the correct
 // move is to shut down and let a supervisor start a clean one. That is only an
@@ -96,7 +102,10 @@ const PORT = process.env.PORT || 3001;
 // one has released the port, so the fresh process hits EADDRINUSE and (being
 // an unhandled 'error' event) crashes outright instead of retrying — dropping
 // any request that was in flight during the restart. Retry the bind instead.
-httpServer.on("error", (err) => {
+// ErrnoException, not Error: `code` is what distinguishes EADDRINUSE from every
+// other listen failure, and it lives on Node's errno subtype rather than on the
+// base Error the 'error' event is declared with.
+httpServer.on("error", (/** @type {NodeJS.ErrnoException} */ err) => {
   if (shuttingDown) return;
   if (err.code === "EADDRINUSE") {
     logger.warn(`Port ${PORT} still in use, retrying in 500ms...`);

@@ -2,16 +2,22 @@
 import * as servicesLikes from "../services/servicesLikes.js";
 import { optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";
+import { isPrivileged } from "../lib/permissions.js";
 
 // The likes page wants full media rows to render cards; the media page and the
 // archive only want to know which ids are liked, so they can light up a button
 // without pulling every liked lecture down with it. `?ids=1` picks the cheap one.
+//
+// Both are given the SAME visibility, from the same helper the archive uses, so
+// the button and the page cannot disagree about whether a draft counts.
 export const getLikes = async (req, res) => {
+  const includeUnpublished = isPrivileged(req.user);
+
   if (req.query.ids === "1") {
-    const ids = await servicesLikes.getLikedMediaIds(req.user.id);
+    const ids = await servicesLikes.getLikedMediaIds(req.user.id, includeUnpublished);
     return res.status(200).json(ids);
   }
-  const media = await servicesLikes.getLikedMediaByUser(req.user.id);
+  const media = await servicesLikes.getLikedMediaByUser(req.user.id, includeUnpublished);
   res.status(200).json(media);
 };
 

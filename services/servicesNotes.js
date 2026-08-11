@@ -1,6 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { notFound } from "../lib/AppError.js";
+import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // Notes are joined to media so the client can show which lecture a note came
 // from (title) without a second round-trip. media_title is null for free notes.
@@ -33,7 +33,7 @@ export const updateNote = async (id, userId, { title, body }) => {
      WHERE id=$3 AND user_id=$4 RETURNING *`,
     [title ?? null, body ?? null, id, userId]
   );
-  if (result.rows.length === 0) throw notFound("Note not found");
+  if (result.rows.length === 0) throw notFound("Note not found", ERROR_CODES.NOTE_NOT_FOUND);
   return result.rows[0];
 };
 
@@ -42,6 +42,6 @@ export const deleteNote = async (id, userId) => {
     "DELETE FROM notes WHERE id=$1 AND user_id=$2 RETURNING id",
     [id, userId]
   );
-  if (result.rows.length === 0) throw notFound("Note not found");
+  if (result.rows.length === 0) throw notFound("Note not found", ERROR_CODES.NOTE_NOT_FOUND);
   return { deleted: true, id };
 };

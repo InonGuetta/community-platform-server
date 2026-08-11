@@ -17,7 +17,7 @@ import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
 import { isPrivileged, assertCanManageMedia } from "../lib/permissions.js";
 import { requireSeconds, optionalBoolean, optionalId } from "../lib/validate.js";
-import { badRequest, notFound } from "../lib/AppError.js";
+import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // Same bundled binary the transcription worker uses, so the API and the worker
 // cannot end up transcoding with two different ffmpeg builds.
@@ -59,7 +59,7 @@ export const getAllMedia = async (req, res) => {
 export const getMediaById = async (req, res) => {
   const item = await servicesMedia.getMediaById(req.params.id);
   if (!item.is_published && !isPrivileged(req.user)) {
-    return res.status(404).json({ message: "Media not found" });
+    return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
   }
   res.status(200).json(publicMedia(item));
 };
@@ -348,7 +348,7 @@ export const streamMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (!item.is_published && !isPrivileged(req.user)) {
-      return res.status(404).json({ message: "Media not found" });
+      return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
     }
 
     return item.s3_key.startsWith("local/")
@@ -366,7 +366,7 @@ export const downloadMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (!item.is_published && !isPrivileged(req.user)) {
-      return res.status(404).json({ message: "Media not found" });
+      return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
     }
     const ext = item.s3_key.split(".").pop();
 
@@ -426,7 +426,7 @@ export const downloadMediaAudio = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (!item.is_published && !isPrivileged(req.user)) {
-      return res.status(404).json({ message: "Media not found" });
+      return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
     }
     // Audio items already have their own download; documents have no audio at
     // all. Only a video needs this route, so anything else is a client mistake.

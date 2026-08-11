@@ -1,5 +1,13 @@
 # community-platform-server
 
+The API half of a two-repository system. `../ARCHITECTURE.md` maps how the two
+fit together; `../CONTRIBUTING.md` is the file-by-file recipes.
+
+**Read its "four pairs that must be edited together" section before your first
+change.** Two of those pairs straddle the repository boundary, so no test in
+this repository can catch them going out of step — and nothing fails when they
+do.
+
 ## Running
 
 ```bash

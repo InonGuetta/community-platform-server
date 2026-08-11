@@ -1,3 +1,4 @@
+// @ts-check
 import { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";

@@ -2,6 +2,7 @@
 import jwt from "jsonwebtoken";
 import { pool } from "../db/pool.js";
 import { env } from "../lib/env.js";
+import { ERROR_CODES } from "../lib/AppError.js";
 
 // Verify the JWT, then re-check the user against the DB on every request. The
 // token is valid for 7 days and carries a role snapshot; without this lookup a
@@ -10,13 +11,15 @@ import { env } from "../lib/env.js";
 // means downstream handlers always see the current role, not a stale one.
 export const verifyToken = async (req, res, next) => {
   const token = req.cookies?.token;
-  if (!token) return res.status(401).json({ message: "Unauthorized" });
+  if (!token) {
+    return res.status(401).json({ message: "Unauthorized", code: ERROR_CODES.UNAUTHORIZED });
+  }
 
   let payload;
   try {
     payload = jwt.verify(token, env.jwtSecret);
   } catch {
-    return res.status(401).json({ message: "Invalid token" });
+    return res.status(401).json({ message: "Invalid token", code: ERROR_CODES.INVALID_TOKEN });
   }
 
   try {
@@ -25,7 +28,7 @@ export const verifyToken = async (req, res, next) => {
       [payload.id]
     );
     if (result.rows.length === 0) {
-      return res.status(401).json({ message: "Unauthorized" });
+      return res.status(401).json({ message: "Unauthorized", code: ERROR_CODES.UNAUTHORIZED });
     }
     req.user = result.rows[0];
     next();

@@ -1,3 +1,4 @@
+// @ts-check
 import { createQueue } from "./createQueue.js";
 
 // Deliberately NO automatic retry by default, unlike the LLM queue.

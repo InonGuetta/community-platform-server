@@ -1,3 +1,4 @@
+// @ts-check
 import { createQueue } from "./createQueue.js";
 
 // Retries ARE worth it here, unlike the transcription queue.
