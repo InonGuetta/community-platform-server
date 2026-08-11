@@ -11,6 +11,11 @@ const EMBEDDING_MODEL = "text-embedding-3-small";
 // each request well under the payload/token limits for chunk-sized texts.
 const EMBED_BATCH = 100;
 
+// How many embeddings are written per statement. See embedChunksForMedia: this
+// bounds the size of the statement's text, not a parameter count. 100 keeps each
+// one around 2MB and turns a 500-chunk book from 500 round trips into 5.
+const UPDATE_BATCH = 100;
+
 // 5 retries: embedding a long backfill shares the org's per-minute token budget
 // with the rest of the pipeline. A 429 returns Retry-After; the SDK waits and
 // retries so batches self-pace.
@@ -39,6 +44,33 @@ export const embedQuery = async (query) => {
   return vec;
 };
 
+// Pair each row id with ITS OWN vector, in batches of `size`.
+//
+// Pulled out as a pure function purely so it can be tested. The alignment
+// between the two arrays is the whole correctness of the batched write and it is
+// invisible when wrong: an off-by-one hands every chunk its neighbour's
+// embedding, the UPDATE succeeds, and search quietly returns the wrong passages
+// forever. Nothing above this — where `pool` is stubbed and OpenAI is never
+// called — could catch that.
+//
+// Returns [ids[], literals[]] pairs, ready to be the two array parameters.
+export const embeddingBatches = (rows, vectors, size) => {
+  if (rows.length !== vectors.length) {
+    throw new Error(
+      `embeddingBatches: ${rows.length} rows but ${vectors.length} vectors`
+    );
+  }
+  const batches = [];
+  for (let offset = 0; offset < rows.length; offset += size) {
+    const slice = rows.slice(offset, offset + size);
+    batches.push([
+      slice.map((r) => r.id),
+      slice.map((_, i) => toVectorLiteral(vectors[offset + i])),
+    ]);
+  }
+  return batches;
+};
+
 // Embed the chunks of one media item that don't yet have an embedding. Safe to
 // re-run: only rows WHERE embedding IS NULL are touched, so the transcription
 // worker (best-effort) and the backfill script never double-charge. Returns the
@@ -54,10 +86,30 @@ export const embedChunksForMedia = async (mediaId) => {
   }
   logger.debug(`[BE:svc] embedChunksForMedia mediaId=${mediaId} — embedding ${rows.length} chunk(s)`);
   const vectors = await embedTexts(rows.map((r) => r.content));
-  for (let i = 0; i < rows.length; i++) {
+
+  // Written in batches, not one UPDATE per chunk. A lecture is a few dozen
+  // chunks and the round trips were invisible; a 250k-word book is ~500, and 500
+  // sequential round trips to Supabase is minutes of doing nothing but waiting —
+  // at the tail of a job that has already spent an hour and real money.
+  //
+  // UPDATE ... FROM unnest() sends one statement per batch and lets Postgres
+  // join the ids to their vectors.
+  //
+  // Batched for PAYLOAD size, not for the parameter limit that bounds
+  // writeChunks — this sends two array parameters however many rows it carries,
+  // so 65535 is never in reach. What is in reach is the text: a vector literal
+  // is 1536 floats, roughly 20KB, so an unbatched book would be a single ~10MB
+  // statement. The batch also makes an interrupted run cheap, because every
+  // completed batch stays embedded and this only ever selects rows WHERE
+  // embedding IS NULL — a re-run resumes instead of re-buying what already
+  // landed.
+  for (const [ids, literals] of embeddingBatches(rows, vectors, UPDATE_BATCH)) {
     await pool.query(
-      "UPDATE transcript_chunks SET embedding=$1::vector WHERE id=$2",
-      [toVectorLiteral(vectors[i]), rows[i].id]
+      `UPDATE transcript_chunks AS c
+          SET embedding = v.embedding::vector
+         FROM unnest($1::int[], $2::text[]) AS v(id, embedding)
+        WHERE c.id = v.id`,
+      [ids, literals]
     );
   }
   logger.debug(`[BE:svc] embedChunksForMedia mediaId=${mediaId} ✓ ${rows.length} chunk(s) embedded`);

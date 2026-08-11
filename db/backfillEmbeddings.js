@@ -1,3 +1,4 @@
+// @ts-check
 import "dotenv/config";
 import { pool } from "./pool.js";
 import { embedChunksForMedia } from "../services/servicesEmbeddings.js";

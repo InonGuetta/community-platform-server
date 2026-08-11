@@ -1,6 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { notFound, badRequest, conflict } from "../lib/AppError.js";
+import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 
 const TITLE_MAX = 255; // matches VARCHAR(255)
 
@@ -29,7 +29,7 @@ export const getCourseById = async (id) => {
      WHERE c.id=$1`,
     [id]
   );
-  if (result.rows.length === 0) throw notFound("Course not found");
+  if (result.rows.length === 0) throw notFound("Course not found", ERROR_CODES.COURSE_NOT_FOUND);
   return result.rows[0];
 };
 
@@ -86,7 +86,7 @@ export const updateCourse = async (id, data) => {
      WHERE id=$5 RETURNING id`,
     [cleanedTitle, description ?? null, lecturerId ?? null, isActive ?? null, id]
   );
-  if (result.rows.length === 0) throw notFound("Course not found");
+  if (result.rows.length === 0) throw notFound("Course not found", ERROR_CODES.COURSE_NOT_FOUND);
   return getCourseById(id);
 };
 
@@ -95,7 +95,7 @@ export const updateCourse = async (id, data) => {
 // deleting somebody's uploads along with the course.
 export const deleteCourse = async (id) => {
   const result = await pool.query("DELETE FROM courses WHERE id=$1 RETURNING id", [id]);
-  if (result.rows.length === 0) throw notFound("Course not found");
+  if (result.rows.length === 0) throw notFound("Course not found", ERROR_CODES.COURSE_NOT_FOUND);
   return { deleted: true, id: result.rows[0].id };
 };
 

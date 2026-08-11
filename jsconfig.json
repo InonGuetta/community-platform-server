@@ -9,11 +9,23 @@
   // to switch it back off; opting in file by file means every file that carries
   // the comment is genuinely clean, and the set only grows.
   //
-  // Currently opted in: lib/, middleware/, sockets/, services/, controllers/
-  // and app.js — 42 files, zero errors. Not yet: db/, queue/, routes/ and the
-  // scripts. Add "// @ts-check" to one, run `npm run typecheck`, fix what it
-  // says. The whole set above cost three real fixes, all of which turned an
-  // undocumented assumption into a stated one.
+  // Everything outside test/ is now opted in — 80 files, zero errors. The
+  // second wave (config/, db/, queue/, routes/, scripts/, server.js) cost five
+  // fixes, and every one of them turned an undocumented assumption into a
+  // stated one rather than silencing a symptom:
+  //
+  //   * two `unhandledRejection` handlers read `err.stack` off a value that can
+  //     be anything a promise was rejected with — they printed "undefined" for
+  //     a rejected string, losing the only notice of it;
+  //   * the EADDRINUSE retry reads `.code`, which lives on Node's errno subtype
+  //     and not on the Error the 'error' event is declared with;
+  //   * passport-google-oauth20 is CommonJS with `module.exports = Strategy`, so
+  //     the default import is the constructor and the named one is what NodeNext
+  //     refuses (both reach the same object at runtime);
+  //   * multer ships no declarations at all — see types/multer.d.ts.
+  //
+  // Keep it that way: a new file gets "// @ts-check" at the top when it is
+  // written, not later.
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022"],
@@ -39,8 +51,14 @@
     "middleware/**/*.js",
     "sockets/**/*.js",
     "app.js",
+    "server.js",
+    "config/**/*.js",
     "services/**/*.js",
     "controllers/**/*.js",
+    "db/**/*.js",
+    "queue/**/*.js",
+    "routes/**/*.js",
+    "scripts/**/*.js",
     // Declaration files only — see types/socket-io.d.ts for what and why.
     "types/**/*.d.ts"
   ],

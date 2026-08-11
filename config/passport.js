@@ -1,5 +1,11 @@
+// @ts-check
 import passport from "passport";
-import { Strategy as GoogleStrategy } from "passport-google-oauth20";
+// Default import, not `{ Strategy as GoogleStrategy }`. The package is CommonJS
+// and does `module.exports = Strategy` (it also hangs a `.Strategy` off it, which
+// is why the named form happened to work at runtime) — so under NodeNext the
+// default IS the constructor, and the named import is the one TypeScript
+// refuses. Same object either way.
+import GoogleStrategy from "passport-google-oauth20";
 import { googleOAuthLogin } from "../services/servicesAuth.js";
 
 passport.use(

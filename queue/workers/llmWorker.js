@@ -1,3 +1,4 @@
+// @ts-check
 import "dotenv/config";
 import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";

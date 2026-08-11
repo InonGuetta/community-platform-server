@@ -255,6 +255,29 @@ test("every response carries the request id the logs are keyed by", async () => 
   }
 });
 
+// Setting the header is only half of it. A response header is invisible to
+// JavaScript cross-origin unless cors() names it under exposedHeaders — only a
+// short safelist is readable by default — so dropping it there strips the id
+// from every browser-side log line while the header itself still goes out.
+//
+// That failure cannot be seen in development, where Vite proxies /api and every
+// request is same-origin, so the rule does not apply. It would surface the first
+// time the client was served from a different origin, as "the ids stopped
+// matching" with nothing broken anywhere. Hence the explicit Origin below.
+test("the request id is readable by the browser cross-origin", async () => {
+  const stub = stubPoolQuery(pool, () => ({ rows: [] }));
+  try {
+    const res = await request(app).get("/api/notes").set("Origin", "http://localhost:5173");
+    const exposed = (res.headers["access-control-expose-headers"] ?? "").toLowerCase();
+    assert.ok(
+      exposed.split(",").map((h) => h.trim()).includes("x-request-id"),
+      `cors() must list X-Request-Id under exposedHeaders; got "${exposed}"`
+    );
+  } finally {
+    stub.restore();
+  }
+});
+
 test("an unexpected error becomes a 500 with a code and no internals", async () => {
   const { token, row } = asUser({ role: "student" });
   let call = 0;

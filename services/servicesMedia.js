@@ -1,6 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { notFound } from "../lib/AppError.js";
+import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // The course and the teaching lecturer travel with every media row so the
 // archive can label a card without a second request per item. `lecturer_name`
@@ -62,7 +62,7 @@ export const getMediaById = async (id) => {
     `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE m.id=$1`,
     [id]
   );
-  if (result.rows.length === 0) throw notFound("Media not found");
+  if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return result.rows[0];
 };
 
@@ -101,13 +101,13 @@ export const updateMedia = async (id, data) => {
     [title, description, isPublished, thumbnailUrl, durationSeconds,
       setCourse, courseId ?? null, setLecturer, lecturerId ?? null, id]
   );
-  if (result.rows.length === 0) throw notFound("Media not found");
+  if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return getMediaById(id);
 };
 
 export const deleteMedia = async (id) => {
   const result = await pool.query("DELETE FROM media_items WHERE id=$1 RETURNING id", [id]);
-  if (result.rows.length === 0) throw notFound("Media not found");
+  if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return { deleted: true, id };
 };
 

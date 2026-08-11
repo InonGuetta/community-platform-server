@@ -1,7 +1,7 @@
 // @ts-check
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
-import { notFound, badRequest, conflict } from "../lib/AppError.js";
+import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
 const normalizeEmail = (email) => email.trim().toLowerCase();
@@ -33,7 +33,7 @@ export const createUser = async (data) => {
   // a "Admin@X.com" that login (which lowercases) would never match.
   const normalizedEmail = normalizeEmail(email);
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
-  if (existing.rows.length > 0) throw conflict("Email already in use");
+  if (existing.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
 
   const password_hash = await bcrypt.hash(password, 12);
   const result = await pool.query(
@@ -64,7 +64,7 @@ const assertAdminRemains = async (client, id, current, { role, isActive }) => {
   );
   const others = rows.filter((row) => row.id !== Number(id));
   if (others.length === 0) {
-    throw badRequest("Cannot remove the last active admin — promote another admin first");
+    throw badRequest("Cannot remove the last active admin — promote another admin first", ERROR_CODES.LAST_ACTIVE_ADMIN);
   }
 };
 
@@ -103,7 +103,7 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
         "SELECT id FROM users WHERE email=$1 AND id<>$2",
         [normalizedEmail, id]
       );
-      if (taken.rows.length > 0) throw conflict("Email already in use", "EMAIL_TAKEN");
+      if (taken.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
     }
 
     await assertAdminRemains(client, id, existing.rows[0], { role, isActive });
@@ -126,7 +126,7 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
     await client.query("ROLLBACK").catch(() => {});
     // Backstop for a race the check above can't cover: two admins claiming the
     // same new email at once. Postgres' unique index is the real guarantee.
-    if (err?.code === "23505") throw conflict("Email already in use", "EMAIL_TAKEN");
+    if (err?.code === "23505") throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
     throw err;
   } finally {
     client.release();

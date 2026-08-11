@@ -30,6 +30,7 @@ import routersTranscripts from "./routes/routersTranscripts.js";
 import routersBookmarks from "./routes/routersBookmarks.js";
 import routersNotes from "./routes/routersNotes.js";
 import routersLikes from "./routes/routersLikes.js";
+import routersSaves from "./routes/routersSaves.js";
 import routersDonations from "./routes/routersDonations.js";
 import routersAdmin from "./routes/routersAdmin.js";
 
@@ -52,6 +53,7 @@ export const API_ROUTERS = [
   ["/api/bookmarks", routersBookmarks],
   ["/api/notes", routersNotes],
   ["/api/likes", routersLikes],
+  ["/api/saves", routersSaves],
   ["/api/donations", routersDonations],
   ["/api/admin", routersAdmin],
 ];

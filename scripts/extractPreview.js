@@ -1,3 +1,4 @@
+// @ts-check
 // Extract text from a document and print it — nothing else.
 //
 //   npm run extract:preview -- "C:/path/to/book.pdf"

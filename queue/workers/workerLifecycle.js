@@ -1,3 +1,4 @@
+// @ts-check
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
 
@@ -93,7 +94,11 @@ export const installWorkerLifecycle = (name, queue) => {
     process.on(signal, () => shutdown(signal));
   }
 
+  // `instanceof Error` rather than `err?.stack || err`: a promise can be
+  // rejected with anything at all — a string, undefined — and the old form
+  // printed "undefined" for those, losing the only notice we get. This also
+  // narrows the `unknown` the checker hands us, instead of asserting past it.
   process.on("unhandledRejection", (err) =>
-    logger.error(`[WORKER:${name}] unhandledRejection:`, err?.stack || err)
+    logger.error(`[WORKER:${name}] unhandledRejection:`, err instanceof Error ? err.stack : err)
   );
 };

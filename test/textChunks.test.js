@@ -1,6 +1,20 @@
+import "./setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chunkTextByParagraph, TEXT_CHUNK_WORDS } from "../lib/textChunks.js";
+import { CHUNK_WORDS } from "../services/transcripts/chunks.js";
+
+// Book chunks are sized to match lecture chunks so their search results are
+// comparable — the reranker's preview window and the RRF fusion both assume one
+// scale. The two constants live in different files and were held together by
+// nothing but a comment in each, which is not a mechanism: changing one degrades
+// search quality across the whole archive without failing anything, anywhere.
+test("document chunks are the same size as lecture chunks", () => {
+  assert.equal(
+    TEXT_CHUNK_WORDS, CHUNK_WORDS,
+    "lib/textChunks.js and services/transcripts/chunks.js must agree on chunk size"
+  );
+});
 
 // The chunker decides what a search hit points at and what each embedding
 // represents, so its failures are the quiet kind: a chunk cut through the middle
