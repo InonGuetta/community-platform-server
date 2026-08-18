@@ -25,32 +25,42 @@ jobs:
         node: [20, 22]
 
     steps:
+      # Checked out under "server" rather than at the workspace root, so the
+      # client checkout below lands beside it as a true sibling directory.
+      # test/errorCodeMirror.test.js and test/socketEventMirror.test.js read
+      # the client's source from ../../community-platform-client relative to
+      # this repository's root, and that only resolves if both repositories
+      # share the same parent directory.
       - uses: actions/checkout@v4
+        with:
+          path: server
 
-      # The mirror tests in test/errorCodeMirror.test.js and
-      # test/socketEventMirror.test.js read the client's source as text, so its
-      # repository has to be checked out as a sibling directory for them to find it.
       - uses: actions/checkout@v4
         with:
           repository: InonGuetta/community-platform-client
-          path: ../community-platform-client
+          path: community-platform-client
 
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+          cache-dependency-path: server/package-lock.json
 
       # `npm ci` and not `npm install`: it installs exactly what the lockfile
       # pins, so a run cannot silently pick up a newer transitive dependency and
       # produce a result that does not match anyone's machine.
       - run: npm ci
+        working-directory: server
 
       - run: npm run lint
+        working-directory: server
 
       # Type checking is opt-in per file (a "// @ts-check" comment), so this
       # verifies the files that have opted in and says nothing about the rest.
       # Its job is to stop an already-checked file from regressing as the set
       # grows — see the header of jsconfig.json.
       - run: npm run typecheck
+        working-directory: server
 
       - run: npm test
+        working-directory: server
