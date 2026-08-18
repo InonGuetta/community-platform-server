@@ -6,6 +6,7 @@
 // through.
 import { pool } from "../../db/pool.js";
 import { chunkTextByParagraph } from "../../lib/textChunks.js";
+import { canSeeMediaRow } from "../../lib/permissions.js";
 import { logger } from "../../lib/logger.js";
 import { notFound, ERROR_CODES } from "../../lib/AppError.js";
 
@@ -15,13 +16,27 @@ import { notFound, ERROR_CODES } from "../../lib/AppError.js";
 // and drifting it degrades search quality without failing anything.
 export const CHUNK_WORDS = 500;
 
+// "".split(/\s+/) is [""], not [] — one empty string, which counts as a word.
+//
+// Whisper does emit silent segments, and each one was adding a phantom word to
+// the running total and an extra space to the joined content. Chunks therefore
+// closed slightly early and their text carried doubled spaces into the search
+// index. Filtering here rather than at the call site keeps the "what counts as a
+// word" answer in one place.
+const wordsOf = (text) => String(text ?? "").trim().split(/\s+/).filter(Boolean);
+
 const splitSegmentsToChunks = (segments) => {
   const chunks = [];
   let current = { words: [], start: 0, end: 0 };
   let index = 0;
 
   for (const seg of segments) {
-    const words = seg.text.trim().split(/\s+/);
+    const words = wordsOf(seg.text);
+    // A segment with no words is not a segment of the transcript. Skipped before
+    // it can set a chunk's start time to a moment where nothing was said, or push
+    // the end time past the last actual speech.
+    if (words.length === 0) continue;
+
     if (current.words.length === 0) current.start = seg.start;
 
     current.words.push(...words);
@@ -131,11 +146,15 @@ export const saveTextChunks = async (mediaId, text) => {
 // unpublished draft straight from this endpoint, bypassing the is_published
 // gate that /api/media enforces. Unknown media and hidden media return the same
 // 404 so the endpoint doesn't reveal which ids exist.
-export const getTranscriptByMediaId = async (mediaId, canSeeUnpublished = false) => {
-  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} privileged=${canSeeUnpublished}`);
+export const getTranscriptByMediaId = async (mediaId, visibleCourses = []) => {
+  logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} visible=${JSON.stringify(visibleCourses)}`);
 
   const media = await pool.query("SELECT is_published FROM media_items WHERE id=$1", [mediaId]);
-  if (media.rows.length === 0 || (!media.rows[0].is_published && !canSeeUnpublished)) {
+  // Same rule as the media reads and the search, from the same function. This is
+  // the site the shared predicate exists for: a transcript has no visibility of
+  // its own, it inherits the item's, so the two answering differently is the
+  // definition of a leak.
+  if (media.rows.length === 0 || !canSeeMediaRow(media.rows[0], visibleCourses)) {
     logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not visible`);
     throw notFound("Transcript not found", ERROR_CODES.TRANSCRIPT_NOT_FOUND);
   }

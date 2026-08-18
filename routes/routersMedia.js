@@ -61,6 +61,9 @@ router.use(verifyToken);
 const canManage = requireRole("lecturer", "admin");
 
 router.get("/get-all", controllersMedia.getAllMedia);
+// Before "/:id" — validateIntParam would otherwise reject the literal
+// "continue-watching" as a malformed id and this route would be unreachable.
+router.get("/continue-watching", controllersMedia.getContinueWatching);
 router.get("/:id", validateIntParam("id"), controllersMedia.getMediaById);
 // multer reports a rejected file (wrong type, over the size limit) through its
 // own callback rather than as an AppError, so it needs this wrapper to become a

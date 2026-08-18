@@ -4,18 +4,41 @@ import { logger, debugEnabled } from "../lib/logger.js";
 
 if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
 
-// Supabase silently drops idle connections, which the pool then hands out
-// as dead sockets on the next request. keepAlive keeps the TCP channel
-// alive; the timeouts make sure a dead/cold connection fails fast instead
-// of hanging the request (which is what caused the ECONNRESET on first login).
+// Certificate verification on the database connection, and why it is off by
+// default.
+//
+// The connection IS encrypted either way; what rejectUnauthorized decides is
+// whether the server's certificate is checked against a trusted CA. Supabase
+// presents a chain Node does not trust out of the box, so verifying without
+// supplying its root certificate fails every connection — which is why this was
+// turned off, and then never written down. Left as a bare `false` it reads as a
+// setting nobody chose, and an unverified certificate means a machine positioned
+// between this process and the database can present its own and read every query,
+// passwords and transcripts included.
+//
+// So it stays permissive by DEFAULT — flipping it here would break every existing
+// deployment on the next restart, which is not a change to make on someone's
+// behalf — but it is now one variable, stated in .env.example, rather than a
+// decision buried in a constructor. To tighten it: download the provider's root
+// certificate, point PGSSLROOTCERT at it (Node's TLS stack reads that), and set
+// DATABASE_SSL_STRICT=true.
+const sslStrict = process.env.DATABASE_SSL_STRICT === "true";
+
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: sslStrict },
   keepAlive: true,
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000,
   query_timeout: 15000,
 });
+
+if (!sslStrict) {
+  logger.warn(
+    "[pg pool] TLS certificate verification is disabled (DATABASE_SSL_STRICT is not \"true\") — " +
+    "the connection is encrypted but the server's identity is not checked"
+  );
+}
 
 // A pool-level error (e.g. an idle client dropped by Supabase) will crash the
 // process if nothing listens. Log and swallow — the next acquire opens a fresh

@@ -1,6 +1,11 @@
 // @ts-check
 import "dotenv/config";
 import { pool } from "../db/pool.js";
+import { getActiveUserById } from "../services/servicesAuth.js";
+import { getAllMedia, getContinueWatching } from "../services/servicesMedia.js";
+import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
+import { getNotesByUser } from "../services/servicesNotes.js";
+import { UNRESTRICTED } from "../lib/permissions.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -18,9 +23,14 @@ import { pool } from "../db/pool.js";
 // in CI and NOT in `npm test` — run it by hand after touching db/pool.js, or
 // before a deploy.
 //
-//   npm run smoke
+//   npm run smoke        directly
+//   npm run verify       lint, types, tests, then this
 //
-// Read-only. It creates nothing, changes nothing and drops nothing.
+// Read-only. It creates nothing, changes nothing and drops nothing — which is
+// why `verify` does not also run the migrations. A command that both detects a
+// stale schema and silently fixes it is one somebody eventually points at
+// production to "just check something". Detection and repair stay two commands;
+// when a check below fails on a missing column, the answer is `npm run migrate`.
 
 const TIMEOUT_MS = 10000;
 
@@ -79,24 +89,88 @@ const checks = [
       return "recycled client still usable";
     },
   },
+  // ── From here on, the application's OWN functions ─────────────────────────
+  //
+  // These used to be hand-written queries labelled with the function they stood
+  // for — and one of them, "the users lookup verifyToken runs on every request",
+  // was a COPY of what that lookup used to be. verifyToken later grew a column
+  // (password_changed_at, migration 017) and the copy did not. The result was
+  // this script printing "All checks passed" against a database on which every
+  // authenticated request answered 500.
+  //
+  // That is the third time in this codebase a hand-maintained copy drifted —
+  // after db/migrate.js's file list and the ERROR_CODES mirror — so the fix is
+  // the same one test/routes.test.js already uses: stop copying, call the thing.
+  // A column the code needs and the schema lacks now fails HERE, by the same
+  // route it would fail in the browser.
+  //
+  // All of these are reads. The services they come from import only pool,
+  // permissions and AppError — no queue, no Redis, no OpenAI — so this stays a
+  // script that talks to one database and nothing else.
   {
-    name: "the users lookup verifyToken runs on every request",
+    name: "getActiveUserById (verifyToken, every request)",
     run: async () => {
-      const { rows } = await pool.query(
-        "SELECT id, email, role FROM users WHERE is_active=TRUE LIMIT 1"
-      );
-      return `${rows.length} row(s)`;
+      const { rows } = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
+      if (rows.length === 0) return "no active users to look up — schema reachable";
+      const user = await getActiveUserById(rows[0].id);
+      if (!user) throw new Error("an active user was not returned by its own lookup");
+      return `user ${user.id}`;
     },
   },
   {
-    name: "the media listing the archive page loads",
+    name: "getAllMedia (the archive listing)",
     run: async () => {
-      // Names the two columns migration 014 adds. A schema that has not been
-      // migrated fails here rather than in the browser as a 500.
-      const { rows } = await pool.query(
-        "SELECT m.id, m.title, m.course_id, m.lecturer_id FROM media_items m LIMIT 1"
-      );
-      return `${rows.length} row(s), courses columns present`;
+      // UNRESTRICTED exercises the visibility predicate's null branch; the empty
+      // array exercises the array branch, which is the one a student gets and
+      // the one that casts to int[]. Both, because they are different SQL paths.
+      const all = await getAllMedia({ visibleCourses: UNRESTRICTED });
+      const asStudent = await getAllMedia({ visibleCourses: [] });
+      return `${all.length} visible unrestricted, ${asStudent.length} to an unenrolled student`;
+    },
+  },
+  {
+    name: "getContinueWatching (watch_progress joined to the card columns)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT id FROM users LIMIT 1");
+      if (rows.length === 0) return "no users — query shape checked only";
+      const items = await getContinueWatching(rows[0].id, UNRESTRICTED);
+      return `${items.length} row(s)`;
+    },
+  },
+  {
+    name: "the sessions lists (both states)",
+    run: async () => {
+      // getUpcomingSessions is what covers migration 018's scheduled_at, and it
+      // is the only read that does.
+      const [live, upcoming] = await Promise.all([getActiveSessions(), getUpcomingSessions()]);
+      return `${live.length} live, ${upcoming.length} upcoming`;
+    },
+  },
+  {
+    name: "the notebook listing (notes ordered by hand)",
+    run: async () => {
+      // getNotesByUser is what covers migration 019's sort_order, and it is the
+      // only read that does. Worth a step of its own for the reason this whole
+      // script exists: the notebook is the one screen that is ENTIRELY one
+      // query, so a column the code selects and the schema does not have takes
+      // the page from "a feature is missing" to "the page is a 500".
+      const { rows } = await pool.query("SELECT id FROM users LIMIT 1");
+      if (rows.length === 0) return "no users to read a notebook for";
+      const notes = await getNotesByUser(rows[0].id);
+      return `${notes.length} note(s)`;
+    },
+  },
+  {
+    name: "password_resets exists",
+    run: async () => {
+      // The one hand-written check left, and deliberately so: nothing READS this
+      // table outside a flow that needs a live token, so there is no function to
+      // call. It asserts EXISTENCE rather than a query shape, which is why it
+      // cannot drift the way the copies above did — there is no logic here to
+      // fall out of step with.
+      const { rows } = await pool.query("SELECT to_regclass('public.password_resets') AS table");
+      if (!rows[0].table) throw new Error("missing — migration 017 has not been applied");
+      return "present";
     },
   },
 ];

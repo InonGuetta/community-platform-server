@@ -1,9 +1,10 @@
 // @ts-check
 import { pool } from "../db/pool.js";
+import { visibleMediaSql } from "../lib/permissions.js";
 
-// Both reads below take the SAME `includeUnpublished`, decided once in the
-// controller from isPrivileged(req.user) — the helper that already governs
-// whether the archive, the media page and the stream hand out drafts.
+// Both reads below take the SAME `visibleCourses`, decided once in the
+// controller by visibleCoursesFor(req.user) — the helper that already governs
+// what the archive, the media page and the stream hand out.
 //
 // Previously only the first of the two filtered drafts, so the two disagreed:
 // the button said אהבתי on an item the likes page refused to show, and a
@@ -15,14 +16,14 @@ import { pool } from "../db/pool.js";
 // same cards as the archive, so it needs what those cards read (title, type,
 // publish state, ownership). `liked_at` rides along so the list can be ordered
 // by when the user liked it rather than when the lecture was uploaded.
-export const getLikedMediaByUser = async (userId, includeUnpublished = false) => {
+export const getLikedMediaByUser = async (userId, visibleCourses = []) => {
   const result = await pool.query(
     `SELECT m.*, l.created_at AS liked_at
      FROM likes l
      JOIN media_items m ON m.id = l.media_id
-     WHERE l.user_id = $1 AND ($2 OR m.is_published = TRUE)
+     WHERE l.user_id = $1 AND ${visibleMediaSql("$2")}
      ORDER BY l.created_at DESC`,
-    [userId, includeUnpublished]
+    [userId, visibleCourses]
   );
   return result.rows;
 };
@@ -31,13 +32,13 @@ export const getLikedMediaByUser = async (userId, includeUnpublished = false) =>
 // and the archive would need it for many; shipping the id set once is cheaper
 // than a per-item request and is small enough to hold in the client store. The
 // join exists only for the visibility test.
-export const getLikedMediaIds = async (userId, includeUnpublished = false) => {
+export const getLikedMediaIds = async (userId, visibleCourses = []) => {
   const result = await pool.query(
     `SELECT l.media_id
      FROM likes l
      JOIN media_items m ON m.id = l.media_id
-     WHERE l.user_id = $1 AND ($2 OR m.is_published = TRUE)`,
-    [userId, includeUnpublished]
+     WHERE l.user_id = $1 AND ${visibleMediaSql("$2")}`,
+    [userId, visibleCourses]
   );
   return result.rows.map((r) => r.media_id);
 };

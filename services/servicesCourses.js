@@ -113,11 +113,32 @@ export const getCourseStudents = async (courseId) => {
   return result.rows;
 };
 
-// The courses one student belongs to. This is the query the media filter will
-// eventually be built on, which is why it lives here rather than inline.
+// Just the ids, for the visibility rule. The full rows below are for a screen;
+// this is for a WHERE clause, and shipping a dozen columns per course to build an
+// int[] would be waste on every archive load.
+//
+// An empty array is a real answer — a student enrolled in nothing — and callers
+// must treat it as such rather than as "unknown", which is what `null` means to
+// the predicate this feeds.
+export const getEnrolledCourseIds = async (studentId) => {
+  const result = await pool.query(
+    "SELECT course_id FROM enrollments WHERE student_id=$1",
+    [studentId]
+  );
+  return result.rows.map((row) => Number(row.course_id));
+};
+
+// The courses one student belongs to, in full. This is what the "my courses"
+// screen renders.
+// media_count rides along for the same reason LIST_COLUMNS carries it: the card
+// that renders one of these says how many lessons the course holds, and asking
+// per card would be a request each. student_count is deliberately NOT here — a
+// student has no business knowing who else is enrolled.
 export const getStudentCourses = async (studentId) => {
   const result = await pool.query(
-    `SELECT c.*, u.display_name AS lecturer_name, e.enrolled_at
+    `SELECT c.*, u.display_name AS lecturer_name, e.enrolled_at,
+            (SELECT COUNT(*)::int FROM media_items m
+              WHERE m.course_id = c.id AND m.is_published) AS media_count
      FROM enrollments e
      JOIN courses c ON e.course_id = c.id
      LEFT JOIN users u ON c.lecturer_id = u.id

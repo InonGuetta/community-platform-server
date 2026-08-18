@@ -18,10 +18,21 @@ import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
 import { env } from "../../lib/env.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
+import { parseSegmentStarts, assumedSegmentStarts } from "./segmentOffsets.js";
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
 // comfortably under Whisper's 25MB limit, with margin for VBR jitter.
 const SEGMENT_SECONDS = 600;
+
+// Everything this worker writes to disk goes under one directory of its own,
+// rather than loose in the system temp directory.
+//
+// The startup sweep below is why. It deletes by NAME — anything that begins
+// "transcribe-" or "src-" and is old enough — and the system temp directory is
+// shared with every other process on the box. A prefix is not ownership, and a
+// sweep that goes wrong there takes somebody else's files with it. Owning a
+// directory makes the sweep's boundary a fact rather than a naming convention.
+const WORK_DIR = path.join(os.tmpdir(), "community-platform-transcription");
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -60,7 +71,8 @@ const resolveSourcePath = async (s3Key) => {
   const { Body } = await s3.send(
     new GetObjectCommand({ Bucket: env.s3Bucket, Key: s3Key })
   );
-  const tmpPath = path.join(os.tmpdir(), `src-${randomUUID()}${path.extname(s3Key)}`);
+  await fs.promises.mkdir(WORK_DIR, { recursive: true });
+  const tmpPath = path.join(WORK_DIR, `src-${randomUUID()}${path.extname(s3Key)}`);
   try {
     await pipeline(/** @type {import("stream").Readable} */ (Body), fs.createWriteStream(tmpPath));
   } catch (err) {
@@ -74,29 +86,71 @@ const resolveSourcePath = async (s3Key) => {
   return { path: tmpPath, isTemp: true };
 };
 
+// Where each produced segment actually STARTS on the original recording.
+//
+// The offsets used to be computed as `index * SEGMENT_SECONDS`, and that number
+// is not true. The segment muxer cuts on a frame boundary, never mid-frame, so
+// every piece runs slightly past the requested length — and the excess is one
+// directional error that accumulates down the file. A three-hour lecture ends up
+// with its later timestamps sitting under a second early, which is small but is
+// also pure invention: nothing measured it. Halve SEGMENT_SECONDS and the segment
+// count doubles, and so does the error.
+//
+// So ffmpeg is asked to report the boundaries instead of being second-guessed.
+// `-segment_list` with `-segment_list_type csv` makes the same pass that does the
+// cutting write one line per piece — filename,start,end, in seconds — which is
+// the authoritative answer, costs nothing, and needs no ffprobe binary (the
+// bundled ffmpeg-static ships ffmpeg alone).
+//
+// Falling back to the old arithmetic rather than failing is deliberate: an
+// ffmpeg build that writes the list differently must not kill a job that has
+// already paid for its transcoding. The result is then no worse than before.
+// The parsing itself lives in segmentOffsets.js, where it can be tested without
+// starting this worker.
+const readSegmentStarts = async (listPath, files) => {
+  try {
+    const starts = parseSegmentStarts(await fs.promises.readFile(listPath, "utf8"), files.length);
+    if (starts) return starts;
+    logger.warn(
+      `[WORKER:transcription] segment list did not describe all ${files.length} segment(s) — ` +
+      `falling back to assumed offsets`
+    );
+  } catch (err) {
+    logger.warn(`[WORKER:transcription] could not read the segment list (${err.message}) — falling back to assumed offsets`);
+  }
+  return assumedSegmentStarts(files.length, SEGMENT_SECONDS);
+};
+
 // One ffmpeg pass does everything: strip video, downmix to 16kHz mono 64kbps
 // MP3, AND split into SEGMENT_SECONDS-long pieces. A short file produces a
 // single chunk000.mp3 and goes through the exact same loop — no special case.
-// Returns the temp dir + the ordered list of chunk file paths.
+// Returns the temp dir, the ordered chunk paths, and where each one begins.
 const extractAndSegment = (inputPath) =>
   new Promise((resolve, reject) => {
     fs.promises
-      .mkdtemp(path.join(os.tmpdir(), "transcribe-"))
+      .mkdir(WORK_DIR, { recursive: true })
+      .then(() => fs.promises.mkdtemp(path.join(WORK_DIR, "transcribe-")))
       .then((dir) => {
         const pattern = path.join(dir, "chunk%03d.mp3");
+        const listPath = path.join(dir, "segments.csv");
         ffmpeg(inputPath)
           .noVideo()
           .audioChannels(1)
           .audioFrequency(16000)
           .audioBitrate("64k")
-          .outputOptions(["-f", "segment", "-segment_time", String(SEGMENT_SECONDS)])
+          .outputOptions([
+            "-f", "segment",
+            "-segment_time", String(SEGMENT_SECONDS),
+            "-segment_list", listPath,
+            "-segment_list_type", "csv",
+          ])
           .output(pattern)
           .on("end", async () => {
             const files = (await fs.promises.readdir(dir))
               .filter((f) => f.endsWith(".mp3"))
               .sort() // chunk000, chunk001, ... lexical sort is correct
               .map((f) => path.join(dir, f));
-            resolve({ dir, files });
+            resolve({ dir, files, starts: await readSegmentStarts(listPath, files) });
           })
           .on("error", (err) => {
             // ffmpeg failed after the temp dir was created — remove it here
@@ -147,7 +201,7 @@ transcriptionQueue.process(async (job) => {
 
     logger.debug(`[WORKER:transcription] step 3/6 — extracting + segmenting audio (${SEGMENT_SECONDS}s chunks, 16kHz mono mp3)`);
     const tExtract = Date.now();
-    const { dir, files } = await extractAndSegment(source.path);
+    const { dir, files, starts } = await extractAndSegment(source.path);
     segmentDir = dir;
     logger.debug(`[WORKER:transcription] step 3/6 ✓ produced ${files.length} segment(s) (${Date.now() - tExtract}ms)`);
 
@@ -157,7 +211,9 @@ transcriptionQueue.process(async (job) => {
     const tWhisper = Date.now();
     const allSegments = [];
     for (let i = 0; i < files.length; i++) {
-      const offset = i * SEGMENT_SECONDS;
+      // Where ffmpeg says this piece begins, not where an even division assumed
+      // it would — see readSegmentStarts.
+      const offset = starts[i];
       const tSeg = Date.now();
       const sizeMb = ((await fs.promises.stat(files[i])).size / (1024 * 1024)).toFixed(2);
       logger.debug(`[WORKER:transcription]   segment ${i + 1}/${files.length} (${sizeMb}MB, offset=${offset}s) → Whisper`);
@@ -242,21 +298,27 @@ installQueueErrorLogging("transcription", transcriptionQueue);
 // Sweep once at startup; the age cut-off is well past the longest plausible job
 // so a concurrently-running worker's files are never touched.
 //
-// Both prefixes, not just the segments: `src-` is the staged copy of the
+// Everything swept lives under WORK_DIR, which this worker owns. It used to scan
+// the whole system temp directory and delete anything NAMED "transcribe-*" or
+// "src-*", which is a very different promise: those are ordinary prefixes, the
+// directory is shared with every other process on the machine, and "src-" in
+// particular is a name anything might pick. Nothing had gone wrong, but the sweep
+// was one careless prefix away from deleting files it had no claim to.
+//
+// Both kinds still go, not just the segments: `src-` is the staged copy of the
 // original upload and is by far the larger of the two — a whole lecture video
 // against a few MB of 64kbps mp3 — so sweeping only `transcribe-` reclaimed the
-// smaller half and left the reason the disk filled up sitting there.
+// smaller half and left the reason the disk filled up sitting there. Inside a
+// directory of our own, that is simply "everything old in here".
 const STALE_TEMP_AGE_MS = 24 * 60 * 60 * 1000;
-const TEMP_PREFIXES = ["transcribe-", "src-"];
 
 const sweepStaleTempDirs = async () => {
-  const tmp = os.tmpdir();
   try {
-    const entries = await fs.promises.readdir(tmp);
+    const entries = await fs.promises.readdir(WORK_DIR);
     const cutoff = Date.now() - STALE_TEMP_AGE_MS;
     let removed = 0;
-    for (const entry of entries.filter((e) => TEMP_PREFIXES.some((p) => e.startsWith(p)))) {
-      const full = path.join(tmp, entry);
+    for (const entry of entries) {
+      const full = path.join(WORK_DIR, entry);
       try {
         const stat = await fs.promises.stat(full);
         if (stat.mtimeMs < cutoff) {
@@ -269,6 +331,8 @@ const sweepStaleTempDirs = async () => {
     }
     if (removed > 0) logger.info(`[WORKER:transcription] swept ${removed} stale temp file(s)/dir(s)`);
   } catch (err) {
+    // ENOENT on the first ever run, before any job has created the directory.
+    if (err.code === "ENOENT") return;
     logger.warn(`[WORKER:transcription] temp sweep skipped: ${err.message}`);
   }
 };
