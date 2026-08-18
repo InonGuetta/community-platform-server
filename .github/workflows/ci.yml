@@ -27,6 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The mirror tests in test/errorCodeMirror.test.js and
+      # test/socketEventMirror.test.js read the client's source as text, so its
+      # repository has to be checked out as a sibling directory for them to find it.
+      - uses: actions/checkout@v4
+        with:
+          repository: InonGuetta/community-platform-client
+          path: ../community-platform-client
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
