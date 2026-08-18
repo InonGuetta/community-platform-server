@@ -1,5 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
+import { visibleMediaSql } from "../lib/permissions.js";
 import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // The course and the teaching lecturer travel with every media row so the
@@ -23,7 +24,14 @@ const MEDIA_COLUMNS = `
       SELECT 1 FROM transcripts t
       WHERE t.media_id = m.id AND COALESCE(t.edited_text, '') <> ''
     )
-  ) AS has_transcript`;
+  ) AS has_transcript,
+  -- How many people liked this. Until now a like was recorded and then only ever
+  -- read back to the person who left it, so the button lit up for them and told
+  -- nobody else anything: a lecturer had no way to know a lecture had landed, and
+  -- an archive of hundreds gave no signal about which of them anyone valued.
+  -- Aliased lk, not l — l is already the lecturer join above, and a subquery
+  -- reusing it would silently resolve against the outer scope.
+  (SELECT COUNT(*)::int FROM likes lk WHERE lk.media_id = m.id) AS like_count`;
 
 const MEDIA_JOINS = `
   FROM media_items m
@@ -31,9 +39,36 @@ const MEDIA_JOINS = `
   LEFT JOIN users l ON m.lecturer_id = l.id
   LEFT JOIN courses c ON m.course_id = c.id`;
 
+// What the user typed is a phrase to find, not a pattern to match with.
+//
+// The value is a bound parameter, so this was never an injection — but ILIKE
+// reads % and _ as wildcards wherever they appear, and they appear in real
+// titles. A search for "100%" matched every title starting "100", and one for
+// "פרק_ב" matched "פרקאב". Backslash is Postgres' default LIKE escape, and it
+// has to escape itself first or a title containing one would consume the
+// character after it.
+const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
+
 export const getAllMedia = async (filters = {}) => {
-  let query = `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE 1=1`;
-  const params = [];
+  // The visibility rule opens the WHERE clause rather than being one more
+  // optional `if` below, and that is the point: it is not a filter the caller
+  // may or may not supply, it is the condition under which any of these rows may
+  // be returned at all. `WHERE 1=1` with the rule as an optional addition put it
+  // one forgotten argument away from listing the whole library.
+  // Annotated because the elements are of mixed type: without it the array
+  // infers from its first element and every push below is an error.
+  //
+  // `=== undefined` and NOT `??`, and the difference is the whole rule. null is a
+  // meaningful value here — it is how "unrestricted" is spelled — so `?? []`
+  // silently rewrote every lecturer and admin into someone enrolled in nothing,
+  // emptying the archive of every course lesson and every draft for exactly the
+  // people who are supposed to see them. Only an ABSENT argument may fail closed.
+  //
+  // The same distinction updateMedia draws with `"courseId" in body`, and
+  // optionalSeconds with zero: presence is not the same question as value.
+  /** @type {Array<string|number|boolean|number[]|null>} */
+  const params = [filters.visibleCourses === undefined ? [] : filters.visibleCourses];
+  let query = `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE ${visibleMediaSql("$1")}`;
 
   if (filters.type) {
     params.push(filters.type);
@@ -48,12 +83,43 @@ export const getAllMedia = async (filters = {}) => {
     query += ` AND m.is_published=$${params.length}`;
   }
   if (filters.search) {
-    params.push(`%${filters.search}%`);
+    params.push(`%${escapeLike(filters.search)}%`);
     query += ` AND m.title ILIKE $${params.length}`;
   }
 
   query += " ORDER BY m.created_at DESC";
   const result = await pool.query(query, params);
+  return result.rows;
+};
+
+// "Carry on where you left off" — the watch history, newest first.
+//
+// Built on MEDIA_COLUMNS and MEDIA_JOINS rather than its own column list, because
+// what it returns is rendered by the same cards as the archive: a second list
+// here would drift, and the symptom would be a shelf whose cards quietly lost
+// their course label or their download button.
+//
+// The visibility rule applies to it like everything else, and here it earns its
+// keep twice over: a lecture watched before the student was unenrolled — or
+// before it was unpublished — drops off the shelf instead of sitting there as a
+// card that 404s when clicked.
+//
+// A position of zero is excluded rather than shown: there is nothing to carry on
+// from, and the row exists only because the player reported a position once.
+export const getContinueWatching = async (userId, visibleCourses, limit = 12) => {
+  const result = await pool.query(
+    `SELECT ${MEDIA_COLUMNS},
+            wp.last_position_seconds,
+            wp.last_watched_at
+     ${MEDIA_JOINS}
+     JOIN watch_progress wp ON wp.media_id = m.id
+     WHERE wp.user_id = $1
+       AND wp.last_position_seconds > 0
+       AND ${visibleMediaSql("$2")}
+     ORDER BY wp.last_watched_at DESC
+     LIMIT $3`,
+    [userId, visibleCourses, limit]
+  );
   return result.rows;
 };
 

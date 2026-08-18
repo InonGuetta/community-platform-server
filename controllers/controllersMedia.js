@@ -16,6 +16,7 @@ import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType } from "../lib
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
 import { isPrivileged, assertCanManageMedia } from "../lib/permissions.js";
+import { visibleCoursesFor, canUserSeeMedia } from "../services/servicesVisibility.js";
 import { requireSeconds, optionalBoolean, optionalId } from "../lib/validate.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
@@ -26,6 +27,25 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // s3_key is an internal storage pointer — never ship it to the client. Streaming
 // and downloading go through the dedicated /:id/stream and /:id/download routes.
 const publicMedia = ({ s3_key, ...rest }) => rest;
+
+// Four handlers here load a media item and then have to decide whether this
+// caller may see it — the read, the stream, the download and the audio extract.
+// All four answered 404 rather than 403 for the same reason (an item a student
+// may not see must be indistinguishable from one that does not exist, or the id
+// space becomes a way to enumerate the library), and all four wrote that answer
+// out separately.
+//
+// Returns true when it has already answered, so a call site reads as one line:
+// `if (await refuseIfHidden(req, res, item)) return;`.
+//
+// That shape was chosen in anticipation of exactly this change, and it paid: the
+// enrolment rule made the predicate asynchronous, and one function learned to
+// await rather than four.
+const refuseIfHidden = async (req, res, item) => {
+  if (await canUserSeeMedia(req.user, item)) return false;
+  res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
+  return true;
+};
 
 // Build a Content-Disposition that forces a download and keeps a friendly,
 // UTF-8-safe filename (titles may be Hebrew). filename* carries the real name;
@@ -38,18 +58,19 @@ const downloadDisposition = (title, ext) => {
 
 export const getAllMedia = async (req, res) => {
   const { type, published, search, courseId } = req.query;
-  // Non-privileged users are locked to published items regardless of the query
-  // they send; only lecturers/admins may filter (or list everything).
-  const publishedFilter = isPrivileged(req.user)
-    ? (published !== undefined ? published === "true" : undefined)
-    : true;
-  // A narrowing filter the caller chooses, NOT an access rule: it can only
-  // shrink what they were already entitled to. Restricting a student to the
-  // courses they are enrolled in is a separate change to the visibility gate
-  // above, and is deliberately not part of this one.
+  const privileged = isPrivileged(req.user);
   const items = await servicesMedia.getAllMedia({
     type,
-    published: publishedFilter,
+    // The access rule, applied by the service unconditionally. It used to be
+    // expressed as `published: true` for a student — a filter in the same slot
+    // as the caller's own — so the rule and the preference were one field, and
+    // whether a draft was hidden depended on the controller remembering to set
+    // it. They are now separate arguments because they are separate things.
+    visibleCourses: await visibleCoursesFor(req.user),
+    // A narrowing filter the caller chooses. It can only shrink what they were
+    // already entitled to, and it is meaningless to anyone who cannot see drafts
+    // in the first place — so it is read only for a privileged caller.
+    published: privileged && published !== undefined ? published === "true" : undefined,
     search,
     ...(courseId !== undefined && { courseId: optionalId(courseId, "courseId") }),
   });
@@ -58,9 +79,7 @@ export const getAllMedia = async (req, res) => {
 
 export const getMediaById = async (req, res) => {
   const item = await servicesMedia.getMediaById(req.params.id);
-  if (!item.is_published && !isPrivileged(req.user)) {
-    return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
-  }
+  if (await refuseIfHidden(req, res, item)) return;
   res.status(200).json(publicMedia(item));
 };
 
@@ -347,9 +366,7 @@ const streamS3Object = async (item, req, res) => {
 export const streamMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
-    if (!item.is_published && !isPrivileged(req.user)) {
-      return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
-    }
+    if (await refuseIfHidden(req, res, item)) return;
 
     return item.s3_key.startsWith("local/")
       ? await streamLocalFile(item, req, res)
@@ -365,9 +382,7 @@ export const streamMedia = async (req, res, next) => {
 export const downloadMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
-    if (!item.is_published && !isPrivileged(req.user)) {
-      return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
-    }
+    if (await refuseIfHidden(req, res, item)) return;
     const ext = item.s3_key.split(".").pop();
 
     if (item.s3_key.startsWith("local/")) {
@@ -425,9 +440,7 @@ export const downloadMediaAudio = async (req, res, next) => {
   let temp = null;
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
-    if (!item.is_published && !isPrivileged(req.user)) {
-      return res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
-    }
+    if (await refuseIfHidden(req, res, item)) return;
     // Audio items already have their own download; documents have no audio at
     // all. Only a video needs this route, so anything else is a client mistake.
     if (item.media_type !== "video") {
@@ -477,6 +490,18 @@ export const downloadMediaAudio = async (req, res, next) => {
   } finally {
     if (temp) fs.promises.rm(temp, { force: true }).catch(() => {});
   }
+};
+
+// The shelf that answers "where was I". The watch position has been recorded
+// since the player was written and was only ever read back one lecture at a time,
+// to resume it — so the data to build this had been accumulating all along with
+// nothing reading it across items.
+export const getContinueWatching = async (req, res) => {
+  const items = await servicesMedia.getContinueWatching(
+    req.user.id,
+    await visibleCoursesFor(req.user)
+  );
+  res.status(200).json(items.map(publicMedia));
 };
 
 export const getProgress = async (req, res) => {

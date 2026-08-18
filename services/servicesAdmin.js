@@ -52,6 +52,65 @@ export const getQueueStatus = async () => {
   return { transcription, llm };
 };
 
+// ── What went wrong, and what to do about it ────────────────────────────────
+
+// The failed jobs themselves, not just how many there are.
+//
+// getQueueStatus has reported a `failed` COUNT since the dashboard was built,
+// which tells an admin that something broke and nothing about what. The reason a
+// job failed is the whole diagnostic — "ffmpeg failed", "no readable text", an
+// OpenAI 429 — and it was sitting in Redis with nothing reading it.
+const FAILED_SAMPLE = 20;
+
+const failedFrom = async (queue, label) => {
+  try {
+    const jobs = await withTimeout(queue.getFailed(0, FAILED_SAMPLE - 1), 1500);
+    return jobs.map((job) => ({
+      queue: label,
+      id: String(job.id),
+      mediaId: job.data?.mediaId ?? null,
+      attempts: job.attemptsMade,
+      failedAt: job.finishedOn ?? null,
+      // The message only. A stack from inside a worker is pages long and this
+      // goes to a browser; the request id in the server log is how the full one
+      // is found.
+      reason: String(job.failedReason ?? "").slice(0, 300),
+    }));
+  } catch {
+    // Redis unreachable. null rather than [] so the dashboard can say "cannot
+    // reach the queue" instead of "nothing has failed", which are opposite
+    // things to tell someone investigating.
+    return null;
+  }
+};
+
+export const getFailedJobs = async () => {
+  const [transcription, llm] = await Promise.all([
+    failedFrom(transcriptionQueue, "transcription"),
+    failedFrom(llmQueue, "llm"),
+  ]);
+  return { transcription, llm };
+};
+
+// Media that should have a transcript and has nothing to show for it.
+//
+// The DB half of the same question the queues answer: a job that never got
+// queued at all leaves no failed job to find, which is precisely the case
+// reconcileMissingTranscripts exists for. Shown alongside so an admin can see
+// whether pressing it would do anything.
+export const getStrandedMedia = async () => {
+  const { rows } = await pool.query(
+    `SELECT m.id, m.title, m.media_type, t.status, t.error_message, t.updated_at
+     FROM media_items m
+     LEFT JOIN transcripts t ON t.media_id = m.id
+     WHERE m.media_type <> 'text'
+       AND (t.media_id IS NULL OR t.status IN ('pending', 'error'))
+     ORDER BY t.updated_at DESC NULLS LAST, m.id DESC
+     LIMIT 50`
+  );
+  return rows;
+};
+
 export const getSystemHealth = async () => {
   const checks = { db: false, redis: false };
 

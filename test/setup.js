@@ -7,6 +7,10 @@ process.env.REDIS_URL ||= "redis://127.0.0.1:1";
 process.env.JWT_SECRET ||= "test-secret";
 process.env.OPENAI_API_KEY ||= "sk-test";
 process.env.STRIPE_SECRET_KEY ||= "sk_test_placeholder";
+// Needed by the webhook tests, which sign a body with it and expect the real
+// verification path to accept it. Without a value the controller refuses before
+// any signature is checked, and the test would be asserting the refusal instead.
+process.env.STRIPE_WEBHOOK_SECRET ||= "whsec_test_placeholder";
 process.env.GOOGLE_CLIENT_ID ||= "test-client-id";
 process.env.GOOGLE_CLIENT_SECRET ||= "test-client-secret";
 

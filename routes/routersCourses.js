@@ -21,6 +21,14 @@ router.get("/my", controllersCourses.getMyCourses);
 // Any signed-in user may read the catalogue. Enrollment governs which LESSONS a
 // student sees, not whether courses exist — hiding the list would also hide the
 // course name shown beside a lesson they are entitled to.
+//
+// That first sentence used to be false, and had been since courses were added:
+// it described the intent while getAllMedia filtered on is_published alone, and
+// the comment there said so in as many words — two files stating opposite things
+// about the same rule. Enrolment now genuinely governs it, through the shared
+// predicate in lib/permissions.js. A lesson with no course_id is the general
+// library and stays visible to everyone, which is what every item uploaded before
+// courses existed is.
 router.get("/", controllersCourses.getAllCourses);
 router.get("/:id", validateIntParam("id"), controllersCourses.getCourseById);
 

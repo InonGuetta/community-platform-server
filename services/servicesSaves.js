@@ -1,5 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
+import { visibleMediaSql } from "../lib/permissions.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 
 // The server's word on how long a list's name may be, and the only place this
@@ -13,7 +14,7 @@ const TITLE_MAX = 120;
 
 // ── The general save ────────────────────────────────────────────────────────
 
-// Both reads below take the SAME `includeUnpublished`, and that is the point.
+// Both reads below take the SAME `visibleCourses`, and that is the point.
 //
 // They answer one question — "what has this user saved" — for two different
 // consumers: the page that lists the cards, and the button that lights up on a
@@ -21,10 +22,10 @@ const TITLE_MAX = 120;
 // said נשמר on an item the page refused to show, and nothing the user could do
 // reconciled them.
 //
-// The flag is decided once, in the controller, from isPrivileged(req.user) —
-// the same helper that governs whether the archive, the media page and the
-// stream hand out drafts. So a student sees published items in both places, and
-// a lecturer sees their own draft in both, including a lit button on it.
+// The value is decided once, in the controller, by visibleCoursesFor(req.user) —
+// the same helper that governs what the archive, the media page and the stream
+// hand out. So a student sees the same items in both places, and a lecturer sees
+// their own draft in both, including a lit button on it.
 
 // The saved MEDIA rows, not the save rows: whatever screen lists these renders
 // the same cards as the archive, so it needs what those cards read. `saved_at`
@@ -37,7 +38,7 @@ const TITLE_MAX = 120;
 // or it shows each filed lecture twice: once loose at the top and again inside
 // the list it belongs to. Answered here, next to the query it belongs to, rather
 // than by the client fetching every list's contents to work it out.
-export const getSavedMediaByUser = async (userId, includeUnpublished = false) => {
+export const getSavedMediaByUser = async (userId, visibleCourses = []) => {
   const result = await pool.query(
     `SELECT m.*, s.created_at AS saved_at,
             EXISTS (
@@ -47,9 +48,9 @@ export const getSavedMediaByUser = async (userId, includeUnpublished = false) =>
             ) AS in_list
      FROM saved_items s
      JOIN media_items m ON m.id = s.media_id
-     WHERE s.user_id = $1 AND ($2 OR m.is_published = TRUE)
+     WHERE s.user_id = $1 AND ${visibleMediaSql("$2")}
      ORDER BY s.created_at DESC`,
-    [userId, includeUnpublished]
+    [userId, visibleCourses]
   );
   return result.rows;
 };
@@ -58,13 +59,13 @@ export const getSavedMediaByUser = async (userId, includeUnpublished = false) =>
 // request per lecture, small enough to hold in the client store. The join exists
 // only for the visibility test — without it this cannot apply the same rule as
 // the query above, which is what let the two drift apart.
-export const getSavedMediaIds = async (userId, includeUnpublished = false) => {
+export const getSavedMediaIds = async (userId, visibleCourses = []) => {
   const result = await pool.query(
     `SELECT s.media_id
      FROM saved_items s
      JOIN media_items m ON m.id = s.media_id
-     WHERE s.user_id = $1 AND ($2 OR m.is_published = TRUE)`,
-    [userId, includeUnpublished]
+     WHERE s.user_id = $1 AND ${visibleMediaSql("$2")}`,
+    [userId, visibleCourses]
   );
   return result.rows.map((r) => r.media_id);
 };
@@ -156,7 +157,7 @@ export const getPlaylists = async (userId, mediaId = null) => {
 //
 // Same visibility rule as the flat saved list, from the same flag: a lecture the
 // user may not see is not shown because it happens to sit in a list of theirs.
-export const getPlaylistWithMedia = async (userId, playlistId, includeUnpublished = false) => {
+export const getPlaylistWithMedia = async (userId, playlistId, visibleCourses = []) => {
   const { rows } = await pool.query(
     "SELECT * FROM playlists WHERE id=$1 AND user_id=$2",
     [playlistId, userId]
@@ -167,9 +168,9 @@ export const getPlaylistWithMedia = async (userId, playlistId, includeUnpublishe
     `SELECT m.*, pi.added_at
      FROM playlist_items pi
      JOIN media_items m ON m.id = pi.media_id
-     WHERE pi.playlist_id = $1 AND ($2 OR m.is_published = TRUE)
+     WHERE pi.playlist_id = $1 AND ${visibleMediaSql("$2")}
      ORDER BY pi.added_at DESC`,
-    [playlistId, includeUnpublished]
+    [playlistId, visibleCourses]
   );
   return { ...rows[0], item_count: items.rows.length, items: items.rows };
 };

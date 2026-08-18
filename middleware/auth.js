@@ -1,6 +1,6 @@
 // @ts-check
 import jwt from "jsonwebtoken";
-import { pool } from "../db/pool.js";
+import { getActiveUserById, tokenPredatesPasswordChange } from "../services/servicesAuth.js";
 import { env } from "../lib/env.js";
 import { ERROR_CODES } from "../lib/AppError.js";
 
@@ -23,14 +23,27 @@ export const verifyToken = async (req, res, next) => {
   }
 
   try {
-    const result = await pool.query(
-      "SELECT id, email, role FROM users WHERE id=$1 AND is_active=TRUE",
-      [payload.id]
-    );
-    if (result.rows.length === 0) {
+    // Shared with the socket handshake rather than written out here — see
+    // getActiveUserById for why one copy of this question is load-bearing.
+    const user = await getActiveUserById(payload.id);
+    if (!user) {
       return res.status(401).json({ message: "Unauthorized", code: ERROR_CODES.UNAUTHORIZED });
     }
-    req.user = result.rows[0];
+
+    // A token older than the last password change is spent, whatever its expiry
+    // says. This is what makes "reset my password" end a compromise instead of
+    // merely inconveniencing it — see tokenPredatesPasswordChange.
+    if (tokenPredatesPasswordChange(user, payload.iat)) {
+      return res.status(401).json({
+        message: "Session ended because the password was changed",
+        code: ERROR_CODES.INVALID_TOKEN,
+      });
+    }
+
+    // password_changed_at is fetched for the check above and is nobody's
+    // business downstream — req.user is what handlers read as the caller's
+    // identity, and it has never carried anything but these three.
+    req.user = { id: user.id, email: user.email, role: user.role };
     next();
   } catch (err) {
     next(err);

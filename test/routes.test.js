@@ -59,6 +59,15 @@ const PUBLIC = new Set([
   "post /api/auth/login",
   "get /api/auth/google",            // redirects the browser to Google
   "get /api/auth/google/callback",   // Google redirects back here
+  // Recovery, for the one person who by definition cannot authenticate: someone
+  // who has lost their password. Each answers identically whether or not the
+  // address exists, so being open does not make them an enumeration oracle, and
+  // each sits behind the hourly recoveryLimiter.
+  "post /api/auth/forgot-password",
+  "post /api/auth/reset-password",
+  // Followed from an inbox, often on a device that has never signed in. The
+  // token in the body is the credential.
+  "post /api/auth/verify-email",
   // Stripe calls this server-to-server with no cookie. It authenticates by
   // signature instead, which the controller verifies itself.
   "post /api/donations/webhook",
