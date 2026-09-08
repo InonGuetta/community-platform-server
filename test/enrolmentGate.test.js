@@ -135,10 +135,12 @@ test("a lesson in no course is still reachable by anyone", async () => {
 test("keyword search filters on the caller's courses", async () => {
   const stub = stubPoolQuery(pool, () => ({ rows: [] }));
   try {
-    await searchTranscripts("תפילה", "keyword", []);
+    await searchTranscripts("תפילה", "keyword", { courses: [], drafts: [] });
     const [call] = stub.calls;
     assert.match(call.text, /course_id = ANY/, "the enrolment condition must reach the query");
+    assert.match(call.text, /uploader_id = ANY/, "and so must the drafts condition");
     assert.deepEqual(call.params[1], []);
+    assert.deepEqual(call.params[2], [], "nobody's drafts reach a student's search");
   } finally {
     stub.restore();
   }
@@ -163,7 +165,7 @@ test("the predicate sits inside each of the hybrid ranking CTEs", async () => {
   };
 
   for (const name of ["kw", "vec"]) {
-    assert.match(cte(name), /\$\{VISIBLE\("\$3"\)\}/, `the ${name} CTE must filter before it ranks`);
+    assert.match(cte(name), /\$\{VISIBLE\("\$3", "m", "\$4"\)\}/, `the ${name} CTE must filter before it ranks`);
   }
 });
 
@@ -172,7 +174,7 @@ test("a student in no course sees nothing from any course", async () => {
   // which is the general library and nothing else.
   const stub = stubPoolQuery(pool, () => ({ rows: [] }));
   try {
-    await searchTranscripts("שאלה", "keyword", []);
+    await searchTranscripts("שאלה", "keyword", { courses: [], drafts: [] });
     assert.deepEqual(stub.calls[0].params[1], [], "an empty enrolment list is a real answer");
   } finally {
     stub.restore();
@@ -183,11 +185,11 @@ test("a student in no course sees nothing from any course", async () => {
 
 test("the transcript service refuses before reading any chunk", async () => {
   const stub = stubPoolQuery(pool, (text) => {
-    if (/FROM media_items/i.test(text)) return { rows: [{ is_published: true, course_id: 5 }] };
+    if (/FROM media_items/i.test(text)) return { rows: [{ is_published: true, course_id: 5, uploader_id: 99 }] };
     return { rows: [] };
   });
   try {
-    await assert.rejects(() => getTranscriptByMediaId(3, []), { statusCode: 404 });
+    await assert.rejects(() => getTranscriptByMediaId(3, { courses: [], drafts: [] }), { statusCode: 404 });
     assert.equal(
       stub.calls.some((c) => /FROM transcript_chunks/i.test(c.text)),
       false,
@@ -200,12 +202,12 @@ test("the transcript service refuses before reading any chunk", async () => {
 
 test("the transcript is returned to an enrolled student", async () => {
   const stub = stubPoolQuery(pool, (text) => {
-    if (/FROM media_items/i.test(text)) return { rows: [{ is_published: true, course_id: 5 }] };
+    if (/FROM media_items/i.test(text)) return { rows: [{ is_published: true, course_id: 5, uploader_id: 99 }] };
     if (/FROM transcripts/i.test(text)) return { rows: [{ media_id: 3, status: "done" }] };
     return { rows: [] };
   });
   try {
-    const transcript = await getTranscriptByMediaId(3, [5]);
+    const transcript = await getTranscriptByMediaId(3, { courses: [5], drafts: [] });
     assert.equal(transcript.status, "done");
   } finally {
     stub.restore();

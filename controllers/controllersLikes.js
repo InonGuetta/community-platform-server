@@ -2,7 +2,7 @@
 import * as servicesLikes from "../services/servicesLikes.js";
 import { optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";
-import { visibleCoursesFor } from "../services/servicesVisibility.js";
+import { viewerScopeFor } from "../services/servicesVisibility.js";
 
 // The likes page wants full media rows to render cards; the media page and the
 // archive only want to know which ids are liked, so they can light up a button
@@ -11,13 +11,13 @@ import { visibleCoursesFor } from "../services/servicesVisibility.js";
 // Both are given the SAME visibility, from the same helper the archive uses, so
 // the button and the page cannot disagree about whether a draft counts.
 export const getLikes = async (req, res) => {
-  const visibleCourses = await visibleCoursesFor(req.user);
+  const scope = await viewerScopeFor(req.user);
 
   if (req.query.ids === "1") {
-    const ids = await servicesLikes.getLikedMediaIds(req.user.id, visibleCourses);
+    const ids = await servicesLikes.getLikedMediaIds(req.user.id, scope);
     return res.status(200).json(ids);
   }
-  const media = await servicesLikes.getLikedMediaByUser(req.user.id, visibleCourses);
+  const media = await servicesLikes.getLikedMediaByUser(req.user.id, scope);
   res.status(200).json(media);
 };
 

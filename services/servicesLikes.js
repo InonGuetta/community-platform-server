@@ -16,14 +16,18 @@ import { visibleMediaSql } from "../lib/permissions.js";
 // same cards as the archive, so it needs what those cards read (title, type,
 // publish state, ownership). `liked_at` rides along so the list can be ordered
 // by when the user liked it rather than when the lecture was uploaded.
-export const getLikedMediaByUser = async (userId, visibleCourses = []) => {
+// `scope` is { courses, drafts } from viewerScopeFor — the two halves travel
+// TOGETHER, as one argument, on purpose. Passed separately, a call site that
+// remembered one and forgot the other would compile, run, and quietly widen or
+// narrow what is returned.
+export const getLikedMediaByUser = async (userId, scope = { courses: [], drafts: [] }) => {
   const result = await pool.query(
     `SELECT m.*, l.created_at AS liked_at
      FROM likes l
      JOIN media_items m ON m.id = l.media_id
-     WHERE l.user_id = $1 AND ${visibleMediaSql("$2")}
+     WHERE l.user_id = $1 AND ${visibleMediaSql("$2", "m", "$3")}
      ORDER BY l.created_at DESC`,
-    [userId, visibleCourses]
+    [userId, scope.courses, scope.drafts]
   );
   return result.rows;
 };
@@ -32,13 +36,13 @@ export const getLikedMediaByUser = async (userId, visibleCourses = []) => {
 // and the archive would need it for many; shipping the id set once is cheaper
 // than a per-item request and is small enough to hold in the client store. The
 // join exists only for the visibility test.
-export const getLikedMediaIds = async (userId, visibleCourses = []) => {
+export const getLikedMediaIds = async (userId, scope = { courses: [], drafts: [] }) => {
   const result = await pool.query(
     `SELECT l.media_id
      FROM likes l
      JOIN media_items m ON m.id = l.media_id
-     WHERE l.user_id = $1 AND ${visibleMediaSql("$2")}`,
-    [userId, visibleCourses]
+     WHERE l.user_id = $1 AND ${visibleMediaSql("$2", "m", "$3")}`,
+    [userId, scope.courses, scope.drafts]
   );
   return result.rows.map((r) => r.media_id);
 };

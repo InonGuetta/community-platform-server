@@ -3,7 +3,7 @@ import * as servicesTranscripts from "../services/servicesTranscripts.js";
 import * as servicesMedia from "../services/servicesMedia.js";
 import { logger } from "../lib/logger.js";
 import { assertCanManageMedia } from "../lib/permissions.js";
-import { visibleCoursesFor } from "../services/servicesVisibility.js";
+import { viewerScopeFor } from "../services/servicesVisibility.js";
 import { badRequest } from "../lib/AppError.js";
 
 // A transcript has no owner of its own — it belongs to whoever uploaded the media
@@ -21,7 +21,7 @@ export const getTranscript = async (req, res) => {
   const { mediaId } = req.params;
   const transcript = await servicesTranscripts.getTranscriptByMediaId(
     mediaId,
-    await visibleCoursesFor(req.user)
+    await viewerScopeFor(req.user)
   );
   logger.debug(`[BE:ctrl] GET /transcripts/${mediaId} ✓ status=${transcript.status} chunks=${transcript.chunks?.length ?? 0}`);
   res.status(200).json(transcript);
@@ -104,7 +104,7 @@ export const searchTranscripts = async (req, res) => {
   const results = await servicesTranscripts.searchTranscripts(
     q,
     mode,
-    await visibleCoursesFor(req.user)
+    await viewerScopeFor(req.user)
   );
   res.status(200).json(results);
 };

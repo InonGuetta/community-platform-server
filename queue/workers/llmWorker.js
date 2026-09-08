@@ -77,10 +77,12 @@ const prepareText = async (mediaId) => {
   const buffer = await readMediaBuffer(s3Key);
 
   logger.debug(`[WORKER:llm] text mediaId=${mediaId} — extracting (${(buffer.length / 1024 / 1024).toFixed(2)}MB)`);
-  const { text, words, pageCount, extension } = await extractDocumentText(buffer, s3Key);
+  const { text, words, pageCount, pageOffsets, extension } = await extractDocumentText(buffer, s3Key);
   logger.info(`[WORKER:llm] text mediaId=${mediaId} ✓ extracted ${words} words from ${pageCount || "?"} page(s) (.${extension})`);
 
-  const chunkCount = await saveTextChunks(mediaId, text);
+  // pageOffsets is null for a format with no pages; saveTextChunks stores NULL
+  // page numbers in that case rather than inventing a page 1.
+  const chunkCount = await saveTextChunks(mediaId, text, pageOffsets);
   if (chunkCount === 0) throw new AppError("לא נמצא טקסט קריא בקובץ.", 400);
 
   await pool.query(

@@ -9,14 +9,30 @@ import { saveChunks, CHUNK_WORDS } from "../services/transcripts/chunks.js";
 // internal, and what actually matters is the rows that reach the INSERT — the
 // content that gets embedded and the times a search result points at.
 
-// The multi-row INSERT lays out seven parameters per chunk, in the order the
-// column list declares them.
+// The multi-row INSERT lays out one parameter per column per chunk, in the order
+// the column list declares them.
+//
+// The stride is READ FROM THE STATEMENT rather than written here as a number.
+// It used to be a literal 7, and adding page_number in migration 023 made it 8 —
+// at which point this decoder silently re-cut every row at the wrong boundary
+// and reported two chunks where there was one. The failure looked like a
+// chunking bug, which is the most expensive kind of wrong: the test pointed away
+// from the change that broke it. Counting the placeholders in the first value
+// group means the next column costs nothing here.
+const strideOf = (sql) => {
+  const firstGroup = sql.match(/\(([^)]*)\)\s*(?:,|$)/);
+  const count = firstGroup ? (firstGroup[1].match(/\$\d+/g) || []).length : 0;
+  if (count === 0) throw new Error("could not read the parameter stride from the INSERT");
+  return count;
+};
+
 const chunksFrom = (calls) => {
   const insert = calls.find((c) => /INSERT INTO transcript_chunks/i.test(c.text));
   if (!insert) return [];
+  const stride = strideOf(insert.text.split("VALUES")[1] ?? "");
   const rows = [];
-  for (let i = 0; i < insert.params.length; i += 7) {
-    const [, chunk_index, start_time, end_time, content] = insert.params.slice(i, i + 7);
+  for (let i = 0; i < insert.params.length; i += stride) {
+    const [, chunk_index, start_time, end_time, content] = insert.params.slice(i, i + stride);
     rows.push({ chunk_index, start_time, end_time, content });
   }
   return rows;

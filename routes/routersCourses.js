@@ -10,13 +10,14 @@ const router = Router();
 router.use(verifyToken);
 
 const canManage = requireRole("lecturer", "admin");
-// Enrollment is who-may-see-what, so it stays with the admin — the same place
-// role changes live. A lecturer runs their course; they do not decide its roster.
-const adminOnly = requireRole("admin");
 
 // Before "/:id" — validateIntParam would otherwise reject the literal "my" as a
 // malformed id and this route would be unreachable.
 router.get("/my", controllersCourses.getMyCourses);
+
+// Also before "/:id", and for the same reason: validateIntParam would reject
+// the literal "my-students" as a malformed id and this route would be dead.
+router.get("/my-students", canManage, controllersCourses.getMyStudents);
 
 // Any signed-in user may read the catalogue. Enrollment governs which LESSONS a
 // student sees, not whether courses exist — hiding the list would also hide the
@@ -40,10 +41,16 @@ router.put("/:id", canManage, validateIntParam("id"), controllersCourses.updateC
 router.delete("/:id", canManage, validateIntParam("id"), controllersCourses.deleteCourse);
 
 router.get("/:id/students", canManage, validateIntParam("id"), controllersCourses.getCourseStudents);
-router.post("/:id/students", adminOnly, validateIntParam("id"), controllersCourses.enrollStudent);
+router.post("/:id/students", canManage, validateIntParam("id"), controllersCourses.enrollStudent);
+router.get(
+  "/:id/enrollable-students",
+  canManage,
+  validateIntParam("id"),
+  controllersCourses.getEnrollableStudents
+);
 router.delete(
   "/:id/students/:studentId",
-  adminOnly,
+  canManage,
   validateIntParam("id"),
   validateIntParam("studentId"),
   controllersCourses.unenrollStudent

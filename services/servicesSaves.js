@@ -38,7 +38,11 @@ const TITLE_MAX = 120;
 // or it shows each filed lecture twice: once loose at the top and again inside
 // the list it belongs to. Answered here, next to the query it belongs to, rather
 // than by the client fetching every list's contents to work it out.
-export const getSavedMediaByUser = async (userId, visibleCourses = []) => {
+// `scope` is { courses, drafts } from viewerScopeFor — the two halves travel
+// TOGETHER, as one argument, on purpose. Passed separately, a call site that
+// remembered one and forgot the other would compile, run, and quietly widen or
+// narrow what is returned.
+export const getSavedMediaByUser = async (userId, scope = { courses: [], drafts: [] }) => {
   const result = await pool.query(
     `SELECT m.*, s.created_at AS saved_at,
             EXISTS (
@@ -48,9 +52,9 @@ export const getSavedMediaByUser = async (userId, visibleCourses = []) => {
             ) AS in_list
      FROM saved_items s
      JOIN media_items m ON m.id = s.media_id
-     WHERE s.user_id = $1 AND ${visibleMediaSql("$2")}
+     WHERE s.user_id = $1 AND ${visibleMediaSql("$2", "m", "$3")}
      ORDER BY s.created_at DESC`,
-    [userId, visibleCourses]
+    [userId, scope.courses, scope.drafts]
   );
   return result.rows;
 };
@@ -59,13 +63,13 @@ export const getSavedMediaByUser = async (userId, visibleCourses = []) => {
 // request per lecture, small enough to hold in the client store. The join exists
 // only for the visibility test — without it this cannot apply the same rule as
 // the query above, which is what let the two drift apart.
-export const getSavedMediaIds = async (userId, visibleCourses = []) => {
+export const getSavedMediaIds = async (userId, scope = { courses: [], drafts: [] }) => {
   const result = await pool.query(
     `SELECT s.media_id
      FROM saved_items s
      JOIN media_items m ON m.id = s.media_id
-     WHERE s.user_id = $1 AND ${visibleMediaSql("$2")}`,
-    [userId, visibleCourses]
+     WHERE s.user_id = $1 AND ${visibleMediaSql("$2", "m", "$3")}`,
+    [userId, scope.courses, scope.drafts]
   );
   return result.rows.map((r) => r.media_id);
 };
@@ -157,7 +161,7 @@ export const getPlaylists = async (userId, mediaId = null) => {
 //
 // Same visibility rule as the flat saved list, from the same flag: a lecture the
 // user may not see is not shown because it happens to sit in a list of theirs.
-export const getPlaylistWithMedia = async (userId, playlistId, visibleCourses = []) => {
+export const getPlaylistWithMedia = async (userId, playlistId, scope = { courses: [], drafts: [] }) => {
   const { rows } = await pool.query(
     "SELECT * FROM playlists WHERE id=$1 AND user_id=$2",
     [playlistId, userId]
@@ -168,9 +172,9 @@ export const getPlaylistWithMedia = async (userId, playlistId, visibleCourses = 
     `SELECT m.*, pi.added_at
      FROM playlist_items pi
      JOIN media_items m ON m.id = pi.media_id
-     WHERE pi.playlist_id = $1 AND ${visibleMediaSql("$2")}
+     WHERE pi.playlist_id = $1 AND ${visibleMediaSql("$2", "m", "$3")}
      ORDER BY pi.added_at DESC`,
-    [playlistId, visibleCourses]
+    [playlistId, scope.courses, scope.drafts]
   );
   return { ...rows[0], item_count: items.rows.length, items: items.rows };
 };

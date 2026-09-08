@@ -32,6 +32,8 @@ export {
   getTranscriptByMediaId,
   getTranscriptText,
   updateTranscript,
+  getChunkForAnchor,
+  getChunkContaining,
 } from "./transcripts/chunks.js";
 
 export { analyzeTranscript, MAX_KEY_POINTS_TEXT } from "./transcripts/analysis.js";

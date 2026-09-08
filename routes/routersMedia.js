@@ -61,6 +61,12 @@ router.use(verifyToken);
 const canManage = requireRole("lecturer", "admin");
 
 router.get("/get-all", controllersMedia.getAllMedia);
+
+// Before "/:id" — validateIntParam would reject the literal "tags" as a
+// malformed id and this route would be unreachable. Same hazard as "/my" in
+// routersCourses and "/pending" in routersUsers.
+router.get("/tags", controllersMedia.getTags);
+router.get("/creators", controllersMedia.getCreators);
 // Before "/:id" — validateIntParam would otherwise reject the literal
 // "continue-watching" as a malformed id and this route would be unreachable.
 router.get("/continue-watching", controllersMedia.getContinueWatching);
@@ -78,6 +84,15 @@ router.post("/upload", canManage, (req, res, next) => {
   });
 }, controllersMedia.createMedia);
 router.put("/update/:id", canManage, validateIntParam("id"), controllersMedia.updateMedia);
+
+// What to tag it with. A read, but a privileged one: it is offered to the person
+// who may set the tags, and the controller checks that this item is theirs.
+router.get(
+  "/:id/tag-suggestions",
+  canManage,
+  validateIntParam("id"),
+  controllersMedia.getTagSuggestions
+);
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
 router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
 router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);

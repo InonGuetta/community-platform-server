@@ -6,7 +6,7 @@ import jwt from "jsonwebtoken";
 import { createApp, API_ROUTERS } from "../app.js";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
-import { optionalId, PG_INT_MAX } from "../lib/validate.js";
+import { optionalId, PG_INT_MAX, MAX_TAG_FILTER_IDS } from "../lib/validate.js";
 import * as controllersTranscripts from "../controllers/controllersTranscripts.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { llmQueue } from "../queue/llmQueue.js";
@@ -212,6 +212,71 @@ test("a non-string currency is a 400, not a TypeError", async () => {
       .send({ type: "one_time", amountCents: 500, currency: 5 });
     assert.equal(res.status, 400);
     assert.match(res.body.message, /currency/i);
+  } finally {
+    stub.restore();
+  }
+});
+
+// ── The archive filter's two tag lists ──────────────────────────────────────
+//
+// Driven through the route because the guard's POSITION is half of what is being
+// asserted: it runs before the visibility query, so a malformed filter costs
+// nothing beyond the one query verifyToken always spends, and cannot reach the
+// listing itself.
+
+test("a tag id that is not an id is a 400, not a filter that quietly does nothing", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("a malformed filter reached the database");
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?tagIds=abc").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /tagIds/);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("the same guard applies to the exclusion list", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("a malformed filter reached the database");
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?excludeTagIds=abc").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /excludeTagIds/);
+  } finally {
+    stub.restore();
+  }
+});
+
+// Each id becomes a recursive walk of its own subtree, so an unbounded list is a
+// way to buy a few hundred tree walks with one short URL.
+test("more tags than the cap is refused", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("an over-long filter reached the database");
+  });
+  try {
+    const tooMany = Array.from({ length: MAX_TAG_FILTER_IDS + 1 }, (_, i) => `tagIds=${i + 1}`);
+    const res = await request(app).get(`/api/media/get-all?${tooMany.join("&")}`).set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, new RegExp(String(MAX_TAG_FILTER_IDS)));
+  } finally {
+    stub.restore();
+  }
+});
+
+// The exclusion wins in SQL, so this would answer 200 with an empty archive —
+// which is indistinguishable from "nothing matches" and is how somebody concludes
+// the filter is broken.
+test("a tag both chosen and excluded is said out loud, not answered with nothing", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("a contradictory filter reached the database");
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?tagIds=5&excludeTagIds=5").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /chosen and excluded/i);
   } finally {
     stub.restore();
   }

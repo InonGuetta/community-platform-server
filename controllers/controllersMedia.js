@@ -12,12 +12,15 @@ import { pipeline } from "stream/promises";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
-import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType } from "../lib/mediaFormats.js";
+import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType, isViewableText } from "../lib/mediaFormats.js";
+import { decodeTextBuffer } from "../lib/textEncoding.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
 import { isPrivileged, assertCanManageMedia } from "../lib/permissions.js";
-import { visibleCoursesFor, canUserSeeMedia } from "../services/servicesVisibility.js";
-import { requireSeconds, optionalBoolean, optionalId } from "../lib/validate.js";
+import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
+import { requireSeconds, optionalBoolean, optionalId, tagIdFilter } from "../lib/validate.js";
+import { setMediaTags, cleanTagSelection, getTagTree } from "../services/servicesTags.js";
+import { suggestTags } from "../lib/tagSuggestions.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // Same bundled binary the transcription worker uses, so the API and the worker
@@ -26,7 +29,31 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 
 // s3_key is an internal storage pointer — never ship it to the client. Streaming
 // and downloading go through the dedicated /:id/stream and /:id/download routes.
-const publicMedia = ({ s3_key, ...rest }) => rest;
+//
+// Two facts ARE derived from it on the way out, because the client cannot work
+// them out for itself and guessing costs it a wasted request:
+//
+//   file_ext        what kind of file this is, for wording and icons. The
+//                   extension alone leaks nothing — it is not a path.
+//
+//   can_view_inline whether the reader may embed it. Computed HERE, by the same
+//                   isViewableText the streaming route refuses with, so the rule
+//                   lives in one place. Sending the extension alone would make
+//                   the client re-implement the list, which is the cross-file
+//                   pair this codebase keeps getting bitten by.
+//
+//                   null for audio and video: the question is about documents,
+//                   and answering "false" for a lecture would read as a fault.
+//
+// It matters because the reader now points an <iframe> straight at the stream
+// route. A file that route refuses answers 400 with a JSON body, and an iframe
+// renders that JSON as text — so the client has to know NOT to embed it, rather
+// than finding out by embedding it.
+const publicMedia = ({ s3_key, ...rest }) => ({
+  ...rest,
+  file_ext: extensionOf(s3_key),
+  can_view_inline: rest.media_type === "text" ? isViewableText(s3_key) : null,
+});
 
 // Four handlers here load a media item and then have to decide whether this
 // caller may see it — the read, the stream, the download and the audio extract.
@@ -57,8 +84,25 @@ const downloadDisposition = (title, ext) => {
 };
 
 export const getAllMedia = async (req, res) => {
-  const { type, published, search, courseId } = req.query;
+  const { type, published, search, courseId, creator, tagIds, excludeTagIds, uploadedAfter, uploadedBefore } =
+    req.query;
+
+  const parsedTagIds = tagIdFilter(tagIds, "tagIds");
+  const parsedExcludeTagIds = tagIdFilter(excludeTagIds, "excludeTagIds");
+  // Asking for a branch and asking for it to be left out is a contradiction, and
+  // the query would honour the exclusion and answer with nothing. An empty
+  // archive is exactly how somebody concludes the filter is broken, so it is
+  // said out loud instead.
+  const contradiction = parsedTagIds.find((id) => parsedExcludeTagIds.includes(id));
+  if (contradiction !== undefined) {
+    throw badRequest("A tag cannot be both chosen and excluded");
+  }
+
   const privileged = isPrivileged(req.user);
+  // Resolved ONCE. For a student this costs an enrolment query, so calling it
+  // per field would double it on the busiest read in the application.
+  const scope = await viewerScopeFor(req.user);
+
   const items = await servicesMedia.getAllMedia({
     type,
     // The access rule, applied by the service unconditionally. It used to be
@@ -66,12 +110,33 @@ export const getAllMedia = async (req, res) => {
     // as the caller's own — so the rule and the preference were one field, and
     // whether a draft was hidden depended on the controller remembering to set
     // it. They are now separate arguments because they are separate things.
-    visibleCourses: await visibleCoursesFor(req.user),
+    //
+    // Both halves are passed, and both matter: courses decides which PUBLISHED
+    // lessons, drafts decides WHOSE unpublished ones. Passing only the first
+    // would fail closed on drafts — the safe direction, but silently wrong for
+    // the lecturer whose own work in progress would vanish from their archive.
+    visibleCourses: scope.courses,
+    visibleDrafts: scope.drafts,
     // A narrowing filter the caller chooses. It can only shrink what they were
     // already entitled to, and it is meaningless to anyone who cannot see drafts
     // in the first place — so it is read only for a privileged caller.
     published: privileged && published !== undefined ? published === "true" : undefined,
     search,
+    creator,
+    // Two lists, and they are not opposites of one another: one says which
+    // branches to look in, the other says which parts of them to leave out.
+    // "Everything in תורה except שמות" needs both, and could not be said with
+    // either alone — see servicesMedia for why naming the four books to keep
+    // returns nothing at all.
+    //
+    // Ids rather than names because the taxonomy repeats five names across
+    // branches. Parsed by the shared guard so that both lists refuse the same
+    // things: a non-numeric entry is a 400 rather than a value dropped on the
+    // floor, which would answer a filter nobody asked for.
+    tagIds: parsedTagIds,
+    excludeTagIds: parsedExcludeTagIds,
+    uploadedAfter,
+    uploadedBefore,
     ...(courseId !== undefined && { courseId: optionalId(courseId, "courseId") }),
   });
   res.status(200).json(items.map(publicMedia));
@@ -84,7 +149,7 @@ export const getMediaById = async (req, res) => {
 };
 
 export const createMedia = async (req, res) => {
-  const { title, description, mediaType, courseId, lecturerId } = req.body ?? {};
+  const { title, description, mediaType, courseId, lecturerId, creatorName, tags: tagNames, tagIds } = req.body ?? {};
   if (!req.file) throw badRequest("File is required");
 
   // multer has already written the file to LOCAL_UPLOAD_DIR by this point, so
@@ -104,6 +169,20 @@ export const createMedia = async (req, res) => {
     if (MEDIA_TYPE_BY_EXT[ext] !== mediaType) {
       throw badRequest(`A .${ext} file is ${MEDIA_TYPE_BY_EXT[ext]}, not ${mediaType}`);
     }
+
+    // Checked HERE, before the file is stored and the row is inserted, because
+    // this is the only kind of tagging failure that is the caller's fault. A
+    // refusal raised after the upload leaves an item whose file the catch below
+    // then deletes — the row survives, pointing at nothing, and the 400 the
+    // caller sees is about tags while what actually happened is that their
+    // upload was destroyed.
+    const chosenTags =
+      tagIds !== undefined || tagNames !== undefined
+        ? cleanTagSelection({
+            ids: tagIds === undefined ? [] : [].concat(tagIds).map(Number),
+            names: tagNames === undefined ? [] : [].concat(tagNames),
+          })
+        : null;
 
     let s3Key;
     if (s3Configured()) {
@@ -135,12 +214,39 @@ export const createMedia = async (req, res) => {
       // is what every item predating courses already is.
       courseId: optionalId(courseId, "courseId"),
       lecturerId: optionalId(lecturerId, "lecturerId"),
+      // Passed raw. Trimming, the blank-to-"כללי" fallback and the length check
+      // all live in servicesMedia, so a caller that skips this form gets the
+      // same rules — see cleanCreatorName there.
+      creatorName,
     });
+
+    // After the row exists, because a tag needs something to attach to.
+    //
+    // Anything that goes wrong at THIS point is infrastructure, not input — the
+    // selection was checked above — so it must not take the upload down with it:
+    // a throw here reaches the catch, which deletes a file that may be hundreds
+    // of megabytes and has already been stored, while the row it belongs to
+    // stays behind. An item that is merely untagged is recoverable from its own
+    // card in the archive; one whose file is gone is not.
+    let created = item;
+    if (chosenTags) {
+      try {
+        await setMediaTags(item.id, chosenTags);
+        // Read again, for the same reason updateMedia does: the row above was
+        // produced before the tags existed, and the client replaces its copy of
+        // the item with whatever comes back. Returning the pre-tag row made an
+        // item uploaded WITH tags render as untagged — and opening the tag
+        // dialog on it then seeded an empty picker whose save wiped them.
+        created = await servicesMedia.getMediaById(item.id);
+      } catch (err) {
+        logger.warn(`[BE:ctl] createMedia — tagging item ${item.id} failed: ${err.message}`);
+      }
+    }
 
     // Only redundant once the object actually lives in S3.
     if (uploadedS3Key) await fs.promises.unlink(req.file.path).catch(() => {});
 
-    res.status(201).json(publicMedia(item));
+    res.status(201).json(publicMedia(created));
   } catch (err) {
     await fs.promises.unlink(req.file.path).catch(() => {});
     if (uploadedS3Key) {
@@ -159,7 +265,7 @@ export const updateMedia = async (req, res) => {
   // before the item exists. This body carries isPublished, so without the check a
   // lecturer could unpublish another lecturer's material.
   assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
-  const item = await servicesMedia.updateMedia(req.params.id, {
+  let item = await servicesMedia.updateMedia(req.params.id, {
     ...rest,
     isPublished: optionalBoolean(isPublished, "isPublished"),
     // Presence in the body — not the value — is what says "change this". Sending
@@ -170,6 +276,23 @@ export const updateMedia = async (req, res) => {
     setLecturer: "lecturerId" in body,
     lecturerId: optionalId(lecturerId, "lecturerId"),
   });
+
+  // Presence in the body decides, as it does for the two associations above:
+  // sending an empty list clears the tags, omitting the key leaves them alone.
+  if ("tags" in body || "tagIds" in body) {
+    await setMediaTags(req.params.id, {
+      ids: [].concat(body.tagIds ?? []).map(Number),
+      names: [].concat(body.tags ?? []),
+    });
+    // Read AGAIN, because the row above was read before the tags were written
+    // and still carries the old ones. The client replaces its copy of the item
+    // with whatever comes back here, so returning the stale row meant tags saved
+    // from the dialog did not appear on the card until something else caused a
+    // refetch — opening the lesson and coming back. The item looked untagged
+    // while the database said otherwise, which is the worst version of this bug:
+    // the save worked and the screen said it had not.
+    item = await servicesMedia.getMediaById(req.params.id);
+  }
   res.status(200).json(publicMedia(item));
 };
 
@@ -200,9 +323,44 @@ const WORD_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]);
 const isWordFile = (filename) => /\.(doc|docx)$/i.test(filename);
+const isPlainText = (filename) => extensionOf(filename) === "txt";
+
+// A .txt, served so a browser renders it as the words it holds.
+//
+// text/plain carries no encoding of its own, and a response that does not name
+// one leaves the browser to guess — which it does NOT do as UTF-8. A Hebrew file
+// therefore arrived as mojibake in the reader's frame however it was written.
+//
+// Declaring "; charset=utf-8" over the raw bytes would only make that
+// deterministic rather than occasional: Hebrew .txt files in the wild are
+// frequently windows-1255, which is exactly why lib/textEncoding.js exists and
+// why the extraction path has always decoded rather than assumed. So the bytes
+// are decoded with the same rule and re-encoded as UTF-8 — the header is then
+// true because the body was made true, rather than asserted and hoped for.
+//
+// This gives up Range support for .txt, which costs nothing: the reader fetches
+// the whole file into a blob before showing it, and nobody seeks a text file.
+const sendDecodedText = (buffer, res) => {
+  res.set("Content-Type", "text/plain; charset=utf-8");
+  res.set("Content-Disposition", "inline");
+  return res.send(Buffer.from(decodeTextBuffer(buffer), "utf-8"));
+};
 
 const convertWordToHtml = async (buffer) => {
-  const { value: rawHtml } = await mammoth.convertToHtml({ buffer });
+  // mammoth throws from inside the zip reader on a file that is corrupt,
+  // truncated, or simply not the DOCX it claims to be. That is a problem with
+  // THIS FILE, not with the server, and it arrived as a 500 — which reads as a
+  // fault and tells the user nothing they can act on. Same treatment, and the
+  // same wording, that lib/textExtract.js already gives the extraction path.
+  let rawHtml;
+  try {
+    ({ value: rawHtml } = await mammoth.convertToHtml({ buffer }));
+  } catch (err) {
+    throw badRequest(
+      `Could not read this document — it may be corrupt or password-protected. (${err.message})`,
+      ERROR_CODES.DOCUMENT_UNREADABLE
+    );
+  }
   // The DOCX is untrusted user content and we serve the result as text/html, so
   // sanitize before embedding: strip scripts/styles/handlers, keep only safe
   // formatting tags. Allow data: image URIs since mammoth inlines images.
@@ -304,6 +462,10 @@ const streamLocalFile = async (item, req, res) => {
     return res.set("Content-Type", "text/html; charset=utf-8").send(html);
   }
 
+  if (isPlainText(filename)) {
+    return sendDecodedText(await fs.promises.readFile(filePath), res);
+  }
+
   const stat = await fs.promises.stat(filePath);
   const range = parseRange(req.headers.range, stat.size);
 
@@ -341,6 +503,13 @@ const streamS3Object = async (item, req, res) => {
   );
   const contentType = s3Response.ContentType || "application/octet-stream";
 
+  if (contentType.startsWith("text/plain")) {
+    const stream = /** @type {import("stream").Readable} */ (s3Response.Body);
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    return sendDecodedText(Buffer.concat(chunks), res);
+  }
+
   if (WORD_MIMES.has(contentType)) {
     // Same narrowing as lib/storage.js: the SDK types Body as a union spanning
     // every runtime it supports, and only the Node Readable in that union can be
@@ -363,10 +532,62 @@ const streamS3Object = async (item, req, res) => {
   return streamToResponse(s3Response.Body, res, `stream media ${item.id}`);
 };
 
+// ── Failing legibly, now that a browser renders this route directly ────────
+//
+// The reader used to fetch this through axios and parse the JSON body of a
+// failure. It now points an <iframe> at the URL, so a failure is DISPLAYED: a
+// JSON body shown as text inside the reader looks like the document itself,
+// which is worse than an error message.
+//
+// The discriminator is the Accept header, which separates the two callers
+// cleanly — a frame navigation asks for text/html, axios asks for
+// application/json. Anything that is not a browser keeps the JSON it expects.
+const wantsAPage = (req) => req.accepts(["json", "html"]) === "html";
+
+// Hebrew, and rendered by the server rather than keyed by a code on the client
+// — because there is no client on this path. It is the same reasoning that keeps
+// lib/textExtract.js's refusals in Hebrew: they are stored and shown verbatim,
+// with no code anywhere near them.
+const PAGE_MESSAGE = {
+  [ERROR_CODES.UNVIEWABLE_TEXT_FORMAT]:
+    "לא ניתן להציג כאן קובץ מסוג זה. אפשר להוריד אותו ולפתוח במחשב.",
+  [ERROR_CODES.DOCUMENT_UNREADABLE]:
+    "לא ניתן לקרוא את הקובץ — ייתכן שהוא פגום או מוגן בסיסמה.",
+  [ERROR_CODES.MEDIA_NOT_FOUND]: "הקובץ לא נמצא.",
+};
+
+const errorPage = (err) => {
+  const message = PAGE_MESSAGE[err?.code] || "לא ניתן להציג את המסמך.";
+  // The message is one of the fixed strings above, never anything from the
+  // request or the file, so there is nothing here to escape.
+  return `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">` +
+    `<style>body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;` +
+    `padding:40px 24px;text-align:center;color:#43606d;background:#f3f5f7;line-height:1.7}</style>` +
+    `</head><body>${message}</body></html>`;
+};
+
 export const streamMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (await refuseIfHidden(req, res, item)) return;
+
+    // Refused HERE rather than discovered inside the converter.
+    //
+    // A .doc uploads and downloads perfectly well and cannot be displayed: the
+    // Word branch below hands it to mammoth, which reads the DOCX zip and not
+    // the legacy binary format, so it threw somewhere inside the parser and
+    // arrived as a generic 500 — on a file the server was never going to be able
+    // to show. The user was told the document failed to load, which reads as a
+    // fault and invites a retry that cannot work.
+    //
+    // Only for text: an .mp4 has no business being asked this question, and
+    // isViewableText would answer no for every recording in the archive.
+    if (item.media_type === "text" && !isViewableText(item.s3_key)) {
+      throw badRequest(
+        `A .${extensionOf(item.s3_key)} file cannot be displayed. Supported: PDF, DOCX, TXT.`,
+        ERROR_CODES.UNVIEWABLE_TEXT_FORMAT
+      );
+    }
 
     return item.s3_key.startsWith("local/")
       ? await streamLocalFile(item, req, res)
@@ -374,8 +595,14 @@ export const streamMedia = async (req, res, next) => {
   } catch (err) {
     // Only reachable before the headers went out — streamToResponse handles
     // everything after that itself.
-    if (isStorageNotFound(err)) return next(notFound("Media file not found"));
-    next(err);
+    const failure = isStorageNotFound(err)
+      ? notFound("Media file not found", ERROR_CODES.MEDIA_NOT_FOUND)
+      : err;
+
+    if (failure?.expose && wantsAPage(req)) {
+      return res.status(failure.statusCode).type("html").send(errorPage(failure));
+    }
+    next(failure);
   }
 };
 
@@ -499,7 +726,7 @@ export const downloadMediaAudio = async (req, res, next) => {
 export const getContinueWatching = async (req, res) => {
   const items = await servicesMedia.getContinueWatching(
     req.user.id,
-    await visibleCoursesFor(req.user)
+    await viewerScopeFor(req.user)
   );
   res.status(200).json(items.map(publicMedia));
 };
@@ -514,3 +741,40 @@ export const saveProgress = async (req, res) => {
   const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
   res.status(200).json(progress);
 };
+
+// Every tag in use, with how many items carry it. Feeds the upload form's
+// autocomplete and the archive's filter — both of which need the same list, so
+// it is one endpoint rather than two shapes of the same query.
+// The creator list for the filter menu. Its own endpoint because the listing is
+// now filtered server-side, and a menu built from filtered rows closes on
+// whatever was chosen.
+export const getCreators = async (req, res) => {
+  res.status(200).json(await servicesMedia.getCreators(await viewerScopeFor(req.user)));
+};
+
+// What this item looks like it is about, offered to whoever may tag it.
+//
+// A first guess from the title, never applied on its own — see
+// lib/tagSuggestions.js for what it can and cannot know. It exists because the
+// alternative, which this archive ran on until now, is that items arrive
+// untagged and stay that way: every filter in the application was a control over
+// an empty set, and asking again after the upload, with a starting point, is the
+// cheapest moment to fix that.
+//
+// Ownership is checked, not just the role: a suggestion is about a particular
+// item, and offering it discloses that item's title to whoever asked.
+export const getTagSuggestions = async (req, res) => {
+  const item = await servicesMedia.getMediaById(req.params.id);
+  assertCanManageMedia(req.user, item);
+  const tags = await getTagTree();
+  res.status(200).json(suggestTags(item, tags));
+};
+
+export const getTags = async (req, res) => {
+  // The counts are per VIEWER: a student must not be offered "7" beside a branch
+  // that answers with three. Same scope object the listing resolves, so the
+  // number on a chip and the rows behind it are decided by one rule.
+  const scope = await viewerScopeFor(req.user);
+  res.status(200).json(await getTagTree({ visibleCourses: scope.courses, visibleDrafts: scope.drafts }));
+};
+

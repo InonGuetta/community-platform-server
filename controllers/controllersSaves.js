@@ -2,7 +2,7 @@
 import * as servicesSaves from "../services/servicesSaves.js";
 import { optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";
-import { visibleCoursesFor } from "../services/servicesVisibility.js";
+import { viewerScopeFor } from "../services/servicesVisibility.js";
 
 // ── The general save ────────────────────────────────────────────────────────
 
@@ -14,13 +14,13 @@ import { visibleCoursesFor } from "../services/servicesVisibility.js";
 // Both are given the SAME visibility, from the same helper the archive uses, so
 // the button and the page cannot disagree about whether a draft counts.
 export const getSaves = async (req, res) => {
-  const visibleCourses = await visibleCoursesFor(req.user);
+  const scope = await viewerScopeFor(req.user);
 
   if (req.query.ids === "1") {
-    const ids = await servicesSaves.getSavedMediaIds(req.user.id, visibleCourses);
+    const ids = await servicesSaves.getSavedMediaIds(req.user.id, scope);
     return res.status(200).json(ids);
   }
-  const media = await servicesSaves.getSavedMediaByUser(req.user.id, visibleCourses);
+  const media = await servicesSaves.getSavedMediaByUser(req.user.id, scope);
   res.status(200).json(media);
 };
 
@@ -53,7 +53,7 @@ export const getPlaylist = async (req, res) => {
   const playlist = await servicesSaves.getPlaylistWithMedia(
     req.user.id,
     Number(req.params.id),
-    await visibleCoursesFor(req.user)
+    await viewerScopeFor(req.user)
   );
   res.status(200).json(playlist);
 };
