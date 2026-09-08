@@ -18,9 +18,17 @@ const setAuthCookie = (res, token) => res.cookie("token", token, cookieOptions()
 const clearAuthCookie = (res) => res.clearCookie("token", { ...cookieOptions(), maxAge: undefined });
 
 export const register = async (req, res) => {
-  const { email, password, displayName } = req.body;
+  const { email, password, displayName, requestedRole } = req.body;
   if (!email || !password) throw badRequest("Email and password are required");
-  const { user, token, verification } = await servicesAuth.register(email, password, displayName);
+  // Named `requestedRole` in the body, not `role`, and that is not cosmetic: a
+  // field called `role` on a public endpoint invites the next reader to wire it
+  // to users.role. The name says what it is — an application, not a grant.
+  const { user, token, verification } = await servicesAuth.register(
+    email,
+    password,
+    displayName,
+    requestedRole ?? "student"
+  );
   setAuthCookie(res, token);
   // Sent after the account exists and the session is open, and never awaited for
   // its outcome: a mail server being down must not turn a successful
@@ -111,3 +119,17 @@ export const changePassword = async (req, res) => {
   setAuthCookie(res, servicesAuth.issueSessionToken(req.user));
   res.status(200).json({ message: "Password changed" });
 };
+
+// Asking for a role from inside the app, after registration.
+//
+// Authenticated, and it acts on req.user.id — never on an id from the body.
+// That is what makes it safe to expose to every signed-in user: there is no
+// parameter to point at somebody else's account, so the worst a caller can do is
+// apply on their own behalf, which is the feature.
+export const requestRole = async (req, res) => {
+  const { requestedRole } = req.body ?? {};
+  if (!requestedRole) throw badRequest("requestedRole is required");
+  const user = await servicesAuth.requestRole(req.user.id, requestedRole);
+  res.status(200).json(user);
+};
+

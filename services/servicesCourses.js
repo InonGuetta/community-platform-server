@@ -180,3 +180,93 @@ export const unenrollStudent = async (courseId, studentId) => {
   if (result.rows.length === 0) throw notFound("Enrollment not found");
   return { removed: true, courseId: Number(courseId), studentId: Number(studentId) };
 };
+
+// ── The lecturer's own view of who learns with them ─────────────────────────
+
+// Every distinct person enrolled in ANY course this lecturer teaches, with the
+// courses each of them is in.
+//
+// Grouped rather than returned per enrolment, and that is the whole point: a
+// student in three of this lecturer's courses is ONE student, not three rows.
+// The ungrouped version reads as a roster of thirty when the lecturer has ten
+// people, which is exactly the confusion this screen exists to remove.
+//
+// json_agg over a JOIN rather than a second query per student: the courses are
+// wanted for every row, so N+1 would be N+1.
+export const getStudentsOfLecturer = async (lecturerId) => {
+  const result = await pool.query(
+    `SELECT u.id, u.email, u.display_name, u.is_active,
+            COUNT(DISTINCT c.id)::int AS course_count,
+            MIN(e.enrolled_at) AS first_enrolled_at,
+            json_agg(
+              json_build_object('id', c.id, 'title', c.title)
+              ORDER BY c.title
+            ) AS courses
+     FROM courses c
+     JOIN enrollments e ON e.course_id = c.id
+     JOIN users u ON u.id = e.student_id
+     WHERE c.lecturer_id = $1
+     GROUP BY u.id, u.email, u.display_name, u.is_active
+     ORDER BY u.display_name NULLS LAST, u.email`,
+    [lecturerId]
+  );
+  return result.rows;
+};
+
+// ── Finding somebody to add ─────────────────────────────────────────────────
+
+// Below this, the search answers nothing at all.
+//
+// This is the whole privacy design of the feature, and it is deliberately not a
+// filter on role. A lecturer needs to add people by name, and the obvious way to
+// let them — hand back the membership list — turns every approved lecturer into
+// a holder of the community's address book. A search that refuses to answer a
+// one-character query cannot be walked: "א" returns nothing, so there is no
+// first page to page through.
+const MIN_SEARCH_LENGTH = 2;
+
+// And a ceiling, so a two-character query that matches half the membership still
+// cannot be used to enumerate it.
+const SEARCH_LIMIT = 20;
+
+// Backslash is Postgres' default LIKE escape and has to escape itself first.
+// Same treatment, and the same reason, as escapeLike in servicesMedia: % and _
+// are wildcards to ILIKE and ordinary characters in a real name.
+const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
+
+/**
+ * People this lecturer could add to this course.
+ *
+ * Deliberately NOT restricted to role='student'. Enrolling a lecturer in a
+ * colleague's course is a documented, intended case — see the comments in the
+ * client's App.jsx and Navbar.jsx — so filtering to students here would quietly
+ * remove a capability the rest of the app assumes.
+ *
+ * Excluded instead: people already enrolled (adding them is a no-op that would
+ * only produce a confusing 409), the course's own lecturer (enrolling yourself
+ * in your own course means nothing), and deactivated accounts.
+ */
+export const searchEnrollableUsers = async (courseId, query) => {
+  const term = typeof query === "string" ? query.trim() : "";
+  // An empty answer, not an error: the caller is a search box that is still
+  // being typed into, and a 400 per keystroke is noise, not a guard.
+  if (term.length < MIN_SEARCH_LENGTH) return [];
+
+  await getCourseById(courseId);
+
+  const result = await pool.query(
+    `SELECT u.id, u.email, u.display_name, u.role
+     FROM users u
+     WHERE u.is_active = TRUE
+       AND (u.display_name ILIKE $2 OR u.email ILIKE $2)
+       AND NOT EXISTS (
+         SELECT 1 FROM enrollments e
+         WHERE e.course_id = $1 AND e.student_id = u.id
+       )
+       AND u.id <> COALESCE((SELECT lecturer_id FROM courses WHERE id = $1), 0)
+     ORDER BY u.display_name NULLS LAST, u.email
+     LIMIT $3`,
+    [courseId, `%${escapeLike(term)}%`, SEARCH_LIMIT]
+  );
+  return result.rows;
+};

@@ -66,7 +66,21 @@ export const deleteCourse = async (req, res) => {
 
 // ── Enrollments ─────────────────────────────────────────────────────────────
 
+// Ownership, not just role — and it is the only handler in this file that was
+// missing it.
+//
+// requireRole("lecturer","admin") on the route establishes that the caller may
+// read SOME roster. It cannot establish WHICH, because it runs before the course
+// row is loaded. Without the check below, every lecturer could read the student
+// list of every course in the system: names and email addresses of people they
+// do not teach.
+//
+// A read, so it could reasonably have answered 404 to hide the course's
+// existence — but the catalogue is already readable by any signed-in user
+// (GET /courses), so there is nothing left to hide and 403 is the honest answer.
+// That is the same reasoning assertCanManageMedia records for the write paths.
 export const getCourseStudents = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
   const students = await servicesCourses.getCourseStudents(req.params.id);
   res.status(200).json(students);
 };
@@ -87,7 +101,20 @@ export const getMyCourses = async (req, res) => {
   res.status(200).json(courses);
 };
 
+// Enrolment moved from admin-only to the lecturer who teaches the course.
+//
+// The comment that used to sit on these routes said "a lecturer runs their
+// course; they do not decide its roster". That was a real decision and it has
+// been reversed deliberately — a lecturer managing their own roster is the whole
+// of R4 — so the comment is gone rather than left contradicting the code under
+// it.
+//
+// What did NOT change is that it takes two layers. requireRole says a lecturer
+// may enrol somebody SOMEWHERE; assertCanManageCourse says which course. Without
+// the second, opening the first would let any lecturer add students to every
+// course on the platform.
 export const enrollStudent = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
   const studentId = optionalId(req.body?.studentId, "studentId");
   if (studentId === null || studentId === undefined) throw badRequest("studentId is required");
   const enrollment = await servicesCourses.enrollStudent(req.params.id, studentId);
@@ -95,6 +122,29 @@ export const enrollStudent = async (req, res) => {
 };
 
 export const unenrollStudent = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
   const result = await servicesCourses.unenrollStudent(req.params.id, req.params.studentId);
   res.status(200).json(result);
+};
+
+// Who this lecturer teaches, across every course they run. Takes no id: it
+// answers for the CALLER, which is what makes it safe to expose to a lecturer at
+// all — there is no parameter to point at somebody else.
+//
+// An admin calling it sees the students of the courses THEY are the lecturer of,
+// which is usually none. That is the honest answer to "who learns with me";
+// "every student on the platform" is a different question and get-all-users
+// already answers it.
+export const getMyStudents = async (req, res) => {
+  const students = await servicesCourses.getStudentsOfLecturer(req.user.id);
+  res.status(200).json(students);
+};
+
+// The type-ahead behind "add a student". Ownership-gated like the roster itself:
+// without that, it is a membership search anyone who got approved as a lecturer
+// could run against the whole platform.
+export const getEnrollableStudents = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
+  const users = await servicesCourses.searchEnrollableUsers(req.params.id, req.query.q);
+  res.status(200).json(users);
 };

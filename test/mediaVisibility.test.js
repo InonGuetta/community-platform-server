@@ -22,8 +22,48 @@ const DRAFT = { is_published: false, course_id: null };
 
 test("an unrestricted view sees everything", () => {
   for (const item of [GENERAL, IN_COURSE_5, DRAFT]) {
-    assert.equal(canSeeMediaRow(item, UNRESTRICTED), true);
+    // Both dimensions unrestricted — which is what an admin gets.
+    assert.equal(canSeeMediaRow(item, UNRESTRICTED, UNRESTRICTED), true);
   }
+});
+
+// ── Whose drafts ────────────────────────────────────────────────────────────
+//
+// The second dimension, and the reason it exists: a lecturer used to be
+// "unrestricted" on the only dimension there was, which meant every draft on the
+// platform — including a colleague's unpublished work in progress.
+
+const MY_DRAFT = { is_published: false, course_id: null, uploader_id: 10 };
+const THEIR_DRAFT = { is_published: false, course_id: null, uploader_id: 11 };
+
+test("a lecturer sees their own draft and not a colleague's", () => {
+  assert.equal(canSeeMediaRow(MY_DRAFT, UNRESTRICTED, [10]), true);
+  assert.equal(canSeeMediaRow(THEIR_DRAFT, UNRESTRICTED, [10]), false);
+});
+
+// The regression that would hurt most: narrowing drafts must not narrow the
+// published archive. A lecturer keeps every published lesson, in every course,
+// including courses they are not enrolled in.
+test("a lecturer still sees every published lesson, in any course", () => {
+  assert.equal(canSeeMediaRow(GENERAL, UNRESTRICTED, [10]), true);
+  assert.equal(canSeeMediaRow(IN_COURSE_5, UNRESTRICTED, [10]), true);
+});
+
+test("a student sees nobody's drafts, including their own uploads", () => {
+  assert.equal(canSeeMediaRow(MY_DRAFT, [], []), false);
+  assert.equal(canSeeMediaRow(DRAFT, [5], []), false);
+});
+
+// [] and null are different answers and must never be conflated: one is "nobody",
+// the other is "everybody".
+test("an empty drafts list is nobody, not everybody", () => {
+  assert.equal(canSeeMediaRow(THEIR_DRAFT, UNRESTRICTED, []), false);
+  assert.equal(canSeeMediaRow(THEIR_DRAFT, UNRESTRICTED, UNRESTRICTED), true);
+});
+
+test("failing closed is still the default", () => {
+  assert.equal(canSeeMediaRow(DRAFT), false);
+  assert.equal(canSeeMediaRow(IN_COURSE_5), false);
 });
 
 // Not a concession — a necessity. course_id is null on every item uploaded
@@ -158,8 +198,11 @@ const runList = async (filters) => {
 
 test("the visibility predicate is always in the WHERE clause", async () => {
   const bare = await runList({});
-  assert.match(bare.text, /WHERE \(\s*\$1::int\[\] IS NULL/);
+  assert.match(bare.text, /WHERE \(/);
+  assert.match(bare.text, /\$1::int\[\] IS NULL/, "the courses dimension");
+  assert.match(bare.text, /\$2::int\[\] IS NULL/, "and the drafts dimension");
   assert.deepEqual(bare.params[0], [], "absent means enrolled in nothing, never unrestricted");
+  assert.deepEqual(bare.params[1], [], "and nobody's drafts, never everybody's");
 });
 
 test("an unrestricted caller passes null", async () => {
@@ -173,9 +216,10 @@ test("a student's courses are passed as the array they are", async () => {
 });
 
 test("the caller's own published filter is separate from the rule", async () => {
-  const call = await runList({ visibleCourses: UNRESTRICTED, published: false });
-  assert.match(call.text, /m\.is_published=\$2/);
-  assert.deepEqual(call.params, [null, false], "the rule first, then the narrowing");
+  const call = await runList({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED, published: false });
+  // $1 and $2 are the two halves of the RULE; the caller's narrowing comes after.
+  assert.match(call.text, /m\.is_published=\$3/);
+  assert.deepEqual(call.params, [null, null, false], "the rule first, then the narrowing");
 });
 
 // ── A search phrase is a phrase, not a pattern ──────────────────────────────

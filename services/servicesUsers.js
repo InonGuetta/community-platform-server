@@ -2,6 +2,7 @@
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { assertUsableEmail } from "../lib/validate.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
 const normalizeEmail = (email) => email.trim().toLowerCase();
@@ -10,7 +11,12 @@ export const getAllUsers = async () => {
   // Admins manage every account here, including inactive ones — otherwise a
   // deactivated user would vanish from the list and could never be reactivated.
   const result = await pool.query(
-    "SELECT id, email, role, display_name, avatar_url, created_at, is_active FROM users ORDER BY created_at DESC"
+    // The approval columns ride along rather than being a second endpoint: the
+    // users tab renders one table and needs both halves of every row at once,
+    // and a separate "pending" call would make the two disagree while it loaded.
+    `SELECT id, email, role, display_name, avatar_url, created_at, is_active,
+            requested_role, approval_status, approved_by, approved_at, rejection_reason
+     FROM users ORDER BY created_at DESC`
   );
   return result.rows;
 };
@@ -27,6 +33,9 @@ export const getUserById = async (id) => {
 export const createUser = async (data) => {
   const { email, password, role = "student", displayName } = data;
   if (!email || !password) throw badRequest("Email and password are required");
+  // An admin typing somebody else's address is at least as likely to slip as the
+  // owner typing their own, and the person who suffers cannot see the form.
+  assertUsableEmail(email);
   if (!ROLES.has(role)) throw badRequest(`Invalid role: ${role}`);
 
   // Normalize the email the same way register/login do, so an admin can't create
@@ -97,6 +106,7 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
 
     // createUser normalizes the email; without the same treatment here an admin
     // could save "Admin@X.com", which login (which lowercases) would never match.
+    if (email !== undefined && email !== null) assertUsableEmail(email);
     const normalizedEmail = email === undefined || email === null ? null : normalizeEmail(email);
     if (normalizedEmail) {
       const taken = await client.query(
@@ -148,4 +158,130 @@ export const updateUser = async (id, data) => {
 export const deleteUser = async (id) => {
   await updateUserRow(id, { isActive: false });
   return { deleted: true, id };
+};
+
+// ── Role approval ───────────────────────────────────────────────────────────
+//
+// Somebody asked to be a lecturer or an admin at signup; an admin decides.
+// Migration 021 explains why the request lives in its own columns rather than in
+// users.role, and servicesAuth.register explains why nothing else may write it.
+// This is the ONLY function that moves requested_role across into role.
+
+// The waiting list, oldest first — a queue, so the person who has been waiting
+// longest is at the top rather than buried under later signups.
+export const getPendingApprovals = async () => {
+  const result = await pool.query(
+    `SELECT id, email, display_name, requested_role, created_at
+     FROM users
+     WHERE approval_status = 'pending'
+     ORDER BY created_at ASC`
+  );
+  return result.rows;
+};
+
+// Loads the row and checks it is genuinely awaiting a decision, inside the same
+// transaction as the write.
+//
+// FOR UPDATE, and it is load-bearing: two admins opening the tab and both
+// pressing approve would otherwise both read 'pending' and both write, and the
+// second would overwrite approved_by with a second name for one decision. The
+// lock makes the loser see 'approved' and refuse.
+const lockPending = async (client, id) => {
+  const { rows } = await client.query(
+    "SELECT id, email, display_name, requested_role, approval_status FROM users WHERE id=$1 FOR UPDATE",
+    [id]
+  );
+  if (rows.length === 0) throw notFound("User not found");
+  const user = rows[0];
+  if (user.approval_status !== "pending") {
+    throw conflict("This request has already been decided", ERROR_CODES.CONFLICT);
+  }
+  return user;
+};
+
+/**
+ * Grants the requested role.
+ *
+ * @param {number|string} id       the applicant
+ * @param {number|string} adminId  the admin deciding — stamped onto the row
+ */
+export const approveUser = async (id, adminId) => {
+  // An admin approving their own application would be the whole feature
+  // defeated: sign up as an admin, then approve yourself. Enforced here rather
+  // than only by hiding the button, because the button is not the security
+  // boundary.
+  if (Number(id) === Number(adminId)) {
+    throw badRequest("You cannot approve your own request");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const user = await lockPending(client, id);
+
+    // The role and the status move in ONE statement. Two statements would leave
+    // a window in which somebody holds the role while still reading as pending,
+    // and the users tab would offer to approve an account that already has it.
+    const result = await client.query(
+      `UPDATE users SET
+         role = $1,
+         approval_status = 'approved',
+         approved_by = $2,
+         approved_at = NOW(),
+         rejection_reason = NULL
+       WHERE id = $3
+       RETURNING id, email, role, display_name, requested_role, approval_status, approved_at`,
+      [user.requested_role, adminId, id]
+    );
+
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+/**
+ * Refuses the request. The account stays a working student account.
+ *
+ * Deliberately not a deletion and not a deactivation: somebody who asked to
+ * teach and was told no is still a member, and destroying their account over it
+ * would be a surprising amount of damage for a "no". `reason` is optional and
+ * is what the notification email quotes.
+ */
+export const rejectUser = async (id, adminId, reason = null) => {
+  if (Number(id) === Number(adminId)) {
+    throw badRequest("You cannot decide your own request");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await lockPending(client, id);
+
+    const result = await client.query(
+      // role is untouched — it has been 'student' since registration and stays
+      // there. approved_by/approved_at record who decided, which is as true of a
+      // refusal as of a grant.
+      `UPDATE users SET
+         approval_status = 'rejected',
+         approved_by = $1,
+         approved_at = NOW(),
+         rejection_reason = $2
+       WHERE id = $3
+       RETURNING id, email, role, display_name, requested_role, approval_status, rejection_reason`,
+      [adminId, reason || null, id]
+    );
+
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 };

@@ -31,6 +31,14 @@ const recoveryLimiter = rateLimit({
   message: { message: "Too many requests, please try again later" },
 });
 
+const roleRequestLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many requests, please try again later" },
+});
+
 router.post("/register", authLimiter, controllersAuth.register);
 router.post("/login", authLimiter, controllersAuth.login);
 router.post("/logout", verifyToken, controllersAuth.logout);
@@ -49,6 +57,18 @@ router.post("/verify-email", recoveryLimiter, controllersAuth.verifyEmail);
 // The signed-in user's own account.
 router.patch("/me", verifyToken, controllersAuth.updateProfile);
 router.post("/change-password", verifyToken, authLimiter, controllersAuth.changePassword);
+
+// Asking for a lecturer or admin role after registration — the path a Google
+// sign-in has to use, since the OAuth callback never shows the signup form, and
+// the path a long-standing student uses when they start giving a shiur.
+//
+// Its OWN limiter rather than authLimiter, and the reason is the shared bucket:
+// authLimiter counts login and register together at ten a minute, so putting
+// this on it would let a role request contribute to locking somebody out of
+// SIGNING IN — two unrelated actions competing for one allowance. The real
+// throttle here is the seven-day cooldown in the service; this only stops a
+// client looping, so it is deliberately generous.
+router.post("/request-role", verifyToken, roleRequestLimiter, controllersAuth.requestRole);
 
 router.get("/google", passport.authenticate("google", { scope: ["profile", "email"], session: false }));
 router.get("/google/callback",

@@ -1,0 +1,52 @@
+-- Who said it, in words — as opposed to which account is responsible for it.
+--
+-- media_items already carries lecturer_id, a foreign key to users, and it has
+-- been NULL on every row since it was added: the upload form never sent it. That
+-- column is not what this replaces. The two answer different questions and both
+-- are needed:
+--
+--   lecturer_id   "which ACCOUNT is responsible for this?"  → permissions,
+--                 the roster, per-lecturer reports. Requires a real user.
+--   creator_name  "who SAID this?"                          → display, filter,
+--                 attribution. Requires nothing.
+--
+-- The second cannot be derived from the first, and that is the whole reason this
+-- column exists. A sefer by an author who died two hundred years ago has no user
+-- row; neither does a visiting speaker, nor a recording made before the platform
+-- existed. Storing attribution as a foreign key means everything without an
+-- account is attributed to nobody.
+--
+-- ── One column, two labels ──────────────────────────────────────────────────
+--
+-- Named creator_name rather than lecturer_name because a book has an author, not
+-- a lecturer. The UI picks the wording from media_type — "שם המרצה" for audio and
+-- video, "שם המחבר" for a document — and that is a rendering decision, not a
+-- storage one. Two columns would put a "which one do I read?" branch into every
+-- query, every card and every filter, for what is one fact.
+--
+-- ── The default IS the backfill ─────────────────────────────────────────────
+--
+-- NOT NULL DEFAULT 'כללי' fills every existing row in this same statement, which
+-- is exactly what was asked for: everything already uploaded reads "כללי". No
+-- second UPDATE, no script, and no window in which the column is half-populated.
+--
+-- 'כללי' is also what an upload with the field left blank stores. servicesMedia
+-- normalises blank and whitespace-only input to it, so the value never depends on
+-- whether the client bothered to send the key.
+--
+-- ── VARCHAR(120) ────────────────────────────────────────────────────────────
+--
+-- Matches CREATOR_NAME_MAX in services/servicesMedia.js, which rejects anything
+-- longer with a 400 before it reaches here. The two must be changed together: a
+-- column narrower than that check turns a clear error message into a driver
+-- failure. Same pairing, and same reason, as playlists.title and TITLE_MAX.
+--
+-- IF NOT EXISTS because db/migrate.js re-runs every file on every invocation and
+-- only skips a statement when Postgres answers "already exists".
+ALTER TABLE media_items
+  ADD COLUMN IF NOT EXISTS creator_name VARCHAR(120) NOT NULL DEFAULT 'כללי';
+
+-- The archive filters by it ("everything by this maggid shiur"), and the
+-- autocomplete on the upload form reads its DISTINCT values so the same person
+-- is not entered three ways. Both are index-shaped lookups on this column alone.
+CREATE INDEX IF NOT EXISTS idx_media_creator ON media_items(creator_name);

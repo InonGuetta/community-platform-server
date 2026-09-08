@@ -133,7 +133,7 @@ const SELECT_COLS = `
 // remains true of whatever condition the shared predicate grows next.
 const VISIBLE = visibleMediaSql;
 
-const searchKeyword = async (query, visibleCourses) => {
+const searchKeyword = async (query, scope) => {
   const result = await pool.query(
     `SELECT
        ${SELECT_COLS},
@@ -142,15 +142,15 @@ const searchKeyword = async (query, visibleCourses) => {
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
-       AND ${VISIBLE("$2")}
+       AND ${VISIBLE("$2", "m", "$3")}
      ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
      LIMIT ${SEARCH_LIMIT}`,
-    [query, visibleCourses]
+    [query, scope.courses, scope.drafts]
   );
   return result.rows;
 };
 
-const searchSemantic = async (query, visibleCourses) => {
+const searchSemantic = async (query, scope) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
   const result = await pool.query(
     `SELECT
@@ -160,15 +160,15 @@ const searchSemantic = async (query, visibleCourses) => {
      FROM transcript_chunks c
      JOIN media_items m ON c.media_id = m.id
      WHERE c.embedding IS NOT NULL
-       AND ${VISIBLE("$2")}
+       AND ${VISIBLE("$2", "m", "$3")}
      ORDER BY c.embedding <=> $1::vector
      LIMIT ${SEARCH_LIMIT}`,
-    [queryVector, visibleCourses]
+    [queryVector, scope.courses, scope.drafts]
   );
   return result.rows;
 };
 
-const searchHybrid = async (query, visibleCourses) => {
+const searchHybrid = async (query, scope) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
   // $1 = query text (FTS), $2 = query embedding (vector), $3 = may see drafts.
   // Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN unions the two id
@@ -184,7 +184,7 @@ const searchHybrid = async (query, visibleCourses) => {
        FROM transcript_chunks c
        JOIN media_items m ON c.media_id = m.id
        WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
-         AND ${VISIBLE("$3")}
+         AND ${VISIBLE("$3", "m", "$4")}
        ORDER BY rank
        LIMIT ${FUSE_DEPTH}
      ),
@@ -194,7 +194,7 @@ const searchHybrid = async (query, visibleCourses) => {
        FROM transcript_chunks c
        JOIN media_items m ON c.media_id = m.id
        WHERE c.embedding IS NOT NULL
-         AND ${VISIBLE("$3")}
+         AND ${VISIBLE("$3", "m", "$4")}
        ORDER BY c.embedding <=> $2::vector
        LIMIT ${FUSE_DEPTH}
      ),
@@ -215,7 +215,7 @@ const searchHybrid = async (query, visibleCourses) => {
      JOIN media_items m ON c.media_id = m.id
      ORDER BY f.score DESC
      LIMIT ${CANDIDATE_LIMIT}`,
-    [query, queryVector, visibleCourses]
+    [query, queryVector, scope.courses, scope.drafts]
   );
 
   // Rerank the candidates with GPT-4o for true relevance ordering + scoring.
@@ -231,9 +231,9 @@ const searchHybrid = async (query, visibleCourses) => {
   }
 };
 
-export const searchTranscripts = async (query, mode = "hybrid", visibleCourses = []) => {
-  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length} visible=${JSON.stringify(visibleCourses)}`);
-  if (mode === "keyword") return searchKeyword(query, visibleCourses);
-  if (mode === "semantic") return searchSemantic(query, visibleCourses);
-  return searchHybrid(query, visibleCourses);
+export const searchTranscripts = async (query, mode = "hybrid", scope = { courses: [], drafts: [] }) => {
+  logger.debug(`[BE:svc] searchTranscripts mode=${mode} qLen=${query.length} visible=${JSON.stringify(scope.courses)}`);
+  if (mode === "keyword") return searchKeyword(query, scope);
+  if (mode === "semantic") return searchSemantic(query, scope);
+  return searchHybrid(query, scope);
 };

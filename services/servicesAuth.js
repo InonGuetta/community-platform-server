@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import { randomBytes, createHash } from "crypto";
 import { pool } from "../db/pool.js";
 import { conflict, unauthorized, notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
+import { assertUsableEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 
@@ -51,16 +52,62 @@ const hashOf = (token) => createHash("sha256").update(String(token)).digest("hex
 export const issueSessionToken = (user) =>
   jwt.sign({ id: user.id, email: user.email, role: user.role }, env.jwtSecret, { expiresIn: "7d" });
 
-export const register = async (email, password, displayName) => {
+// The roles somebody may ASK to be. A student is the default and needs no
+// approval; the other two are requests an admin decides on.
+//
+// Exported so the route test and the client-facing controller share one list
+// rather than each writing out three strings.
+export const REQUESTABLE_ROLES = new Set(["student", "lecturer", "admin"]);
+
+// Roles that do not take effect until an admin says so. Deriving this from the
+// set above rather than listing it again means adding a fourth role cannot leave
+// it silently self-approving.
+export const NEEDS_APPROVAL = (role) => role === "lecturer" || role === "admin";
+
+// ⚠️ THE ONE INVARIANT OF THIS FUNCTION ⚠️
+//
+// `requestedRole` is a REQUEST. It is never the role.
+//
+// The INSERT below does not name the role column at all, so the account is
+// created 'student' by the schema default — the same as it always was. Writing
+// the requested value into `users.role` here would be privilege escalation in a
+// single line: anyone could POST role=admin to a public, unauthenticated
+// endpoint and own the platform. The value goes to requested_role, which grants
+// nothing, and only controllersUsers.approveUser ever moves it across.
+//
+// test/roleApproval.test.js drives a real HTTP request with role=admin in the
+// body and asserts the created row is a student. If you change this function,
+// that test is the one that must still pass.
+export const register = async (email, password, displayName, requestedRole = "student") => {
+  // Shape first, before anything is normalised or hashed: a malformed address
+  // must not reach the uniqueness query, where it would occupy the "email taken"
+  // branch and give a confusing answer.
+  assertUsableEmail(email);
   const normalizedEmail = normalizeEmail(email);
   assertUsablePassword(password);
+  if (!REQUESTABLE_ROLES.has(requestedRole)) {
+    throw badRequest(`Invalid role: ${requestedRole}`);
+  }
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
   if (existing.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
 
+  const pending = NEEDS_APPROVAL(requestedRole);
   const password_hash = await bcrypt.hash(password, 12);
   const result = await pool.query(
-    "INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) RETURNING id, email, role, display_name",
-    [normalizedEmail, password_hash, displayName]
+    // `role` is deliberately absent from the column list. See the block above.
+    `INSERT INTO users (email, password_hash, display_name, requested_role, approval_status)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, email, role, display_name, requested_role, approval_status`,
+    [
+      normalizedEmail,
+      password_hash,
+      displayName,
+      // Recorded even for a plain student, so "asked for nothing" and "asked to
+      // be a student" are the same row rather than a NULL somebody has to guess
+      // about later.
+      requestedRole,
+      pending ? "pending" : "approved",
+    ]
   );
   const user = result.rows[0];
   const token = issueSessionToken(user);
@@ -407,9 +454,96 @@ export const updateProfile = async (userId, { displayName, avatarUrl }) => {
 
 export const getMe = async (userId) => {
   const result = await pool.query(
-    "SELECT id, email, role, display_name, avatar_url, created_at FROM users WHERE id=$1 AND is_active=TRUE",
+    // requested_role and approval_status ride along so the client can draw the
+    // "your request is waiting" banner without a second call. They are not
+    // secrets — they are this user's own row.
+    `SELECT id, email, role, display_name, avatar_url, created_at,
+            requested_role, approval_status, rejection_reason
+     FROM users WHERE id=$1 AND is_active=TRUE`,
     [userId]
   );
   if (result.rows.length === 0) throw notFound("User not found");
+  return result.rows[0];
+};
+
+// ── Asking for a role after registration ────────────────────────────────────
+//
+// The signup form is not the only way somebody becomes a lecturer, and for two
+// of them it is not a way at all:
+//
+//   * A Google sign-in never sees the form. The OAuth callback returns straight
+//     to the app, so without this endpoint a Google account can NEVER request a
+//     role — a hole in the signup feature rather than a missing extra.
+//   * A student who has been here two years and is now giving a shiur. Asking
+//     them to make a second account would be absurd.
+//
+// It writes to exactly the same columns the signup path does and produces a row
+// the SAME admin queue picks up, so there is one approval flow rather than two.
+// In particular it does NOT touch users.role — approveUser remains the only
+// function that does.
+
+// How long a refusal stands before the same person may ask again.
+//
+// Not a rate limit against abuse — an approval is a human decision and there is
+// nothing to brute-force. It is against the loop where a refusal without a
+// reason produces an immediate identical re-application, which is worse for the
+// applicant than a wait and worse for the admin than a queue.
+const REAPPLY_COOLDOWN_DAYS = 7;
+
+export const requestRole = async (userId, requestedRole) => {
+  if (!NEEDS_APPROVAL(requestedRole)) {
+    // Requesting 'student' is meaningless — everybody already is one — and any
+    // other value is not a role at all.
+    throw badRequest(`Cannot request the role: ${requestedRole}`);
+  }
+
+  const { rows } = await pool.query(
+    `SELECT role, approval_status, requested_role, approved_at
+     FROM users WHERE id=$1 AND is_active=TRUE`,
+    [userId]
+  );
+  if (rows.length === 0) throw notFound("User not found");
+  const user = rows[0];
+
+  // Already has it. Not an error worth a stack trace, but not a no-op either —
+  // silently accepting would leave the account marked 'pending' for a role it
+  // already holds, and the admin queue would show a request that means nothing.
+  if (user.role === requestedRole) {
+    throw conflict("You already have this role", ERROR_CODES.CONFLICT);
+  }
+  // An admin asking to be a lecturer is a DEMOTION, and this is not the path for
+  // it: approveUser would grant it, quietly removing their own admin rights
+  // through a self-service form. Role reduction is an admin action on the users
+  // tab.
+  if (user.role === "admin") {
+    throw badRequest("An admin cannot request a lesser role here");
+  }
+  if (user.approval_status === "pending") {
+    throw conflict("You already have a request waiting", ERROR_CODES.CONFLICT);
+  }
+
+  if (user.approval_status === "rejected" && user.approved_at) {
+    const daysSince = (Date.now() - new Date(user.approved_at).getTime()) / 86_400_000;
+    if (daysSince < REAPPLY_COOLDOWN_DAYS) {
+      const wait = Math.ceil(REAPPLY_COOLDOWN_DAYS - daysSince);
+      throw badRequest(`A previous request was declined. You may apply again in ${wait} day(s).`);
+    }
+  }
+
+  const result = await pool.query(
+    // role is untouched, as everywhere outside approveUser. The previous
+    // refusal's reason is cleared: it belongs to the decision that was made, not
+    // to the one now waiting, and leaving it would show the admin an old "no"
+    // beside a new request.
+    `UPDATE users SET
+       requested_role = $1,
+       approval_status = 'pending',
+       approved_by = NULL,
+       approved_at = NULL,
+       rejection_reason = NULL
+     WHERE id = $2
+     RETURNING id, email, role, display_name, requested_role, approval_status`,
+    [requestedRole, userId]
+  );
   return result.rows[0];
 };
