@@ -2,6 +2,14 @@
 import { pool } from "../db/pool.js";
 import { stripe } from "../lib/stripeClient.js";
 
+// TODO(CR): the PaymentIntent is created at Stripe before the row exists, with
+// no idempotency key. If the INSERT fails (DB blip) the intent lives on at Stripe
+// with no donations row, and a later payment_intent.succeeded for it is logged as
+// "no update applied" — money received and not recorded. Insert the row first
+// (status 'pending', intent id NULL) and update it, or pass an idempotencyKey and
+// let the webhook insert a missing row from the intent's metadata.
+// Separately: updateDonationStatus joins users with an inner join, so a donation
+// whose donor_id is NULL can never leave 'pending'.
 export const createPaymentIntent = async (donorId, amountCents, currency, type) => {
   const paymentIntent = await stripe.paymentIntents.create({
     amount: amountCents,

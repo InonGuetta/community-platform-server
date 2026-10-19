@@ -32,6 +32,12 @@ const aiLimiter = rateLimit({
 
 router.use(verifyToken);
 
+// TODO(CR): both limiters are keyed by IP (the default). A yeshiva shares one
+// public IP, so 20 searches/min is the budget for the whole building, while one
+// person with a few IPs is barely slowed. Key on req.user.id (keyGenerator) now
+// that verifyToken runs first. Also aiLimiter is placed BEFORE requireRole on the
+// two AI routes, so a student's refused requests consume the lecturers' budget —
+// put requireRole first.
 router.get("/search", searchLimiter, controllersTranscripts.searchTranscripts);
 router.get("/:mediaId", validateIntParam("mediaId"), controllersTranscripts.getTranscript);
 router.put("/:mediaId", requireRole("lecturer", "admin"), validateIntParam("mediaId"), controllersTranscripts.updateTranscript);

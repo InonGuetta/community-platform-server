@@ -153,6 +153,14 @@ llmQueue.process(async (job) => {
       logger.warn(`[WORKER:llm]   permanent failure — not retrying: ${err.message}`);
     }
 
+    // TODO(CR): this runs on EVERY failed attempt, but llmQueue retries
+    // transient failures (LLM_ATTEMPTS defaults to 3, with backoff). After
+    // attempt 1 the row says 'error', the client stops polling and shows a
+    // failure, and when attempt 2 succeeds a minute later and writes 'done',
+    // nobody is watching — the summary appears only on a manual reload. Write
+    // 'error' only when no retry is left
+    // (permanent || job.attemptsMade + 1 >= (job.opts.attempts ?? 1)); otherwise
+    // leave the row at 'analyzing'.
     // Make the failure visible instead of leaving the row stuck at 'analyzing'
     // with no summary — that "silent success" is what hid the broken long-audio
     // case. status='error' signals the AI step didn't finish, and also stops the

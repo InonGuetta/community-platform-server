@@ -13,6 +13,11 @@ const LIST_COLUMNS = `
   (SELECT COUNT(*)::int FROM enrollments e WHERE e.course_id = c.id) AS student_count,
   (SELECT COUNT(*)::int FROM media_items m WHERE m.course_id = c.id) AS media_count`;
 
+// TODO(CR): this list (and getCourseById) is served to every signed-in user,
+// students included, and carries student_count — while getStudentCourses below
+// deliberately omits it because "a student has no business knowing who else is
+// enrolled". Also returns inactive courses to students. Pick one rule: strip
+// student_count (and is_active=FALSE rows) for non-privileged callers.
 export const getAllCourses = async () => {
   const result = await pool.query(
     `SELECT ${LIST_COLUMNS}
@@ -77,6 +82,9 @@ export const updateCourse = async (id, data) => {
     throw badRequest("isActive must be a boolean");
   }
 
+  // TODO(CR): lecturer_id uses COALESCE, so an admin can reassign a course but
+  // can never detach it (lecturerId: null is read as "leave alone"). updateMedia
+  // solved the same problem with a setX boolean + CASE; do the same here.
   const result = await pool.query(
     `UPDATE courses SET
        title       = COALESCE($1, title),
@@ -246,6 +254,11 @@ const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${ch
  * only produce a confusing 409), the course's own lecturer (enrolling yourself
  * in your own course means nothing), and deactivated accounts.
  */
+// TODO(CR): the 2-char minimum and LIMIT 20 do not stop enumeration — a script
+// walking all two-letter pairs, or substrings like "@gmail", "@walla", collects
+// the membership 20 at a time, and every row carries the EMAIL. Nothing rate
+// limits the route either. Consider: match email only on an exact/prefix basis,
+// return the email masked, and put a per-user limiter on the route.
 export const searchEnrollableUsers = async (courseId, query) => {
   const term = typeof query === "string" ? query.trim() : "";
   // An empty answer, not an error: the caller is a search box that is still

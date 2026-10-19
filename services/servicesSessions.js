@@ -129,6 +129,10 @@ export const getJoinableRoomToken = async (id, _userId) => {
 // One statement does both the authorization and the state change: the WHERE
 // clause IS the "only the host may end this" check, so there is no window
 // between deciding and acting. Returns null when the caller isn't the host.
+// TODO(CR): neither end path (this one and endSession below) has
+// `AND is_active = TRUE`, so ending an ended session succeeds again: ended_at
+// is overwritten with a later time (wrong duration in any report) and the
+// socket path re-broadcasts SESSION_ENDED.
 export const endSessionByRoomToken = async (roomToken, hostId) => {
   const result = await pool.query(
     `UPDATE live_sessions SET is_active=FALSE, ended_at=NOW()

@@ -15,6 +15,7 @@ const router = Router();
 // Default matches the previous hard-coded value so nothing that uploads today
 // starts failing. Now that the destination is disk rather than the heap, the
 // real constraint is free space — lower this once you know what the box has.
+// TODO(CR): read through lib/env.js like every other variable (project rule).
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 2 * 1024 * 1024 * 1024;
 
 // The stored filename is generated, never taken from the client, so an
@@ -93,9 +94,24 @@ router.get(
   validateIntParam("id"),
   controllersMedia.getTagSuggestions
 );
+// A tag that does not exist yet, proposed from this item's tagging dialog. It
+// waits for an admin (routersAdmin) and is attached to the item on approval.
+router.get("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.getMediaTagProposals);
+router.post("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.proposeTagForMedia);
+router.delete(
+  "/:id/tag-proposals/:proposalId",
+  canManage,
+  validateIntParam("id"),
+  validateIntParam("proposalId"),
+  controllersMedia.withdrawMediaTagProposal
+);
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
 router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
 router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);
+// TODO(CR): each request here spawns a full ffmpeg transcode of a lecture, with
+// no rate limit and no concurrency cap. A handful of parallel requests from one
+// signed-in student saturates the API host's CPU. Add a per-user limiter and a
+// global cap on concurrent extractions (or move it to the worker and cache).
 router.get("/:id/download/audio", validateIntParam("id"), controllersMedia.downloadMediaAudio);
 router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
 router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);

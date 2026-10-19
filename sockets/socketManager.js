@@ -53,6 +53,13 @@ export const authenticateSocket = async (socket, next) => {
       logger.debug("[socket] handshake rejected: no active user behind the token");
       return next(new Error("Unauthorized"));
     }
+    // TODO(CR): verifyToken also refuses a token older than the last password
+    // change (tokenPredatesPasswordChange); this handshake does not. A stolen
+    // cookie therefore keeps opening signalling connections for the rest of its
+    // seven days after the owner resets their password — the exact case the
+    // REST check exists for. Call tokenPredatesPasswordChange(user, payload.iat)
+    // here too. Note also that auth is checked only at handshake: an already-open
+    // socket survives deactivation until it disconnects.
     // The row, not the token's claims — a role changed since the token was signed
     // takes effect on the next connection rather than on expiry.
     socket.user = { id: user.id, role: user.role };
@@ -260,6 +267,11 @@ export const initSockets = (httpServer) => {
     // be read back, none of which anyone has asked for. CHAT_HISTORY exists so a
     // reconnect is not silent about that — it replays what the server holds,
     // which for now is nothing.
+    // TODO(CR): no per-socket rate limit on chat (or on any event). One client in
+    // a loop can broadcast 2000-char messages to every participant as fast as the
+    // socket allows. A small token bucket per socket.id would do. Also, a socket
+    // may JOIN_ROOM several rooms; `[room]` below picks the first arbitrarily —
+    // either refuse a second join or leave the previous room on join.
     onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, ({ text }) => {
       const [room] = sessionRoomsOf(socket);
       if (!room) {
@@ -313,6 +325,10 @@ export const initSockets = (httpServer) => {
         logger.info(`[socket] session ended by user ${socket.user.id}`);
         traceOut("room", SOCKET_EVENTS.SESSION_ENDED);
         io.to(roomToken).emit(SOCKET_EVENTS.SESSION_ENDED);
+        // TODO(CR): the sockets stay IN the room after this. A client that ignores
+        // SESSION_ENDED (or a scripted one) can keep chatting and relaying
+        // signalling in a session the database says is over. Follow with
+        // io.in(roomToken).socketsLeave(roomToken).
       } catch (err) {
         logger.error(`[socket] end-session failed: ${err.message}`);
         socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Could not end the session" });

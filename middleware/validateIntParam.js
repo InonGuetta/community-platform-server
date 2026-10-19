@@ -18,6 +18,9 @@ import { PG_INT_MAX } from "../lib/validate.js";
 export const validateIntParam = (name) => (req, res, next) => {
   const value = req.params[name];
   if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > PG_INT_MAX) {
+    // TODO(CR): the only 400 in the API without a `code`. The client keys its
+    // Hebrew message on the code (apiError.js), so this shows a generic error.
+    // Add an ERROR_CODES entry (both repositories — mirror pair #1).
     return res.status(400).json({ message: `Invalid ${name}` });
   }
   next();

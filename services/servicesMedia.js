@@ -2,6 +2,7 @@
 import { pool } from "../db/pool.js";
 import { visibleMediaSql } from "../lib/permissions.js";
 import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
+import { DEFAULT_MEDIA_SORT } from "../lib/validate.js";
 
 // ── Attribution ─────────────────────────────────────────────────────────────
 //
@@ -108,6 +109,41 @@ const DISPLAY_TIMEZONE = "Asia/Jerusalem";
 const localDateSql = (column) =>
   `(${column} AT TIME ZONE 'UTC' AT TIME ZONE '${DISPLAY_TIMEZONE}')::date`;
 
+// The archive's sort orders, by the names lib/validate.js accepts. Fixed SQL
+// keyed by a validated name — the caller's value selects one of these and is
+// never itself written into the query.
+//
+// Every order ends on the same tie-break, newest first and then by id. Without
+// one, two lessons with the same title or the same number of likes come back in
+// whatever order the planner happens to produce, which can differ between two
+// loads of the same page — cards that swap places on a refresh.
+//
+// LOWER() on the two names: Hebrew has no case, but a title or a lecturer typed
+// in English would otherwise sort every capitalised one ahead of every
+// lower-case one. `like_count` is the output column MEDIA_COLUMNS computes,
+// which ORDER BY may name directly.
+const TIE_BREAK = "m.created_at DESC, m.id DESC";
+
+export const MEDIA_ORDER = {
+  newest: TIE_BREAK,
+  oldest: "m.created_at ASC, m.id ASC",
+  title: `LOWER(m.title) ASC, ${TIE_BREAK}`,
+  creator: `LOWER(m.creator_name) ASC, ${TIE_BREAK}`,
+  liked: `like_count DESC, ${TIE_BREAK}`,
+};
+
+// TODO(CR): three things on the busiest read in the app.
+//  1. No LIMIT / pagination: every archive load returns the whole visible
+//     library, and each row runs five correlated subqueries (MEDIA_COLUMNS).
+//     This grows linearly with the archive. Add keyset pagination.
+//  2. like_count's subquery filters likes by media_id, but likes only has
+//     UNIQUE(user_id, media_id) and (user_id, created_at) — neither leads with
+//     media_id, so it is a scan per row. Needs a new migration with an index on
+//     likes(media_id) (same for watch_progress(media_id) and saved_items(media_id)).
+//  3. uploadedAfter / uploadedBefore reach `$n::date` unvalidated:
+//     ?uploadedAfter=abc is a 22007 from Postgres → 500. `creator` (and
+//     `search`) given twice arrive as arrays and fail the same way. Validate
+//     them in lib/validate.js with the other filters.
 export const getAllMedia = async (filters = {}) => {
   // The visibility rule opens the WHERE clause rather than being one more
   // optional `if` below, and that is the point: it is not a filter the caller
@@ -125,7 +161,7 @@ export const getAllMedia = async (filters = {}) => {
   //
   // The same distinction updateMedia draws with `"courseId" in body`, and
   // optionalSeconds with zero: presence is not the same question as value.
-  /** @type {Array<string|number|boolean|number[]|null>} */
+  /** @type {Array<string|number|boolean|number[]|string[]|null>} */
   const params = [
     filters.visibleCourses === undefined ? [] : filters.visibleCourses,
     // The second dimension, and it fails closed the same way: an absent argument
@@ -134,9 +170,10 @@ export const getAllMedia = async (filters = {}) => {
   ];
   let query = `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE ${visibleMediaSql("$1", "m", "$2")}`;
 
-  if (filters.type) {
-    params.push(filters.type);
-    query += ` AND m.media_type=$${params.length}`;
+  // Any of the chosen types. An empty list is no filter, never "no types".
+  if (filters.types?.length) {
+    params.push(filters.types);
+    query += ` AND m.media_type = ANY($${params.length}::media_type[])`;
   }
   if (filters.courseId !== undefined) {
     params.push(filters.courseId);
@@ -295,8 +332,29 @@ export const getAllMedia = async (filters = {}) => {
     // previous version needed — and that arithmetic was in UTC too.
     query += ` AND ${localDateSql("m.created_at")} <= $${params.length}::date`;
   }
+  // The length of a recording, from duration_seconds (measured at upload — see
+  // lib/mediaDuration.js — and backfilled for older rows).
+  //
+  // Asking for a length at all means asking for something to listen to or
+  // watch, so a document — which has no length — is left out, and so is a
+  // recording whose length is not known: placing it in a range it might not
+  // belong to would be a guess shown as a fact. Min inclusive, max exclusive,
+  // so neighbouring ranges meet without overlapping.
+  const hasMin = Number.isInteger(filters.minDuration);
+  const hasMax = Number.isInteger(filters.maxDuration);
+  if (hasMin || hasMax) {
+    query += " AND m.media_type <> 'text' AND m.duration_seconds IS NOT NULL";
+    if (hasMin) {
+      params.push(filters.minDuration);
+      query += ` AND m.duration_seconds >= $${params.length}`;
+    }
+    if (hasMax) {
+      params.push(filters.maxDuration);
+      query += ` AND m.duration_seconds < $${params.length}`;
+    }
+  }
 
-  query += " ORDER BY m.created_at DESC";
+  query += ` ORDER BY ${MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT]}`;
   const result = await pool.query(query, params);
   return result.rows;
 };
@@ -390,6 +448,26 @@ export const updateMedia = async (id, data) => {
   );
   if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return getMediaById(id);
+};
+
+// A recording's length, written once and only where it is still missing.
+//
+// The upload measures it (see createMedia in the controller); this is for the
+// two places that come later — the transcription worker, which has the file
+// open anyway, and the backfill script for rows uploaded before lengths were
+// measured. "Only where missing" is what makes both of them safe to run any
+// number of times: neither can overwrite a length the upload already wrote.
+//
+// Returns whether a row was changed.
+export const setDurationIfMissing = async (id, durationSeconds) => {
+  if (!Number.isInteger(durationSeconds) || durationSeconds <= 0) return false;
+  const result = await pool.query(
+    `UPDATE media_items SET duration_seconds = $2
+     WHERE id = $1 AND duration_seconds IS NULL AND media_type <> 'text'
+     RETURNING id`,
+    [id, durationSeconds]
+  );
+  return result.rows.length > 0;
 };
 
 export const deleteMedia = async (id) => {

@@ -8,6 +8,15 @@ import passport from "passport";
 import GoogleStrategy from "passport-google-oauth20";
 import { googleOAuthLogin } from "../services/servicesAuth.js";
 
+// TODO(CR): two issues.
+//  1. GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are read from process.env directly
+//     rather than through lib/env.js, against the project rule — a missing value
+//     is not caught at boot, it surfaces as a broken OAuth redirect.
+//  2. googleOAuthLogin throws AppError(401) for a deactivated account or an
+//     unverified email. `done(err)` sends that to errorHandler, so the user's
+//     browser — mid-redirect from Google — lands on a raw JSON body instead of
+//     the sign-in page. Pass `done(null, false, { message })` for AppErrors so
+//     failureRedirect applies, and reserve `done(err)` for real failures.
 passport.use(
   new GoogleStrategy(
     {

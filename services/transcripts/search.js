@@ -150,6 +150,13 @@ const searchKeyword = async (query, scope) => {
   return result.rows;
 };
 
+// TODO(CR): the HNSW index (010) is searched first and the visibility WHERE is
+// applied to what it returns (pgvector post-filtering, ef_search=40 by default).
+// For a student whose visible set is a small part of the library, most of the
+// nearest neighbours are filtered out and semantic/hybrid return far fewer than
+// SEARCH_LIMIT rows — the "hidden rows consume candidate slots" problem the
+// comment on VISIBLE describes, just one level lower. Raise hnsw.ef_search for
+// these queries (SET LOCAL) or use iterative scans (pgvector ≥ 0.8).
 const searchSemantic = async (query, scope) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
   const result = await pool.query(

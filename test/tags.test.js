@@ -482,3 +482,18 @@ test("too many tags is refused before the media row is inserted", async () => {
     stub.restore();
   }
 });
+
+// ── The media-type filter ───────────────────────────────────────────────────
+//
+// The archive's type toggle is a multi-select: "video and audio" is one filter.
+
+test("several media types become one ANY over the enum", async () => {
+  const call = await runList({ types: ["video", "audio"] });
+  assert.match(call.text, /m\.media_type = ANY\(\$\d+::media_type\[\]\)/);
+  assert.ok(call.params.some((v) => Array.isArray(v) && v.join() === "video,audio"));
+});
+
+test("no types is no filter, not a filter that matches nothing", async () => {
+  const call = await runList({ types: [] });
+  assert.doesNotMatch(call.text, /media_type = ANY/);
+});

@@ -128,6 +128,14 @@ const cleanTitle = (title) => {
   return trimmed;
 };
 
+// How many of a list's lectures come back with the list itself.
+//
+// A cap and not "all of them", because this is the page that shows EVERY list at
+// once: without one, a user with a list of 300 shiurim downloads all 300 rows to
+// look at the three most recent. Twelve is four presses of the "more" control,
+// and past it the list has a page of its own that was built for exactly that.
+export const ITEMS_PER_LIST = 12;
+
 // Every list this user owns, newest first.
 //
 // `mediaId` is optional and is what the save menu opens with: it answers "which
@@ -135,18 +143,72 @@ const cleanTitle = (title) => {
 // lists", because the menu cannot draw a single checkbox without both. Passing
 // NULL leaves `contains` false throughout, which is the right answer for a
 // caller that is not looking at a particular lecture.
-export const getPlaylists = async (userId, mediaId = null) => {
+//
+// ── Why the lectures can come back with them ──────────────────────────────
+//
+// The saved-content page shows each list as a heading with its own lectures
+// underneath. It used to show a card per list and nothing else, because that is
+// all this returned — and the alternative to changing that was one request PER
+// LIST from the page, which is a request count that grows with the user's own
+// tidiness.
+//
+// So the items ride along, and ONLY when asked for: the save menu calls this
+// too, and it opens over a lecture to draw checkboxes. Sending it the contents
+// of every list would be a slower menu for nothing.
+//
+// One query, not one per list. A LATERAL join runs the inner select once per
+// row of the outer one and is the reason this is not N+1 — the planner does the
+// looping, in the database, over rows it already has in hand.
+//
+// `scope` is the same visibility rule the flat saved list and the single-list
+// page use, from the same helper. A lecture a user may not see is not shown
+// because it happens to sit in a list of theirs.
+export const getPlaylists = async (
+  userId,
+  { mediaId = null, scope = null, withItems = false } = {}
+) => {
+  // ── The count means "what you can see", always ───────────────────────────
+  //
+  // It counted every row, and a heading that says "5 שיעורים" above two cards is
+  // a page arguing with itself — the lectures underneath it are filtered, and
+  // three of the five belong to a course this viewer is not enrolled in. It was
+  // already the visible count on the single-list page (getPlaylistWithMedia),
+  // so the two disagreed as well.
+  //
+  // A NULL scope is "no restriction" inside visibleMediaSql, which is what an
+  // admin passes and what a caller with nothing to filter by gets.
+  const items = withItems
+    ? `LEFT JOIN LATERAL (
+         SELECT json_agg(row_to_json(recent) ORDER BY recent.added_at DESC) AS rows
+         FROM (
+           SELECT m.*, pi.added_at
+           FROM playlist_items pi
+           JOIN media_items m ON m.id = pi.media_id
+           WHERE pi.playlist_id = p.id AND ${visibleMediaSql("$3", "m", "$4")}
+           ORDER BY pi.added_at DESC
+           LIMIT ${ITEMS_PER_LIST}
+         ) recent
+       ) visible ON true`
+    : "";
+
   const result = await pool.query(
     `SELECT p.*,
-            (SELECT COUNT(*)::int FROM playlist_items pi WHERE pi.playlist_id = p.id) AS item_count,
+            (SELECT COUNT(*)::int
+               FROM playlist_items pi
+               JOIN media_items m ON m.id = pi.media_id
+              WHERE pi.playlist_id = p.id AND ${visibleMediaSql("$3", "m", "$4")}) AS item_count,
+            -- NOT filtered, and it does not need to be: the lecture being asked
+            -- about is the one open in front of the user.
             EXISTS (
               SELECT 1 FROM playlist_items pi
               WHERE pi.playlist_id = p.id AND pi.media_id = $2
             ) AS contains
+            ${withItems ? ", COALESCE(visible.rows, '[]'::json) AS items" : ""}
      FROM playlists p
+     ${items}
      WHERE p.user_id = $1
      ORDER BY p.created_at DESC`,
-    [userId, mediaId]
+    [userId, mediaId, scope?.courses ?? null, scope?.drafts ?? null]
   );
   return result.rows;
 };

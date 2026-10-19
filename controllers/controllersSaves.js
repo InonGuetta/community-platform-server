@@ -24,6 +24,8 @@ export const getSaves = async (req, res) => {
   res.status(200).json(media);
 };
 
+// TODO(CR): no visibility check on mediaId — see the TODO on createLike. Applies
+// to addPlaylistItem and createPlaylist below too.
 export const createSave = async (req, res) => {
   const mediaId = optionalId(req.body?.mediaId, "mediaId");
   if (!mediaId) throw badRequest("mediaId is required");
@@ -40,9 +42,25 @@ export const deleteSave = async (req, res) => {
 
 // `?mediaId=` is what the save menu passes: it needs the lists and which of them
 // already hold the lecture in front of it, and those are one question.
+//
+// `?withItems=1` is what the saved-content page passes, where each list is a
+// heading with its own lectures underneath. Opt-in rather than always, because
+// the save menu opens over a lecture to draw checkboxes and has no use for the
+// contents of every list — and the visibility scope it would then need is a
+// query of its own, paid on every open of a menu.
 export const getPlaylists = async (req, res) => {
   const mediaId = optionalId(req.query?.mediaId, "mediaId");
-  const playlists = await servicesSaves.getPlaylists(req.user.id, mediaId);
+  const withItems = req.query?.withItems === "1" || req.query?.withItems === "true";
+
+  const playlists = await servicesSaves.getPlaylists(req.user.id, {
+    mediaId,
+    withItems,
+    // Always, not only when the items come back: the COUNT is filtered by it
+    // too, and a count that means one thing to the menu and another to the page
+    // is the kind of difference nobody finds until it is wrong on a screen.
+    // It is free for a lecturer or an admin and one query for a student.
+    scope: await viewerScopeFor(req.user),
+  });
   res.status(200).json(playlists);
 };
 

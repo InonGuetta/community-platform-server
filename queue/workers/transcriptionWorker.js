@@ -13,6 +13,8 @@ import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
 import { saveChunks, reconcileMissingTranscripts } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
+import { setDurationIfMissing } from "../../services/servicesMedia.js";
+import { probeDurationSeconds } from "../../lib/mediaDuration.js";
 import { makeOpenAI } from "../../lib/openaiClient.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
@@ -145,6 +147,12 @@ const extractAndSegment = (inputPath) =>
             "-segment_list_type", "csv",
           ])
           .output(pattern)
+          // TODO(CR): an async listener whose rejection nobody observes. If
+          // readdir throws here, the promise returned by extractAndSegment never
+          // settles — the job hangs at 'processing' forever (Bull's stalled check
+          // does not catch a job that is still "active" in a live process) and
+          // the error is an unhandledRejection. Wrap the body in try/catch and
+          // reject(err).
           .on("end", async () => {
             const files = (await fs.promises.readdir(dir))
               .filter((f) => f.endsWith(".mp3"))
@@ -198,6 +206,19 @@ transcriptionQueue.process(async (job) => {
     logger.debug(`[WORKER:transcription] step 2/6 — resolving source from ${s3Key.startsWith("local/") ? "local FS" : "S3"}`);
     source = await resolveSourcePath(s3Key);
     logger.debug(`[WORKER:transcription] step 2/6 ✓ source ready at ${source.path} (${Date.now() - t0}ms)`);
+
+    // The upload measures a recording's length; this is the second chance, for
+    // one whose header could not be read then, or that was uploaded before
+    // lengths were measured at all. The file is on disk here already — fetched
+    // from S3 if it had to be — so it costs a header read and nothing more.
+    // Never allowed to fail the transcription: the length is a convenience.
+    try {
+      if (await setDurationIfMissing(mediaId, await probeDurationSeconds(source.path))) {
+        logger.debug(`[WORKER:transcription] ✓ recorded the length of mediaId=${mediaId}`);
+      }
+    } catch (durationErr) {
+      logger.warn(`[WORKER:transcription] ⚠ could not record the length (non-fatal) mediaId=${mediaId} — ${durationErr.message}`);
+    }
 
     logger.debug(`[WORKER:transcription] step 3/6 — extracting + segmenting audio (${SEGMENT_SECONDS}s chunks, 16kHz mono mp3)`);
     const tExtract = Date.now();

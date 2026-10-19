@@ -2,6 +2,7 @@
 import { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
+import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersAdmin from "../controllers/controllersAdmin.js";
 
 const router = Router();
@@ -20,5 +21,11 @@ router.get("/pipeline-trouble", controllersAdmin.getPipelineTrouble);
 router.post("/reconcile", controllersAdmin.runReconcile);
 
 router.get("/donations", controllersAdmin.getDonations);
+
+// New tags lecturers asked for. Approving creates the tag and tags every item
+// that was waiting on it; see services/servicesTags.js → approveTagProposal.
+router.get("/tag-proposals", controllersAdmin.getTagProposals);
+router.post("/tag-proposals/:id/approve", validateIntParam("id"), controllersAdmin.approveTagProposal);
+router.post("/tag-proposals/:id/reject", validateIntParam("id"), controllersAdmin.rejectTagProposal);
 
 export default router;

@@ -146,6 +146,10 @@ const ADMIN_ONLY = [
   { method: "get", path: "/api/admin/stats" },
   { method: "get", path: "/api/admin/queue-status" },
   { method: "get", path: "/api/admin/system-health" },
+  // Approving a tag writes to the vocabulary everybody filters by.
+  { method: "get", path: "/api/admin/tag-proposals" },
+  { method: "post", path: "/api/admin/tag-proposals/1/approve" },
+  { method: "post", path: "/api/admin/tag-proposals/1/reject" },
 ];
 
 test("a signed-in student is refused the admin-only routes", async (t) => {

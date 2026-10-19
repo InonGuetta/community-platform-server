@@ -2,6 +2,7 @@
 import * as servicesAdmin from "../services/servicesAdmin.js";
 import * as servicesDonations from "../services/servicesDonations.js";
 import { reconcileMissingTranscripts } from "../services/servicesTranscripts.js";
+import * as servicesTags from "../services/servicesTags.js";
 import { logger } from "../lib/logger.js";
 
 export const getStats = async (req, res) => {
@@ -54,6 +55,9 @@ export const runReconcile = async (req, res) => {
 // The ledger and its totals together: a list an admin can read against Stripe,
 // and the sums to check it adds up to. getStats reports only the completed
 // total, which is a number with nothing behind it.
+// TODO(CR): `status` goes into `d.status = $2` unvalidated; anything outside the
+// donation_status enum (e.g. ?status=foo from a stale link) is a Postgres enum
+// error → 500. Check it against the enum values and answer 400.
 export const getDonations = async (req, res) => {
   const { status } = req.query;
   const [donations, totals] = await Promise.all([
@@ -61,4 +65,31 @@ export const getDonations = async (req, res) => {
     servicesDonations.getDonationTotals(),
   ]);
   res.status(200).json({ donations, totals });
+};
+
+// ── New tags waiting for approval ───────────────────────────────────────────
+//
+// requireRole("admin") on the whole router is the only question here: the
+// admin may decide on any proposal, so there is no per-row ownership check.
+
+export const getTagProposals = async (req, res) => {
+  res.status(200).json(await servicesTags.getPendingProposals());
+};
+
+// The body may correct the name and the place before approving. `parentId`
+// present (even as null) means "put it here"; absent means "where it was asked".
+export const approveTagProposal = async (req, res) => {
+  const body = req.body ?? {};
+  const changes = {};
+  if (body.name !== undefined) changes.name = body.name;
+  if ("parentId" in body) changes.parentId = body.parentId;
+  const result = await servicesTags.approveTagProposal(req.params.id, req.user.id, changes);
+  logger.info(`[BE:ctl] tag proposal ${req.params.id} approved by ${req.user.id} → tag ${result.tag_id}, ${result.tagged_count} item(s)`);
+  res.status(200).json(result);
+};
+
+export const rejectTagProposal = async (req, res) => {
+  const result = await servicesTags.rejectTagProposal(req.params.id, req.user.id, req.body?.reason);
+  logger.info(`[BE:ctl] tag proposal ${req.params.id} rejected by ${req.user.id}`);
+  res.status(200).json(result);
 };

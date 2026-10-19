@@ -44,6 +44,10 @@ export const createUser = async (data) => {
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
   if (existing.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
 
+  // TODO(CR): no password floor here — servicesAuth.assertUsablePassword (min 8)
+  // is the rule for register/reset/change, and "enforced in ONE place" is its
+  // stated purpose, but an admin can create an account with password "1". Call
+  // it. Same 23505 race as register: catch it around the INSERT.
   const password_hash = await bcrypt.hash(password, 12);
   const result = await pool.query(
     "INSERT INTO users (email, password_hash, role, display_name) VALUES ($1, $2, $3, $4) RETURNING id, email, role, display_name, created_at",
@@ -143,6 +147,14 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
   }
 };
 
+// TODO(CR): two interactions with the approval flow and email verification.
+//  1. Setting `role` here does not touch approval_status. For a user with a
+//     pending request, an admin who promotes them directly leaves the request
+//     in the queue, and a later approveUser() overwrites the role with
+//     requested_role — possibly a demotion (admin → lecturer). Clear the
+//     pending request (or refuse) when role is changed here.
+//  2. Changing `email` keeps email_verified = TRUE for an address nobody has
+//     proved. Reset it to FALSE and send a verification mail.
 export const updateUser = async (id, data) => {
   const { role, isActive } = data;
   if (role !== undefined && !ROLES.has(role)) throw badRequest(`Invalid role: ${role}`);

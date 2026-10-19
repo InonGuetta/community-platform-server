@@ -59,6 +59,12 @@ export const triggerPipeline = async (mediaId) => {
   // The id is scoped per queue, so a document's `media:7` and a lecture's
   // `media:7` never collide — they are different queues and cannot both apply
   // to the same media item anyway.
+  // TODO(CR): for audio/video only the TRANSCRIPTION queue is checked. Once
+  // transcription has finished, the follow-up LLM job (queued by the worker with
+  // a random id, not `media:<id>`) may still be running; a re-trigger then
+  // passes this check, re-runs transcription and rewrites the chunks under the
+  // LLM job that is reading them. Also refuse while transcripts.status is
+  // 'processing' or 'analyzing', or give the LLM job the same fixed id.
   const jobId = `media:${mediaId}`;
   const existing = await queue.getJob(jobId);
   if (existing) {

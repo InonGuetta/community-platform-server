@@ -61,6 +61,12 @@ export const API_ROUTERS = [
 export const createApp = () => {
   const app = express();
 
+  // TODO(CR): no `app.set("trust proxy", ...)`. Behind nginx / a PaaS load
+  // balancer req.ip is the proxy's address, so every express-rate-limit bucket
+  // (login, recovery, search, AI) is shared by ALL users — ten failed logins
+  // from anyone lock everyone out for a minute. Set it to the real hop count in
+  // production (and keep it off in dev so X-Forwarded-For cannot be spoofed).
+
   // First in the chain on purpose: it opens the request-id scope that every log
   // line below inherits, and a request rejected by helmet or cors should still
   // appear in the log rather than vanish.
@@ -92,6 +98,11 @@ export const createApp = () => {
   // Hebrew lecture is hundreds of KB (UTF-8 Hebrew is ~2 bytes/char), well past the
   // 100KB body-parser default — which silently rejected the PUT with 413 and lost
   // the edit. 20mb leaves ample headroom for any realistic transcript.
+  // TODO(CR): 20mb applies to EVERY route, including the unauthenticated
+  // /api/auth/register, /login and /forgot-password — the body is read and
+  // JSON-parsed before any auth or rate limit decides the request is worthless.
+  // Keep the default (~100kb) globally and raise it only on PUT /api/transcripts
+  // (and notes, if needed).
   const jsonParser = express.json({ limit: "20mb" });
   app.use((req, res, next) => {
     if (req.originalUrl === "/api/donations/webhook") return next();
