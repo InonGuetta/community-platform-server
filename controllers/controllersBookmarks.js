@@ -58,6 +58,13 @@ export const createBookmark = async (req, res) => {
   if (!hasTime && !hasPosition && place === null) {
     throw badRequest("One of timestampSeconds, charPosition or rect is required");
   }
+  // TODO(CR): the comment above says "never to both", but only "neither" is
+  // refused. A body with timestampSeconds AND rect (or AND charPosition) is
+  // stored with two anchors, and client/src/utilities/bookmarks.js classifies it
+  // by whichever test runs first — the exact two-vs-three-anchor confusion
+  // CLAUDE.md warns about. Refuse more than one anchor kind here. It would also
+  // be worth checking the anchor kind against media.media_type once loaded
+  // (a timestamp on a text item, a rect on a video).
 
   if (quotedText !== undefined && quotedText !== null) {
     if (typeof quotedText !== "string") throw badRequest("quotedText must be a string");

@@ -302,3 +302,158 @@ test("no route accepts a recording key", () => {
     "recording has no client and no caller — see ARCHITECTURE.md's known-debt list"
   );
 });
+
+// The archive's type toggle sends `type` once per chosen type. An unknown one
+// would reach an enum column and come back as a 500.
+test("an unknown media type in the archive filter is a 400", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("an unknown media type reached the database");
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?type=video&type=banana").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /type/);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("several media types reach the query as one list", async () => {
+  let listed;
+  const { token, stub } = authed((text, params) => {
+    if (/media_type = ANY/.test(text)) listed = params.find(Array.isArray);
+    return { rows: [] };
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?type=video&type=audio").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 200);
+    assert.ok(listed, "the type filter reached the listing query");
+  } finally {
+    stub.restore();
+  }
+});
+
+// ── The archive's sort order ────────────────────────────────────────────────
+//
+// Through the real router, controller and service: what is asserted is the SQL
+// the listing actually sends, which is the one place the order takes effect.
+
+const listingOrder = async (query) => {
+  let orderBy = null;
+  const { token, stub } = authed((text) => {
+    const at = text.lastIndexOf("ORDER BY");
+    if (/FROM media_items m/.test(text) && at !== -1) orderBy = text.slice(at + "ORDER BY".length).trim();
+    return { rows: [] };
+  });
+  try {
+    const res = await request(app).get(`/api/media/get-all${query}`).set("Cookie", `token=${token}`);
+    return { status: res.status, body: res.body, orderBy };
+  } finally {
+    stub.restore();
+  }
+};
+
+test("with no sort, the archive is newest first, as it always was", async () => {
+  const { status, orderBy } = await listingOrder("");
+  assert.equal(status, 200);
+  assert.equal(orderBy, "m.created_at DESC, m.id DESC");
+});
+
+test("each sort reaches the query as its own ORDER BY", async () => {
+  const expected = {
+    oldest: /^m\.created_at ASC/,
+    title: /^LOWER\(m\.title\) ASC/,
+    creator: /^LOWER\(m\.creator_name\) ASC/,
+    liked: /^like_count DESC/,
+  };
+  for (const [sort, pattern] of Object.entries(expected)) {
+    const { status, orderBy } = await listingOrder(`?sort=${sort}`);
+    assert.equal(status, 200, sort);
+    assert.match(orderBy ?? "", pattern, `sort=${sort} sent ORDER BY ${orderBy}`);
+  }
+});
+
+test("a sort combines with the filters rather than replacing them", async () => {
+  let sent;
+  const { token, stub } = authed((text) => {
+    if (/FROM media_items m/.test(text)) sent = text;
+    return { rows: [] };
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?type=audio&sort=title").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 200);
+    assert.match(sent, /media_type = ANY/);
+    assert.match(sent, /ORDER BY LOWER\(m\.title\)/);
+  } finally {
+    stub.restore();
+  }
+});
+
+// Refused before the database is asked anything.
+test("an unknown sort is a 400 that names the choices", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("an unknown sort reached the database");
+  });
+  try {
+    const res = await request(app).get("/api/media/get-all?sort=created_at").set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.match(res.body.message, /sort must be one of newest, oldest, title, creator, liked/);
+  } finally {
+    stub.restore();
+  }
+});
+
+// ── The archive's length filter ─────────────────────────────────────────────
+
+const listingWith = async (query) => {
+  let sent = null;
+  const { token, stub } = authed((text, params) => {
+    if (/FROM media_items m/.test(text) && /ORDER BY/.test(text)) sent = { text, params };
+    return { rows: [] };
+  });
+  try {
+    const res = await request(app).get(`/api/media/get-all${query}`).set("Cookie", `token=${token}`);
+    return { status: res.status, body: res.body, sent };
+  } finally {
+    stub.restore();
+  }
+};
+
+test("a length range reaches the query, min inclusive and max exclusive", async () => {
+  const { status, sent } = await listingWith("?minDuration=900&maxDuration=1800");
+  assert.equal(status, 200);
+  assert.match(sent.text, /m\.duration_seconds >= \$\d+/);
+  assert.match(sent.text, /m\.duration_seconds < \$\d+/);
+  assert.ok(sent.params.includes(900) && sent.params.includes(1800));
+});
+
+// Asking for a length is asking for something to listen to: a document has
+// none, and a recording whose length is unknown cannot be placed in a range.
+test("asking for a length leaves out documents and recordings of unknown length", async () => {
+  const { sent } = await listingWith("?minDuration=3600");
+  assert.match(sent.text, /m\.media_type <> 'text'/);
+  assert.match(sent.text, /m\.duration_seconds IS NOT NULL/);
+  assert.doesNotMatch(sent.text, /m\.duration_seconds < /);
+});
+
+test("with no length asked for, documents are not left out", async () => {
+  const { sent } = await listingWith("");
+  assert.doesNotMatch(sent.text, /duration_seconds/);
+});
+
+test("a length that is not a whole number of seconds is a 400", async () => {
+  // One stub per request: `authed` answers only the first query — the sign-in
+  // lookup — and each request makes its own.
+  for (const query of ["?minDuration=abc", "?maxDuration=1e3", "?minDuration=1800&maxDuration=900"]) {
+    const { token, stub } = authed(() => {
+      throw new Error("a malformed length reached the database");
+    });
+    try {
+      const res = await request(app).get(`/api/media/get-all${query}`).set("Cookie", `token=${token}`);
+      assert.equal(res.status, 400, query);
+      assert.match(res.body.message, /Duration/, query);
+    } finally {
+      stub.restore();
+    }
+  }
+});

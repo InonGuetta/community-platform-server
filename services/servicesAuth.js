@@ -88,6 +88,12 @@ export const register = async (email, password, displayName, requestedRole = "st
   if (!REQUESTABLE_ROLES.has(requestedRole)) {
     throw badRequest(`Invalid role: ${requestedRole}`);
   }
+  // TODO(CR): check-then-insert races — two registrations of the same address
+  // both pass this SELECT and the second INSERT hits the unique index as 23505,
+  // which errorHandler answers with a 500. Catch 23505 around the INSERT and
+  // throw EMAIL_TAKEN, as servicesUsers.updateUserRow already does. Also
+  // displayName is not trimmed or length-checked here, while updateProfile caps
+  // it at 120 and the column is VARCHAR(100) — a long name is a 500 at the driver.
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
   if (existing.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
 
@@ -119,6 +125,14 @@ export const register = async (email, password, displayName, requestedRole = "st
 
 // ── Proving the address belongs to whoever is using the account ─────────────
 
+// TODO(CR): password_resets has no `purpose` column, so a verification token is
+// accepted by resetPassword() too (it looks up by token_hash alone). That turns
+// every verification link into a 24h password-reset credential — longer than the
+// 1h RESET_TTL_MS the reset flow promises — and a reset token can likewise verify
+// an address. Add a `purpose` column (new migration) and filter on it in
+// verifyEmail/resetPassword. While here: verifyEmail runs its UPDATE users and its
+// "mark used" as two statements outside a transaction, so two concurrent clicks
+// both succeed; fold them into one statement or a transaction.
 const issueVerificationToken = async (userId) => {
   const { token, hash } = newToken();
   // Reuses the password_resets table, and the reason is that it is the same
@@ -150,6 +164,11 @@ export const verifyEmail = async (token) => {
   return result.rows[0];
 };
 
+// TODO(CR): `email` and `password` are only checked for truthiness in the
+// controller. A JSON body with a non-string (e.g. {"email": 1} or
+// {"password": {}}) makes normalizeEmail / bcrypt.compare throw a TypeError and
+// the caller gets a 500 instead of 400/401. Same for register(). Check
+// `typeof === "string"` before use.
 export const login = async (email, password) => {
   const normalizedEmail = normalizeEmail(email);
   const result = await pool.query("SELECT * FROM users WHERE email=$1 AND is_active=TRUE", [normalizedEmail]);
@@ -181,6 +200,16 @@ export const googleOAuthLogin = async (profile) => {
   const displayName = profile.displayName;
   const avatarUrl = profile.photos?.[0]?.value;
 
+  // TODO(CR): three gaps on this path.
+  //  1. `google_id=$1 OR email=$2` can match TWO rows (one by google_id, another
+  //     by email) and rows[0] is then whichever the planner returns first — the
+  //     caller may be signed into the wrong account. Prefer the google_id match
+  //     explicitly (ORDER BY (google_id = $1) DESC) or query twice.
+  //  2. A row matched by email whose google_id is set to a DIFFERENT Google id
+  //     skips the `!user.google_id` branch and signs in anyway. Refuse when
+  //     user.google_id && user.google_id !== googleId.
+  //  3. A profile with no email reaches the INSERT below with email=NULL, which
+  //     violates users.email NOT NULL (001) and answers 500. Refuse it up front.
   const existing = await pool.query("SELECT * FROM users WHERE google_id=$1 OR email=$2", [googleId, email]);
 
   if (existing.rows.length > 0) {
@@ -431,6 +460,12 @@ export const changePassword = async (userId, currentPassword, newPassword) => {
 // row, and role, is_active and email must not be reachable from it. Changing an
 // email address is a re-verification flow, not a profile edit, and it is
 // deliberately not here.
+// TODO(CR): avatarUrl accepts any string of any length and any scheme. It is
+// rendered as an <img src> to other users, so it can point at a tracking pixel
+// that logs every viewer's IP. Restrict to https:// (or to our own storage) and
+// cap the length. Separately, the 120-char display-name cap below is wider than
+// display_name VARCHAR(100) in 001 — 101..120 chars pass this check and then fail
+// at the driver as a 500.
 export const updateProfile = async (userId, { displayName, avatarUrl }) => {
   const trimmed = typeof displayName === "string" ? displayName.trim() : null;
   if (trimmed !== null && trimmed.length === 0) {

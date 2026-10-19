@@ -14,12 +14,19 @@ import ffmpeg from "fluent-ffmpeg";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType, isViewableText } from "../lib/mediaFormats.js";
 import { decodeTextBuffer } from "../lib/textEncoding.js";
+import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
 import { isPrivileged, assertCanManageMedia } from "../lib/permissions.js";
 import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
-import { requireSeconds, optionalBoolean, optionalId, tagIdFilter } from "../lib/validate.js";
-import { setMediaTags, cleanTagSelection, getTagTree } from "../services/servicesTags.js";
+import {
+  requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
+  durationRangeFilter,
+} from "../lib/validate.js";
+import {
+  setMediaTags, cleanTagSelection, getTagTree,
+  proposeTag, getPendingProposalsForMedia, withdrawProposal,
+} from "../services/servicesTags.js";
 import { suggestTags } from "../lib/tagSuggestions.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
@@ -84,11 +91,19 @@ const downloadDisposition = (title, ext) => {
 };
 
 export const getAllMedia = async (req, res) => {
-  const { type, published, search, courseId, creator, tagIds, excludeTagIds, uploadedAfter, uploadedBefore } =
-    req.query;
+  const {
+    type, published, search, courseId, creator, tagIds, excludeTagIds, uploadedAfter, uploadedBefore, sort,
+    minDuration, maxDuration,
+  } = req.query;
 
+  // One type or several — the archive's type toggle is a multi-select.
+  const parsedTypes = mediaTypeFilter(type);
   const parsedTagIds = tagIdFilter(tagIds, "tagIds");
   const parsedExcludeTagIds = tagIdFilter(excludeTagIds, "excludeTagIds");
+  // Checked before anything is queried, like the filters: an order nobody can
+  // honour is the caller's mistake, and says so.
+  const parsedSort = mediaSortFilter(sort);
+  const duration = durationRangeFilter(minDuration, maxDuration);
   // Asking for a branch and asking for it to be left out is a contradiction, and
   // the query would honour the exclusion and answer with nothing. An empty
   // archive is exactly how somebody concludes the filter is broken, so it is
@@ -104,7 +119,7 @@ export const getAllMedia = async (req, res) => {
   const scope = await viewerScopeFor(req.user);
 
   const items = await servicesMedia.getAllMedia({
-    type,
+    types: parsedTypes,
     // The access rule, applied by the service unconditionally. It used to be
     // expressed as `published: true` for a student — a filter in the same slot
     // as the caller's own — so the rule and the preference were one field, and
@@ -137,6 +152,13 @@ export const getAllMedia = async (req, res) => {
     excludeTagIds: parsedExcludeTagIds,
     uploadedAfter,
     uploadedBefore,
+    // An order, not a filter: it changes which card comes first, never which
+    // cards there are.
+    sort: parsedSort,
+    // Seconds, either end optional — see durationRangeFilter. A document has no
+    // length, so asking for one leaves documents out (servicesMedia).
+    ...(duration.min !== null && { minDuration: duration.min }),
+    ...(duration.max !== null && { maxDuration: duration.max }),
     ...(courseId !== undefined && { courseId: optionalId(courseId, "courseId") }),
   });
   res.status(200).json(items.map(publicMedia));
@@ -184,6 +206,12 @@ export const createMedia = async (req, res) => {
           })
         : null;
 
+    // A recording's length, measured from the file itself while it is still on
+    // this disk — once it has gone to S3, reading its header means fetching it
+    // back. Documents have no length. Never fails the upload: an unreadable
+    // header is null, and the transcription worker tries again later.
+    const durationSeconds = mediaType === "text" ? null : await probeDurationSeconds(req.file.path);
+
     let s3Key;
     if (s3Configured()) {
       s3Key = `uploads/${req.file.filename}`;
@@ -204,12 +232,20 @@ export const createMedia = async (req, res) => {
       s3Key = `local/${req.file.filename}`;
     }
 
+    // TODO(CR): courseId is never checked against the caller. A lecturer can
+    // file their upload into ANOTHER lecturer's course (it then appears to that
+    // course's students as part of it), and lecturerId can name anyone,
+    // including a student. Same gap in updateMedia. Load the course and apply
+    // the assertCanManageCourse rule (move it to lib/permissions.js so both
+    // controllers share it), and validate lecturerId the way
+    // servicesCourses.assertValidLecturer does.
     const item = await servicesMedia.createMedia({
       uploaderId: req.user.id,
       title,
       description,
       mediaType,
       s3Key,
+      durationSeconds,
       // Both optional: an unassigned upload lands in the general library, which
       // is what every item predating courses already is.
       courseId: optionalId(courseId, "courseId"),
@@ -231,7 +267,7 @@ export const createMedia = async (req, res) => {
     let created = item;
     if (chosenTags) {
       try {
-        await setMediaTags(item.id, chosenTags);
+        await setMediaTags(item.id, chosenTags, { canCreate: req.user.role === "admin" });
         // Read again, for the same reason updateMedia does: the row above was
         // produced before the tags existed, and the client replaces its copy of
         // the item with whatever comes back. Returning the pre-tag row made an
@@ -265,6 +301,11 @@ export const updateMedia = async (req, res) => {
   // before the item exists. This body carries isPublished, so without the check a
   // lecturer could unpublish another lecturer's material.
   assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
+  // TODO(CR): `...rest` forwards the rest of the body unfiltered, so a caller
+  // can also set durationSeconds (which the duration filter trusts) and
+  // thumbnailUrl (any URL) — neither is meant to be user-editable. And title is
+  // not validated: `"title": ""` passes COALESCE and blanks it, although
+  // createMedia requires one. Use an explicit allowlist, as updateTranscript does.
   let item = await servicesMedia.updateMedia(req.params.id, {
     ...rest,
     isPublished: optionalBoolean(isPublished, "isPublished"),
@@ -283,7 +324,10 @@ export const updateMedia = async (req, res) => {
     await setMediaTags(req.params.id, {
       ids: [].concat(body.tagIds ?? []).map(Number),
       names: [].concat(body.tags ?? []),
-    });
+    // A typed name that is not a tag yet becomes one only for an admin; for
+    // everybody else it is refused and the dialog offers "הוסף תגית", which
+    // sends it for approval. See proposeTagForMedia below.
+    }, { canCreate: req.user.role === "admin" });
     // Read AGAIN, because the row above was read before the tags were written
     // and still carries the old ones. The client replaces its copy of the item
     // with whatever comes back here, so returning the stale row meant tags saved
@@ -302,6 +346,11 @@ export const deleteMedia = async (req, res) => {
   // a refused caller must not get as far as touching storage.
   assertCanManageMedia(req.user, item);
 
+  // TODO(CR): the file is deleted BEFORE the row. If servicesMedia.deleteMedia
+  // then fails (DB blip, 503), the item stays in the archive pointing at a file
+  // that no longer exists — every play/download is a 404 and nothing will clean
+  // it up. Delete the row first, then the file best-effort (an orphaned file is
+  // the cheaper failure).
   if (item.s3_key.startsWith("local/")) {
     const filePath = path.join(LOCAL_UPLOAD_DIR, item.s3_key.slice("local/".length));
     await fs.promises.unlink(filePath).catch(() => {});
@@ -493,6 +542,12 @@ const streamLocalFile = async (item, req, res) => {
 const streamS3Object = async (item, req, res) => {
   // S3 applies the Range itself and answers 206 + Content-Range when it honored
   // it, so the header is passed through untouched.
+  // TODO(CR): the Range is forwarded BEFORE we know the object is a .txt or a
+  // Word file. For those two branches below, a ranged request gets back only
+  // part of the object, which is then decoded as if whole (truncated text) or
+  // handed to mammoth (a partial zip → DOCUMENT_UNREADABLE). The local-file path
+  // ignores Range for these types; do the same here — decide by extension
+  // (item.s3_key) first and only forward Range for media.
   const range = req.headers.range;
   const s3Response = await s3.send(
     new GetObjectCommand({
@@ -610,6 +665,9 @@ export const downloadMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (await refuseIfHidden(req, res, item)) return;
+    // TODO(CR): for a key with no dot this yields the whole key
+    // ("local/1700-abc"), so the download is named "<title>.local/1700-abc".
+    // Use extensionOf() like the rest of this file.
     const ext = item.s3_key.split(".").pop();
 
     if (item.s3_key.startsWith("local/")) {
@@ -731,6 +789,11 @@ export const getContinueWatching = async (req, res) => {
   res.status(200).json(items.map(publicMedia));
 };
 
+// TODO(CR): neither progress handler checks canUserSeeMedia. saveProgress on a
+// media id that does not exist fails the FK and answers 500, while one that
+// exists (draft or not) answers 200 — an existence oracle over the id space that
+// the 404-not-403 rule elsewhere in this file is designed to prevent. Load the
+// item and refuseIfHidden first, as the stream/download handlers do.
 export const getProgress = async (req, res) => {
   const progress = await servicesMedia.getWatchProgress(req.user.id, req.params.id);
   res.status(200).json(progress);
@@ -778,3 +841,27 @@ export const getTags = async (req, res) => {
   res.status(200).json(await getTagTree({ visibleCourses: scope.courses, visibleDrafts: scope.drafts }));
 };
 
+
+// ── A new tag, proposed from an item's tagging dialog ───────────────────────
+//
+// The item is what the tag will be attached to once an admin approves it (an
+// admin's own proposal is approved on the spot), so ownership is checked as for
+// any other write to the item's tags.
+export const proposeTagForMedia = async (req, res) => {
+  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
+  const { name, parentId } = req.body ?? {};
+  const result = await proposeTag({ mediaId: Number(req.params.id), name, parentId, user: req.user });
+  // 201 either way — something was created: a proposal, or (for an admin) the tag.
+  res.status(201).json(result);
+};
+
+export const getMediaTagProposals = async (req, res) => {
+  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
+  res.status(200).json(await getPendingProposalsForMedia(req.params.id));
+};
+
+export const withdrawMediaTagProposal = async (req, res) => {
+  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
+  await withdrawProposal(req.params.id, req.params.proposalId);
+  res.status(204).end();
+};

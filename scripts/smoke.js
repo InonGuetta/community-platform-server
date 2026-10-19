@@ -3,6 +3,7 @@ import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
 import { getAllMedia, getContinueWatching } from "../services/servicesMedia.js";
+import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
 import { getNotesByUser } from "../services/servicesNotes.js";
 import { getPendingApprovals } from "../services/servicesUsers.js";
@@ -10,6 +11,11 @@ import { getStudentsOfLecturer, searchEnrollableUsers } from "../services/servic
 import {
   getBookmarksByUser, createBookmark, deleteBookmark,
 } from "../services/servicesBookmarks.js";
+import {
+  proposeTag, getPendingProposalsForMedia, getPendingProposals,
+  approveTagProposal, rejectTagProposal, withdrawProposal,
+} from "../services/servicesTags.js";
+import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
 
 // The check the test suite structurally cannot make: a real query, through the
@@ -137,6 +143,69 @@ const checks = [
       const all = await getAllMedia({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED });
       const asStudent = await getAllMedia({ visibleCourses: [], visibleDrafts: [] });
       return `${all.length} visible unrestricted, ${asStudent.length} to an unenrolled student`;
+    },
+  },
+  {
+    name: "getAllMedia with several media types (the enum-array cast)",
+    run: async () => {
+      // `= ANY($n::media_type[])` is a cast the planner either accepts or does
+      // not, and the suite only ever sees it as a string.
+      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const all = await getAllMedia(scope);
+      const two = await getAllMedia({ ...scope, types: ["video", "audio"] });
+      const one = await getAllMedia({ ...scope, types: ["video"] });
+      if (one.length > two.length || two.length > all.length) {
+        throw new Error("a wider type filter returned FEWER rows than a narrower one");
+      }
+      return `${one.length} video, ${two.length} video+audio, ${all.length} unfiltered`;
+    },
+  },
+  {
+    name: "getAllMedia in every sort order (the ORDER BY each name stands for)",
+    run: async () => {
+      // The route tests assert on the ORDER BY as a string. Only a real planner
+      // can say whether it parses — `like_count` names an output column, which
+      // ORDER BY accepts only as a bare name, and a reshuffle that wrapped it in
+      // an expression would pass every stubbed test and fail here.
+      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const counts = [];
+      for (const sort of MEDIA_SORTS) {
+        const rows = await getAllMedia({ ...scope, sort });
+        counts.push(rows.length);
+      }
+      if (new Set(counts).size > 1) {
+        throw new Error(`the sort changed how many rows came back: ${counts.join(", ")}`);
+      }
+      return `${MEDIA_SORTS.length} orders, ${counts[0]} rows each`;
+    },
+  },
+  {
+    name: "getAllMedia by length (duration_seconds, documents left out)",
+    run: async () => {
+      // Real rows, real planner. The ranges are the client's buckets; together
+      // they must account for every recording with a known length exactly once,
+      // which is what min-inclusive / max-exclusive promises.
+      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const buckets = [
+        { maxDuration: 900 },
+        { minDuration: 900, maxDuration: 1800 },
+        { minDuration: 1800, maxDuration: 3600 },
+        { minDuration: 3600 },
+      ];
+      const counts = [];
+      for (const range of buckets) {
+        const rows = await getAllMedia({ ...scope, ...range });
+        if (rows.some((r) => r.media_type === "text" || r.duration_seconds === null)) {
+          throw new Error("a length range returned a document or a recording of unknown length");
+        }
+        counts.push(rows.length);
+      }
+      const { rows: [{ n }] } = await pool.query(
+        "SELECT COUNT(*)::int AS n FROM media_items WHERE media_type <> 'text' AND duration_seconds IS NOT NULL"
+      );
+      const sum = counts.reduce((a, b) => a + b, 0);
+      if (sum !== n) throw new Error(`the ranges hold ${sum} recordings between them, but ${n} have a length`);
+      return `${counts.join(" + ")} = ${n} recordings with a length, each in exactly one range`;
     },
   },
   {
@@ -568,6 +637,127 @@ const checks = [
         return `stored on page ${listed.page_number} at ${back.x}, ${back.y} and read back exact`;
       } finally {
         if (created) await deleteBookmark(created.id, user.id).catch(() => {});
+      }
+    },
+  },
+  {
+    name: "a saved list comes back with its lectures (LATERAL join)",
+    run: async () => {
+      // The suite asserts on the SQL as TEXT — it checks that the words are
+      // there, which is all a stubbed pool can check. It would pass just as
+      // happily on SQL Postgres refuses to parse, and this query is the first
+      // LATERAL join in the codebase.
+      //
+      // Read-only: it selects, and the row it selects belongs to whoever is
+      // first in the users table.
+      const { rows: [user] } = await pool.query("SELECT id FROM users LIMIT 1");
+      if (!user) return "no user to read lists for";
+
+      const scope = { courses: null, drafts: null };
+      const lists = await getPlaylists(user.id, { withItems: true, scope });
+
+      if (!Array.isArray(lists)) throw new Error("the query did not return rows");
+      if (lists.length === 0) return "the query runs; this user owns no lists";
+
+      // json_agg over no rows is NULL, and a page that maps over null crashes.
+      // COALESCE is what makes an empty list an empty list.
+      for (const list of lists) {
+        if (!Array.isArray(list.items)) {
+          throw new Error(`list ${list.id} came back with items as ${typeof list.items}, not an array`);
+        }
+        if (list.items.length > ITEMS_PER_LIST) {
+          throw new Error(`list ${list.id} returned ${list.items.length} items, past the cap of ${ITEMS_PER_LIST}`);
+        }
+        // Newest first, which is the order the page reads them in.
+        const dates = list.items.map((i) => new Date(i.added_at).getTime());
+        if (dates.some((d, i) => i > 0 && d > dates[i - 1])) {
+          throw new Error(`list ${list.id} came back out of order`);
+        }
+      }
+
+      const withItems = lists.filter((l) => l.items.length > 0).length;
+      return `${lists.length} list(s), ${withItems} holding lectures, none past the cap`;
+    },
+  },
+  {
+    name: "a proposed tag waits, and approval files it and tags the item (migration 029)",
+    run: async () => {
+      // `npm test` stubs the pool, so it has never asked Postgres whether the
+      // ON CONFLICT in proposeTag names an index that exists — a partial index
+      // is inferred only when the WHERE matches it, and a mismatch fails at
+      // runtime, on the first proposal anybody makes.
+      //
+      // The service functions open their own transactions, so they run on ONE
+      // real client inside an outer transaction that is always rolled back:
+      // their BEGIN/COMMIT/ROLLBACK become savepoints, and pool.query is routed
+      // to the same client so reads see the uncommitted rows. Nothing survives.
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_tx");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_tx");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_tx");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        const { rows: [user] } = await client.query("SELECT id FROM users LIMIT 1");
+        const { rows: [item] } = await client.query("SELECT id FROM media_items ORDER BY id LIMIT 1");
+        const { rows: [parent] } = await client.query("SELECT id FROM tags ORDER BY id LIMIT 1");
+        if (!user || !item || !parent) return "no user, item or tag to propose against";
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const lecturer = { id: user.id, role: "lecturer" };
+        const name = `__smoke ${Date.now()}`;
+
+        const first = await proposeTag({ mediaId: item.id, name, parentId: parent.id, user: lecturer });
+        const again = await proposeTag({ mediaId: item.id, name: name.toUpperCase(), parentId: parent.id, user: lecturer });
+        if (again.id !== first.id) throw new Error("the same name in the same place became two proposals — the pending unique index is not matching");
+
+        const forItem = await getPendingProposalsForMedia(item.id);
+        if (!forItem.some((p) => p.id === first.id)) throw new Error("the item does not list its own pending proposal");
+        const queue = await getPendingProposals();
+        const queued = queue.find((p) => p.id === first.id);
+        if (!queued || !Array.isArray(queued.media) || !queued.media.some((m) => m.id === item.id)) {
+          throw new Error("the admin queue is missing the proposal or the item waiting on it");
+        }
+
+        const approved = await approveTagProposal(first.id, user.id);
+        const { rows: tagged } = await client.query(
+          `SELECT 1 FROM tags t JOIN media_tags mt ON mt.tag_id = t.id
+            WHERE t.id = $1 AND t.parent_id = $2 AND mt.media_id = $3`,
+          [approved.tag_id, parent.id, item.id]
+        );
+        if (tagged.length === 0) throw new Error("approval did not put the tag under its parent and on the item");
+
+        let exists = false;
+        try {
+          await proposeTag({ mediaId: item.id, name, parentId: parent.id, user: lecturer });
+        } catch (err) {
+          exists = err.code === "TAG_EXISTS";
+        }
+        if (!exists) throw new Error("proposing a tag that now exists was not refused with TAG_EXISTS");
+
+        const second = await proposeTag({ mediaId: item.id, name: `${name} b`, parentId: null, user: lecturer });
+        await rejectTagProposal(second.id, user.id, "smoke");
+        const third = await proposeTag({ mediaId: item.id, name: `${name} c`, parentId: null, user: lecturer });
+        await withdrawProposal(item.id, third.id);
+        const { rows: [left] } = await client.query("SELECT COUNT(*)::int AS n FROM tag_proposals WHERE id = $1", [third.id]);
+        if (left.n !== 0) throw new Error("a withdrawn proposal nobody waits on was left for an admin to decide");
+
+        return "proposed, merged, queued, approved onto the item, then refused as existing; reject and withdraw work";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
       }
     },
   },

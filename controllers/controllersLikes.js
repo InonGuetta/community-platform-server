@@ -21,6 +21,12 @@ export const getLikes = async (req, res) => {
   res.status(200).json(media);
 };
 
+// TODO(CR): no canUserSeeMedia check before the INSERT. A student can like a
+// draft or another course's lesson (it then counts in like_count, which the
+// owner sees), and an id that does not exist fails the FK as a 500 while one that
+// exists answers 201 — an existence oracle. Same gap in controllersSaves
+// (createSave, addPlaylistItem, createPlaylist with mediaId). Load the item and
+// answer 404 when hidden, as controllersBookmarks.createBookmark does.
 export const createLike = async (req, res) => {
   const mediaId = optionalId(req.body?.mediaId, "mediaId");
   if (!mediaId) throw badRequest("mediaId is required");

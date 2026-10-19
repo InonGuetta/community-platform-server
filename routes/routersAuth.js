@@ -41,6 +41,10 @@ const roleRequestLimiter = rateLimit({
 
 router.post("/register", authLimiter, controllersAuth.register);
 router.post("/login", authLimiter, controllersAuth.login);
+// TODO(CR): verifyToken in front of logout means an expired / invalidated
+// cookie answers 401 and is never cleared by the server — the browser keeps
+// sending a dead token. Clearing a cookie needs no authentication; drop
+// verifyToken here.
 router.post("/logout", verifyToken, controllersAuth.logout);
 router.get("/me", verifyToken, controllersAuth.getMe);
 

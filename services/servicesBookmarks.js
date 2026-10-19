@@ -13,6 +13,11 @@ import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 // from without a request per bookmark. Ordering by title first groups a
 // cross-lecture list by lecture; for the media-scoped call every row shares one
 // title, so it collapses to the timestamp ordering NotesPanel relies on.
+// TODO(CR): no visibility filter. createBookmark checks the item is visible, but
+// once a student is unenrolled or the lesson is unpublished, its title keeps
+// coming back here (and in servicesNotes.getNotesByUser). Likes and saves
+// already apply visibleMediaSql to the same situation; do the same here, or at
+// least null out media_title for rows the caller can no longer see.
 export const getBookmarksByUser = async (userId, mediaId) => {
   let query = `
     SELECT b.*, m.title AS media_title, m.media_type

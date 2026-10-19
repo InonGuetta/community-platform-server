@@ -4,8 +4,14 @@ import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // Notes are joined to media so the client can show which lecture a note came
 // from (title) without a second round-trip. media_title is null for free notes.
+//
+// The TYPE comes with it, and it is not decoration: the notebook draws an icon
+// beside "מתוך: <שיעור>", and with only a title to go on it drew a play triangle
+// for every note — including notes taken on a filmed shiur and on a sefer. Both
+// columns are null together for a free note, so the client has one condition to
+// check rather than two.
 const SELECT_WITH_MEDIA = `
-  SELECT n.*, m.title AS media_title
+  SELECT n.*, m.title AS media_title, m.media_type AS media_type
   FROM notes n
   LEFT JOIN media_items m ON m.id = n.media_id
 `;
@@ -76,6 +82,13 @@ export const reorderNotes = async (userId, ids) => {
   return { reordered: result.rows.length };
 };
 
+// TODO(CR): PUT with a missing field writes NULL — a client that sends only
+// {body} wipes the title (and vice versa). Use COALESCE like every other update
+// in this codebase, or require both. There is also no length cap on title/body:
+// with the global 20mb JSON limit a single note can be 20MB of base64 images,
+// returned in full on every getNotesByUser. And the server stores the HTML
+// unsanitized — the client's sanitizeNoteHtml is the only filter, so anything
+// that writes via the API directly bypasses it.
 export const updateNote = async (id, userId, { title, body }) => {
   const result = await pool.query(
     `UPDATE notes SET title=$1, body=$2, updated_at=NOW()

@@ -60,6 +60,12 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
+  // TODO(CR): Postgres input/constraint errors fall through to the 500 below:
+  // 23505 unique_violation (register race), 23503 foreign_key_violation (like /
+  // save / progress on a media id that does not exist), 22007/22008 bad date
+  // (?uploadedAfter=abc), 22P02 bad text representation, 22001 string too long.
+  // These are the caller's fault and should be 4xx. Map them here as a backstop
+  // (409 / 404 / 400) — the per-call-site 23505 catches stay as the precise form.
   // req.path rather than originalUrl: the query string is where user input
   // lands (?search=…, ?code=… on the OAuth callback), and this line goes to the
   // log at error level where it is kept the longest.

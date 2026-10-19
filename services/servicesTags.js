@@ -1,14 +1,16 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { badRequest } from "../lib/AppError.js";
+import { badRequest, conflict, notFound, ERROR_CODES } from "../lib/AppError.js";
 import { visibleMediaSql } from "../lib/permissions.js";
 
 // Tags — what kind of content an item is.
 //
-// A tag is created by being used. There is no "create a tag" screen and no fixed
-// vocabulary: the upload form offers what is already in use and accepts anything
-// new, which is the same arrangement creator_name has. See migration 024 for why
-// that is deliberate and what turning it into a controlled vocabulary would cost.
+// The vocabulary is a tree (migration 025), and it grows only with an admin's
+// approval. A lecturer who needs a tag that is not there PROPOSES it, with the
+// place in the tree it belongs (proposeTag); the items it was proposed on get
+// it the moment an admin approves (approveTagProposal). It used to be that
+// anything typed became a root tag on the spot, which is how a controlled
+// vocabulary fills with near-duplicates nobody chose. See migration 029.
 
 // Matches VARCHAR(60) in 024_create_tags.sql. SQL cannot import this, so the
 // migration carries a comment naming this constant — a column narrower than the
@@ -119,7 +121,33 @@ export const cleanTagSelection = ({ ids = [], names = [] } = {}) => {
   return { ids: chosenIds, names: clean };
 };
 
-export const setMediaTags = async (mediaId, selection = {}) => {
+// Names that already exist as root tags, and nothing else. What a non-admin's
+// typed names resolve through: a tag somebody typed before approvals existed
+// is still theirs to pick, but a NEW one goes through proposeTag.
+const existingRootTags = async (client, names) => {
+  if (names.length === 0) return [];
+  const { rows } = await client.query(
+    `SELECT id, LOWER(name) AS key FROM tags
+     WHERE parent_id IS NULL AND LOWER(name) = ANY($1::text[])`,
+    [names.map((n) => n.toLowerCase())]
+  );
+  const found = new Set(rows.map((r) => r.key));
+  const missing = names.filter((n) => !found.has(n.toLowerCase()));
+  if (missing.length > 0) {
+    throw badRequest(`תגית חדשה נכנסת למערכת רק באישור מנהל — יש להציע אותה דרך "הוסף תגית": ${missing.join(", ")}`);
+  }
+  return rows.map((r) => r.id);
+};
+
+/**
+ * @param {number|string} mediaId
+ * @param {{ ids?: number[], names?: string[] }} [selection]
+ * @param {{ canCreate?: boolean }} [options] canCreate — may a typed name that
+ *   does not exist yet become a tag? Only an admin's may: everybody else's new
+ *   tag waits for approval (proposeTag). Defaults to NO, so a caller that
+ *   forgets to decide cannot open the vocabulary.
+ */
+export const setMediaTags = async (mediaId, selection = {}, { canCreate = false } = {}) => {
   const { ids: chosenIds, names: clean } = cleanTagSelection(selection);
 
   const client = await pool.connect();
@@ -127,7 +155,7 @@ export const setMediaTags = async (mediaId, selection = {}) => {
     await client.query("BEGIN");
     await client.query("DELETE FROM media_tags WHERE media_id=$1", [mediaId]);
 
-    const ids2 = await upsertRootTags(client, clean);
+    const ids2 = canCreate ? await upsertRootTags(client, clean) : await existingRootTags(client, clean);
     const allIds = [...new Set([...chosenIds, ...ids2])];
     if (allIds.length > 0) {
       const values = allIds.map((_, i) => `($1, $${i + 2})`).join(", ");
@@ -228,3 +256,269 @@ export const getTagTree = async (scope = {}) => {
   );
   return rows;
 };
+
+// ── Proposals: a new tag waits for an admin ─────────────────────────────────
+//
+// Migration 029 says why a proposal is not a tag with a status column. The
+// short version: every read of `tags` would have to remember to skip it.
+
+// The same BEGIN/COMMIT/ROLLBACK/release every write below needs.
+const inTransaction = async (work) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// A parent id from a request: absent/null means "a new root heading", anything
+// else must be a tag that exists. Checked rather than left to the foreign key,
+// whose failure would reach the caller as a 500.
+const resolveParentId = async (db, parentId) => {
+  if (parentId === null || parentId === undefined || parentId === "") return null;
+  const id = Number(parentId);
+  if (!Number.isInteger(id) || id <= 0) throw badRequest("תגית האב אינה תקינה");
+  const { rows } = await db.query("SELECT id FROM tags WHERE id=$1", [id]);
+  if (rows.length === 0) throw badRequest("Parent tag not found", ERROR_CODES.TAG_PARENT_NOT_FOUND);
+  return id;
+};
+
+const requireTagName = (value) => {
+  const name = cleanTag(value);
+  if (!name) throw badRequest("יש להזין שם לתגית");
+  return name;
+};
+
+// The tag already standing at this place, if any. Siblings are unique by
+// LOWER(name) (025), so this is at most one row.
+const tagAt = async (db, parentId, name) => {
+  const { rows } = await db.query(
+    "SELECT id FROM tags WHERE parent_id IS NOT DISTINCT FROM $1 AND LOWER(name) = LOWER($2)",
+    [parentId, name]
+  );
+  return rows[0]?.id ?? null;
+};
+
+// Creates the tag at this place, or returns the one already there — so an
+// approval can never produce a sibling that differs only in case. is_seeded
+// TRUE: an approved tag is part of the agreed vocabulary, not a free-typed one,
+// and the filter draws it that way.
+const ensureTag = async (db, parentId, name) => {
+  const existing = await tagAt(db, parentId, name);
+  if (existing) return existing;
+  const { rows } = await db.query(
+    "INSERT INTO tags (name, parent_id, is_seeded) VALUES ($1, $2, TRUE) RETURNING id",
+    [name, parentId]
+  );
+  return rows[0].id;
+};
+
+// ON CONFLICT because an item may already carry the tag — an admin approving a
+// tag that somebody meanwhile picked by hand.
+const attachTag = async (db, tagId, mediaIds) => {
+  if (mediaIds.length === 0) return;
+  await db.query(
+    `INSERT INTO media_tags (media_id, tag_id)
+     SELECT m, $1 FROM unnest($2::int[]) AS m
+     ON CONFLICT DO NOTHING`,
+    [tagId, mediaIds]
+  );
+};
+
+/**
+ * A new tag, asked for on one item.
+ *
+ * An admin's request IS an approval, so it creates the tag and tags the item at
+ * once — asking them to approve their own proposal on another screen would be
+ * ceremony. Everybody else's waits: the proposal is stored, the item is linked
+ * to it, and approveTagProposal does the rest.
+ *
+ * Two lecturers asking for the same name in the same place share one proposal
+ * (the partial unique index in 029), so the admin decides once and both items
+ * get the tag.
+ *
+ * @param {{ mediaId: number|string, name: unknown, parentId?: unknown, user: { id: number, role: string } }} args
+ */
+export const proposeTag = ({ mediaId, name: rawName, parentId: rawParentId, user }) => {
+  const name = requireTagName(rawName);
+  return inTransaction(async (client) => {
+    const parentId = await resolveParentId(client, rawParentId);
+
+    if (await tagAt(client, parentId, name)) {
+      throw conflict("A tag with this name already exists under this parent", ERROR_CODES.TAG_EXISTS);
+    }
+
+    if (user.role === "admin") {
+      const tagId = await ensureTag(client, parentId, name);
+      await attachTag(client, tagId, [Number(mediaId)]);
+      // Recorded all the same, already decided: the log of who added what to
+      // the vocabulary should not have a hole where the admins' additions are.
+      await client.query(
+        `INSERT INTO tag_proposals (name, parent_id, proposed_by, status, decided_by, decided_at, tag_id)
+         VALUES ($1, $2, $3, 'approved', $3, NOW(), $4)`,
+        [name, parentId, user.id, tagId]
+      );
+      return { status: "approved", tag_id: tagId, name, parent_id: parentId };
+    }
+
+    // The per-item cap counts what is waiting too. Otherwise an item at eight
+    // tags could collect proposals and pass the cap the day they are approved.
+    const { rows: [{ count }] } = await client.query(
+      `SELECT (SELECT COUNT(*) FROM media_tags WHERE media_id = $1)
+            + (SELECT COUNT(*) FROM tag_proposal_media pm
+                 JOIN tag_proposals p ON p.id = pm.proposal_id
+                WHERE pm.media_id = $1 AND p.status = 'pending') AS count`,
+      [mediaId]
+    );
+    if (Number(count) >= TAGS_PER_ITEM_MAX) {
+      throw badRequest(`ניתן לשייך עד ${TAGS_PER_ITEM_MAX} תגיות לפריט, כולל תגיות שממתינות לאישור`);
+    }
+
+    // DO UPDATE rather than DO NOTHING so RETURNING gives back the existing
+    // proposal too — the same reason upsertRootTags does it.
+    const { rows: [proposal] } = await client.query(
+      `INSERT INTO tag_proposals (name, parent_id, proposed_by)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (COALESCE(parent_id, 0), LOWER(name)) WHERE status = 'pending'
+       DO UPDATE SET name = tag_proposals.name
+       RETURNING id, name, parent_id, status, created_at`,
+      [name, parentId, user.id]
+    );
+    await client.query(
+      "INSERT INTO tag_proposal_media (proposal_id, media_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      [proposal.id, mediaId]
+    );
+    return proposal;
+  });
+};
+
+/** What is still waiting for approval on this item — shown in its tagging dialog. */
+export const getPendingProposalsForMedia = async (mediaId) => {
+  const { rows } = await pool.query(
+    `SELECT p.id, p.name, p.parent_id, p.status, p.created_at
+     FROM tag_proposals p
+     JOIN tag_proposal_media pm ON pm.proposal_id = p.id
+     WHERE pm.media_id = $1 AND p.status = 'pending'
+     ORDER BY p.created_at, p.id`,
+    [mediaId]
+  );
+  return rows;
+};
+
+/**
+ * Takes this item's claim off a pending proposal — the lecturer changed their
+ * mind, or mistyped. The proposal itself goes too once no item waits on it: an
+ * admin should not be asked to approve a tag nobody wants any more.
+ */
+export const withdrawProposal = (mediaId, proposalId) =>
+  inTransaction(async (client) => {
+    const { rowCount } = await client.query(
+      `DELETE FROM tag_proposal_media pm
+       USING tag_proposals p
+       WHERE pm.proposal_id = p.id AND p.status = 'pending'
+         AND pm.proposal_id = $1 AND pm.media_id = $2`,
+      [proposalId, mediaId]
+    );
+    if (rowCount === 0) throw notFound("ההצעה לא נמצאה, או שכבר הוכרעה");
+    await client.query(
+      `DELETE FROM tag_proposals p
+       WHERE p.id = $1 AND p.status = 'pending'
+         AND NOT EXISTS (SELECT 1 FROM tag_proposal_media pm WHERE pm.proposal_id = p.id)`,
+      [proposalId]
+    );
+  });
+
+/**
+ * The admin's queue: every pending proposal, who asked, and which items wait on
+ * it. The parent travels as an id; the client has the tree and draws the path
+ * from it, the same way the picker does.
+ */
+export const getPendingProposals = async () => {
+  const { rows } = await pool.query(
+    `SELECT p.id, p.name, p.parent_id, p.created_at,
+            u.display_name AS proposed_by_name,
+            COALESCE(
+              json_agg(json_build_object('id', m.id, 'title', m.title) ORDER BY m.id)
+                FILTER (WHERE m.id IS NOT NULL),
+              '[]'
+            ) AS media
+     FROM tag_proposals p
+     LEFT JOIN users u ON u.id = p.proposed_by
+     LEFT JOIN tag_proposal_media pm ON pm.proposal_id = p.id
+     LEFT JOIN media_items m ON m.id = pm.media_id
+     WHERE p.status = 'pending'
+     GROUP BY p.id, u.display_name
+     ORDER BY p.created_at, p.id`
+  );
+  return rows;
+};
+
+// Locks the proposal for the decision. FOR UPDATE so two admins deciding at once
+// cannot both approve it, or one approve and the other reject.
+const lockPending = async (client, id) => {
+  const { rows } = await client.query(
+    "SELECT id, name, parent_id, status FROM tag_proposals WHERE id=$1 FOR UPDATE",
+    [id]
+  );
+  if (rows.length === 0) throw notFound("ההצעה לא נמצאה");
+  if (rows[0].status !== "pending") throw conflict("This proposal has already been decided", ERROR_CODES.TAG_PROPOSAL_DECIDED);
+  return rows[0];
+};
+
+/**
+ * Approves a proposal: the tag enters the tree and every item that asked for it
+ * is tagged with it, in one transaction.
+ *
+ * The admin may correct the name and the place first — the lecturer's spelling
+ * or branch is a suggestion, and fixing it here beats approving it wrong and
+ * renaming afterwards. What is stored on the proposal is what was approved.
+ *
+ * @param {number|string} id
+ * @param {number} adminId
+ * @param {{ name?: unknown, parentId?: unknown }} [changes] omit parentId to
+ *   keep the proposed place; null makes it a root.
+ */
+export const approveTagProposal = (id, adminId, changes = {}) =>
+  inTransaction(async (client) => {
+    const proposal = await lockPending(client, id);
+    const name = changes.name === undefined ? proposal.name : requireTagName(changes.name);
+    const parentId =
+      "parentId" in changes ? await resolveParentId(client, changes.parentId) : proposal.parent_id;
+
+    const tagId = await ensureTag(client, parentId, name);
+    const { rows: waiting } = await client.query(
+      "SELECT media_id FROM tag_proposal_media WHERE proposal_id=$1",
+      [id]
+    );
+    const mediaIds = waiting.map((r) => r.media_id);
+    await attachTag(client, tagId, mediaIds);
+
+    await client.query(
+      `UPDATE tag_proposals
+       SET status='approved', name=$2, parent_id=$3, tag_id=$4, decided_by=$5, decided_at=NOW()
+       WHERE id=$1`,
+      [id, name, parentId, tagId, adminId]
+    );
+    return { id: Number(id), tag_id: tagId, name, parent_id: parentId, tagged_count: mediaIds.length };
+  });
+
+/** Refuses a proposal. The items keep every tag they had; only the request goes. */
+export const rejectTagProposal = (id, adminId, reason) =>
+  inTransaction(async (client) => {
+    await lockPending(client, id);
+    const cleanReason = typeof reason === "string" && reason.trim() ? reason.trim().slice(0, 500) : null;
+    await client.query(
+      `UPDATE tag_proposals
+       SET status='rejected', rejection_reason=$2, decided_by=$3, decided_at=NOW()
+       WHERE id=$1`,
+      [id, cleanReason, adminId]
+    );
+    return { id: Number(id), status: "rejected" };
+  });
