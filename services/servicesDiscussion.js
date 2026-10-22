@@ -25,4 +25,4 @@ export {
   getRecentMessages,
 } from "./discussion/conversations.js";
 
-export { askInLesson } from "./discussion/chat.js";
+export { askInLesson, prepareAsk, streamAsk } from "./discussion/chat.js";

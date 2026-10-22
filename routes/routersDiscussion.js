@@ -46,5 +46,7 @@ router.get("/:mediaId/search", validateIntParam("mediaId"), searchLimiter, contr
 router.get("/:mediaId/conversation", validateIntParam("mediaId"), controllersDiscussion.getConversation);
 router.post("/:mediaId/conversation", validateIntParam("mediaId"), conversationLimiter, controllersDiscussion.startConversation);
 router.post("/:mediaId/messages", validateIntParam("mediaId"), chatLimiter, controllersDiscussion.postMessage);
+// The same, answered as it is written (Server-Sent Events) — same budget.
+router.post("/:mediaId/messages/stream", validateIntParam("mediaId"), chatLimiter, controllersDiscussion.postMessageStream);
 
 export default router;

@@ -1,7 +1,7 @@
 // @ts-check
 import * as servicesDiscussion from "../services/servicesDiscussion.js";
 import { viewerScopeFor } from "../services/servicesVisibility.js";
-import { badRequest } from "../lib/AppError.js";
+import { badRequest, ERROR_CODES } from "../lib/AppError.js";
 
 // Same ceiling as the library-wide search, for the same reason: every search is
 // an embedding plus a GPT-4o rerank, billed by input size, and nothing a person
@@ -56,21 +56,81 @@ export const startConversation = async (req, res) => {
 // conversation.
 export const MAX_QUESTION_CHARS = 1000;
 
-// Ask a question about this lesson. It always goes into the caller's latest
-// conversation on it — there is no conversation id in the body to trust.
-export const postMessage = async (req, res) => {
+// The question from the body, checked — shared by both ways of asking.
+const questionFrom = (req) => {
   const raw = req.body?.question;
   if (typeof raw !== "string" || !raw.trim()) throw badRequest("'question' is required");
   const question = raw.trim();
   if (question.length > MAX_QUESTION_CHARS) {
     throw badRequest(`A question must be at most ${MAX_QUESTION_CHARS} characters`);
   }
+  return question;
+};
 
+// Ask a question about this lesson. It always goes into the caller's latest
+// conversation on it — there is no conversation id in the body to trust.
+export const postMessage = async (req, res) => {
   const result = await servicesDiscussion.askInLesson({
     user: req.user,
     mediaId: req.params.mediaId,
-    question,
+    question: questionFrom(req),
     scope: await viewerScopeFor(req.user),
   });
   res.status(201).json(result);
+};
+
+// The same question, answered as it is written — Server-Sent Events.
+//
+// Everything that can refuse (400, 404, 409) runs BEFORE the event stream is
+// opened, so a refusal is still an ordinary JSON error with its status code,
+// handled by errorHandler like every other route. Once the stream is open the
+// status is committed, and a failure becomes an `error` event instead.
+//
+//   event: delta  data: { text }                        what the gate let through
+//   event: done   data: { conversation, messages }      the stored exchange
+//   event: error  data: { code, message }               the answer failed
+//
+// A reader who leaves mid-answer aborts the OpenAI stream, and nothing is
+// stored — the same as an answer that failed.
+export const postMessageStream = async (req, res) => {
+  const prepared = await servicesDiscussion.prepareAsk({
+    user: req.user,
+    mediaId: req.params.mediaId,
+    question: questionFrom(req),
+    scope: await viewerScopeFor(req.user),
+  });
+
+  res.status(200).set({
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    // A reverse proxy that buffers would hold every event until the end.
+    "X-Accel-Buffering": "no",
+  });
+  res.flushHeaders();
+
+  const abort = new AbortController();
+  res.on("close", () => {
+    if (!res.writableEnded) abort.abort();
+  });
+  const send = (event, data) => {
+    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const result = await servicesDiscussion.streamAsk(prepared, {
+      onDelta: (text) => send("delta", { text }),
+      signal: abort.signal,
+    });
+    if (result) send("done", result);
+  } catch (err) {
+    // Only an AppError's code and message are the user's to see; anything
+    // else is the generic failure, as errorHandler would have answered it.
+    const known = err?.expose && err?.code;
+    send("error", {
+      code: known ? err.code : ERROR_CODES.AI_ANSWER_FAILED,
+      message: known ? err.message : "The AI could not answer right now",
+    });
+  }
+  res.end();
 };

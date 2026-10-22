@@ -8,6 +8,7 @@ import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
 import {
   askInLesson, validateAnswer, systemPrompt, HISTORY_MESSAGES, NOTHING_FOUND_ANSWER, UNGROUNDED_ANSWER,
+  NOT_DISCUSSED_TAG, createCitationGate, prepareAsk, streamAsk,
 } from "../services/discussion/chat.js";
 import { FULL_TEXT_MAX_CHARS, passageLabel } from "../services/discussion/context.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
@@ -54,12 +55,23 @@ const flowDb = ({ lesson = LESSON, chunks = [recording(0), recording(1)], conver
 };
 
 // Records what each dependency was asked; answers with `reply`.
-const fakeDeps = ({ reply = { answer: "הרב אמר כך [1].", citations: [1] }, hits = [], rewritten = "שאלה מנוסחת" } = {}) => {
-  const seen = { answer: [], rewrite: [], search: [] };
+// `reply` is the model's text; answerStream yields it in `pieces` when given,
+// or whole otherwise.
+const fakeDeps = ({ reply = "הרב אמר כך [1].", pieces = null, hits = [], rewritten = "שאלה מנוסחת" } = {}) => {
+  const seen = { answer: [], rewrite: [], search: [], signal: null };
   return {
     seen,
     deps: {
       answer: async (messages) => { seen.answer.push(messages); if (reply instanceof Error) throw reply; return reply; },
+      answerStream: async function* (messages, signal) {
+        seen.answer.push(messages);
+        seen.signal = signal;
+        if (reply instanceof Error) throw reply;
+        for (const piece of pieces ?? [reply]) {
+          if (piece instanceof Error) throw piece;
+          yield piece;
+        }
+      },
       rewrite: async (history, q) => { seen.rewrite.push({ history, q }); if (rewritten instanceof Error) throw rewritten; return rewritten; },
       search: async (mediaId, q, scope) => { seen.search.push({ mediaId, q, scope }); return hits; },
     },
@@ -184,51 +196,50 @@ test("history goes back to the model with its old citation numbers removed", asy
 // ── Citations ───────────────────────────────────────────────────────────────
 
 test("an invented citation is removed from the text and never stored", () => {
-  const { answer, cited } = validateAnswer({ answer: "כך [1] וגם כך [9][2].", citations: [2, 7, "x"] }, 3);
+  const { answer, cited } = validateAnswer("כך [1] וגם כך [9][2].", 3);
   assert.equal(answer, "כך [1] וגם כך [2].");
   assert.deepEqual(cited, [1, 2]);
 });
 
 // PRD ASK-3: "אין ציטוט — אין תשובה". A claim with no source is withheld.
 test("an answer that cites nothing is withheld, not shown", () => {
-  const result = validateAnswer({ found: true, answer: "הרב אמר שצריך לצום שלושה ימים.", citations: [] }, 3);
+  const result = validateAnswer("הרב אמר שצריך לצום שלושה ימים.", 3);
   assert.equal(result.answer, UNGROUNDED_ANSWER);
   assert.equal(result.grounded, false);
   assert.deepEqual(result.cited, []);
 });
 
 test("an answer whose only citations were invented is withheld too", () => {
-  const result = validateAnswer({ found: true, answer: "כך נאמר [9].", citations: [9] }, 3);
-  assert.equal(result.answer, UNGROUNDED_ANSWER);
-});
-
-test("a reply that does not say whether it found anything is treated as a claim", () => {
-  assert.equal(validateAnswer({ answer: "כך וכך." }, 3).answer, UNGROUNDED_ANSWER);
+  assert.equal(validateAnswer("כך נאמר [9].", 3).answer, UNGROUNDED_ANSWER);
 });
 
 // The one rightly uncited answer.
-test("'not discussed here' passes without a citation", () => {
-  const result = validateAnswer({ found: false, answer: "הנושא הזה לא נידון בשיעור.", citations: [] }, 3);
+test("'not discussed here' passes without a citation, and its tag is not shown", () => {
+  const result = validateAnswer(`${NOT_DISCUSSED_TAG} הנושא הזה לא נידון בשיעור.`, 3);
   assert.equal(result.answer, "הנושא הזה לא נידון בשיעור.");
   assert.equal(result.grounded, true);
 });
 
-test("the prompt asks the model to say whether it found the answer", () => {
-  assert.match(systemPrompt({ title: "t", creator: "c", isBook: false }), /"found"/);
+// Only where it opens the answer: a tag in the middle is not a way around ASK-3.
+test("the tag later in an answer excuses nothing", () => {
+  assert.equal(validateAnswer(`טענה. ${NOT_DISCUSSED_TAG} ועוד.`, 3).answer, UNGROUNDED_ANSWER);
 });
 
-test("a citation only in the list still counts, if it is real", () => {
-  assert.deepEqual(validateAnswer({ answer: "תשובה", citations: [3, 1, 3] }, 3).cited, [1, 3]);
+test("the prompt asks for plain text, citations, and the tag", () => {
+  const prompt = systemPrompt({ title: "t", creator: "c", isBook: false });
+  assert.ok(prompt.includes(NOT_DISCUSSED_TAG));
+  assert.match(prompt, /בלי JSON/);
+  assert.match(prompt, /לפחות הפניה אחת/);
 });
 
-test("a reply with no answer is a failure, not an empty message", () => {
-  assert.throws(() => validateAnswer({ citations: [1] }, 3));
-  assert.throws(() => validateAnswer({ answer: "   " }, 3));
+test("a reply with no text is a failure, not an empty message", () => {
+  assert.throws(() => validateAnswer("   ", 3));
+  assert.throws(() => validateAnswer(undefined, 3));
 });
 
 test("a withheld answer is what gets stored, with no citations", async () => {
   const { stub, stored } = flowDb();
-  const { deps } = fakeDeps({ reply: { found: true, answer: "טענה בלי מקור", citations: [] } });
+  const { deps } = fakeDeps({ reply: "טענה בלי מקור" });
   try {
     await ask(deps);
     assert.equal(stored[1].content, UNGROUNDED_ANSWER);
@@ -240,7 +251,7 @@ test("a withheld answer is what gets stored, with no citations", async () => {
 
 test("a stored citation is a snapshot of where the passage is, not a chunk id", async () => {
   const { stub, stored } = flowDb({ chunks: [recording(0), recording(1, "התשובה היא חזרה")] });
-  const { deps } = fakeDeps({ reply: { answer: "חזרה [2].", citations: [2] } });
+  const { deps } = fakeDeps({ reply: "חזרה [2]." });
   try {
     await ask(deps);
     const [citation] = stored[1].citations;
@@ -315,6 +326,131 @@ test("the question and the answer are stored in order, and both returned", async
   }
 });
 
+// ── The citation gate, fed in pieces ────────────────────────────────────────
+// Streaming must not weaken ASK-3: nothing an uncited answer says is ever
+// emitted, and a marker split across two pieces is judged whole.
+
+const feed = (pieces, passageCount = 3) => {
+  const gate = createCitationGate(passageCount);
+  const shown = pieces.map((p) => gate.push(p));
+  return { shown, end: gate.finish() };
+};
+
+test("nothing is shown until the answer cites a real passage", () => {
+  const { shown, end } = feed(["הרב ", "אמר ", "שצריך ", "לצום [1].", " ועוד."]);
+  assert.deepEqual(shown.slice(0, 3), ["", "", ""], "uncited text is held");
+  assert.equal(shown[3], "הרב אמר שצריך לצום [1].", "and released whole with its citation");
+  assert.equal(shown.join("") + end.tail, end.answer);
+});
+
+test("an answer that never cites is withheld, and not one word of it was shown", () => {
+  const { shown, end } = feed(["הרב אמר ", "שצריך לצום."]);
+  assert.deepEqual(shown, ["", ""]);
+  assert.equal(end.tail, "");
+  assert.equal(end.answer, UNGROUNDED_ANSWER);
+});
+
+test("a marker split across pieces is judged whole", () => {
+  const { shown, end } = feed(["כך נאמר [", "1", "] בשיעור."]);
+  assert.equal(shown.join("") + end.tail, "כך נאמר [1] בשיעור.");
+  assert.deepEqual(end.cited, [1]);
+});
+
+test("an invented marker, even split, never reaches the screen", () => {
+  const { shown, end } = feed(["כך [1] וגם [", "9] כך."]);
+  assert.doesNotMatch(shown.join("") + end.tail, /\[9\]/);
+  assert.deepEqual(end.cited, [1]);
+});
+
+// "[1" could still become "[12]" — with 12 passages that is a different one.
+test("a number is not judged before its bracket closes", () => {
+  const { shown, end } = feed(["כך [1", "2]."], 12);
+  assert.equal(shown[0], "", "neither [1] nor text may be shown yet");
+  assert.deepEqual(end.cited, [12]);
+});
+
+test("the not-discussed tag works when it arrives in pieces, and is never shown", () => {
+  const { shown, end } = feed(["[[NOT_", "DISCUSSED]] הנושא ", "לא נידון."]);
+  assert.equal(shown.join("") + end.tail, "הנושא לא נידון.");
+  assert.equal(end.grounded, true);
+});
+
+// ── Streaming ───────────────────────────────────────────────────────────────
+
+const prepare = (deps) => prepareAsk({ user: ADMIN, mediaId: 42, question: "מה העיקר?", scope: SCOPE, deps });
+
+test("a streamed answer is sent through the gate and stored as the same answer", async () => {
+  const { stub, stored } = flowDb();
+  const { deps } = fakeDeps({ pieces: ["העיקר ", "הוא תשובה [", "2]. ", "וגם תפילה [1]."] });
+  try {
+    const deltas = [];
+    const result = await streamAsk(await prepare(deps), { onDelta: (t) => deltas.push(t) });
+    assert.equal(deltas.join(""), "העיקר הוא תשובה [2]. וגם תפילה [1].");
+    assert.equal(stored[1].content, "העיקר הוא תשובה [2]. וגם תפילה [1].");
+    assert.deepEqual(stored[1].citations.map((c) => c.n), [1, 2]);
+    assert.deepEqual(result.messages.map((m) => m.role), ["user", "assistant"]);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a streamed answer that never cites sends nothing and stores the withheld answer", async () => {
+  const { stub, stored } = flowDb();
+  const { deps } = fakeDeps({ pieces: ["טענה ", "בלי מקור."] });
+  try {
+    const deltas = [];
+    await streamAsk(await prepare(deps), { onDelta: (t) => deltas.push(t) });
+    assert.deepEqual(deltas, []);
+    assert.equal(stored[1].content, UNGROUNDED_ANSWER);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a stream that breaks midway is a 502, and stores nothing", async () => {
+  const { stub, stored } = flowDb();
+  const { deps } = fakeDeps({ pieces: ["תשובה [1] ", new Error("connection reset")] });
+  try {
+    await assert.rejects(
+      async () => streamAsk(await prepare(deps), { onDelta: () => {} }),
+      { statusCode: 502, code: "AI_ANSWER_FAILED" }
+    );
+    assert.equal(stored.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a reader who leaves mid-answer stops it, and nothing is stored", async () => {
+  const { stub, stored } = flowDb();
+  const abort = new AbortController();
+  const { deps, seen } = fakeDeps({ pieces: ["תשובה [1] ", "המשך"] });
+  try {
+    const result = await streamAsk(await prepare(deps), {
+      onDelta: () => abort.abort(),
+      signal: abort.signal,
+    });
+    assert.equal(result, null);
+    assert.equal(seen.signal, abort.signal, "the abort reaches the model's stream");
+    assert.equal(stored.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("when retrieval finds nothing, the stream asks no model either", async () => {
+  const big = "א".repeat(FULL_TEXT_MAX_CHARS + 1);
+  const { stub, stored } = flowDb({ chunks: [recording(0, big)] });
+  const { deps, seen } = fakeDeps({ hits: [] });
+  try {
+    await streamAsk(await prepare(deps), { onDelta: () => {} });
+    assert.equal(seen.answer.length, 0);
+    assert.equal(stored[1].content, NOTHING_FOUND_ANSWER);
+  } finally {
+    stub.restore();
+  }
+});
+
 // ── Over HTTP ───────────────────────────────────────────────────────────────
 // Only what stops before OpenAI: the controller's own validation.
 
@@ -338,6 +474,25 @@ test("a missing, blank, non-string or oversized question is refused before any w
       const res = await request(app).post("/api/discussion/42/messages").set("Cookie", `token=${token}`).send(body);
       await t.test(name, () => assert.equal(res.status, 400));
     }
+  } finally {
+    stub.restore();
+  }
+});
+
+// Every refusal happens before the event stream opens, so it is still an
+// ordinary JSON error with its status — not a 200 that carries an error event.
+test("the streaming route refuses as JSON, before any stream is opened", async () => {
+  const stub = stubPoolQuery(pool, (text) => {
+    if (/FROM users/i.test(text)) return { rows: [ADMIN_ROW] };
+    if (/FROM media_items/i.test(text)) return { rows: [] };
+    return { rows: [] };
+  });
+  try {
+    const bad = await request(app).post("/api/discussion/42/messages/stream").set("Cookie", `token=${token}`).send({});
+    assert.equal(bad.status, 400);
+    const missing = await request(app).post("/api/discussion/42/messages/stream").set("Cookie", `token=${token}`).send({ question: "x" });
+    assert.equal(missing.status, 404);
+    assert.match(missing.headers["content-type"], /json/);
   } finally {
     stub.restore();
   }
