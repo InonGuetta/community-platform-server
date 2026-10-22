@@ -73,6 +73,7 @@ export default [
       "db/seed.js",
       "db/backfillEmbeddings.js",
       "db/backfillDurations.js",
+      "db/backfillPageNumbers.js",
       "db/migrateUploadsToS3.js",
       "db/closeStaleSessions.js",
       "db/publishExistingMedia.js",
