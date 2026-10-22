@@ -17,6 +17,8 @@ import {
 } from "../services/servicesTags.js";
 import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
+import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
+import { getLatestConversation } from "../services/discussion/conversations.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -759,6 +761,57 @@ const checks = [
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }
+    },
+  },
+  {
+    // The "דיון עם AI" search, through its real SQL: the MATERIALIZED CTE, the
+    // ::vector cast and the RRF fusion are only ever parsed here, since the
+    // suite stubs the pool. The two OpenAI calls are replaced — this checks the
+    // database, not the bill. Read-only.
+    name: "search inside one lesson (keyword + exact vector)",
+    run: async () => {
+      // The LARGEST lesson, deliberately: the bug this guards against is the
+      // HNSW walk returning ~40 rows from the whole archive and leaving one
+      // lesson with almost none. A two-chunk lesson cannot show that; a book
+      // with hundreds of chunks shows it at once, as a short result list.
+      const { rows } = await pool.query(
+        `SELECT media_id, COUNT(*)::int AS n FROM transcript_chunks
+         WHERE embedding IS NOT NULL GROUP BY media_id ORDER BY n DESC LIMIT 1`
+      );
+      if (rows.length === 0) return "skipped — no lesson has embeddings yet";
+      const { media_id: mediaId, n } = rows[0];
+      const hits = await searchWithinMedia(
+        mediaId,
+        "תורה",
+        { courses: UNRESTRICTED, drafts: UNRESTRICTED },
+        { embed: async () => Array(1536).fill(0.01), rerank: async (_q, r, limit) => r.slice(0, limit) }
+      );
+      const expected = Math.min(n, RESULT_LIMIT);
+      if (hits.length !== expected) {
+        throw new Error(`lesson ${mediaId} has ${n} embedded chunks but the search returned ${hits.length}, expected ${expected}`);
+      }
+      return `${hits.length} hit(s) from ${n} chunks in lesson ${mediaId}`;
+    },
+  },
+  {
+    // Migration 032. Read-only: the latest-conversation read the tab makes on
+    // open, for a real user and lesson, through the service — which is what
+    // fails with "relation does not exist" when the schema is behind.
+    name: "the AI conversation store (migration 032)",
+    run: async () => {
+      const { rows } = await pool.query(
+        "SELECT to_regclass('public.ai_conversations') AS c, to_regclass('public.ai_messages') AS m"
+      );
+      if (!rows[0].c || !rows[0].m) throw new Error("missing — migration 032 has not been applied");
+      const user = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
+      const media = await pool.query("SELECT id FROM media_items LIMIT 1");
+      if (user.rows.length === 0 || media.rows.length === 0) return "tables present; no user or lesson to read with";
+      const result = await getLatestConversation(
+        user.rows[0].id, media.rows[0].id, { courses: UNRESTRICTED, drafts: UNRESTRICTED }
+      );
+      return result.conversation
+        ? `conversation ${result.conversation.id}, ${result.messages.length} message(s)`
+        : "tables present, no conversation yet";
     },
   },
   {

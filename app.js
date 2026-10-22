@@ -27,6 +27,7 @@ import routersMedia from "./routes/routersMedia.js";
 import routersCourses from "./routes/routersCourses.js";
 import routersSessions from "./routes/routersSessions.js";
 import routersTranscripts from "./routes/routersTranscripts.js";
+import routersDiscussion from "./routes/routersDiscussion.js";
 import routersBookmarks from "./routes/routersBookmarks.js";
 import routersNotes from "./routes/routersNotes.js";
 import routersLikes from "./routes/routersLikes.js";
@@ -50,6 +51,7 @@ export const API_ROUTERS = [
   ["/api/courses", routersCourses],
   ["/api/sessions", routersSessions],
   ["/api/transcripts", routersTranscripts],
+  ["/api/discussion", routersDiscussion],
   ["/api/bookmarks", routersBookmarks],
   ["/api/notes", routersNotes],
   ["/api/likes", routersLikes],

@@ -38,10 +38,18 @@ export const embedTexts = async (texts) => {
   return out;
 };
 
+// The search box's client: someone is waiting on it. The backfill's budget —
+// five retries, a five-minute timeout — is right for a batch that has all night
+// and wrong for a person: with the account out of credit, every 429 was retried
+// with backoff and the search sat spinning for ~15 seconds before the keyword
+// fallback answered. Both searches (library and in-lesson) fall back on their
+// own when this throws, so failing fast is the better outcome, not a lost one.
+const queryOpenai = makeOpenAI(1, 8 * 1000);
+
 // Embed a single query string → float[] for the semantic/hybrid search.
 export const embedQuery = async (query) => {
-  const [vec] = await embedTexts([query]);
-  return vec;
+  const res = await queryOpenai.embeddings.create({ model: EMBEDDING_MODEL, input: [query] });
+  return res.data[0].embedding;
 };
 
 // Pair each row id with ITS OWN vector, in batches of `size`.

@@ -14,11 +14,15 @@ import { visibleMediaSql } from "../../lib/permissions.js";
 import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { embedQuery, toVectorLiteral } from "../servicesEmbeddings.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+// The interactive client: a search is something a person is waiting on.
+import { interactiveOpenai as openai, GPT_MODEL } from "./gpt.js";
 
-const RRF_K = 60;
+// RRF_K and FUSE_DEPTH are exported for the search inside one lesson
+// (services/discussion/retrieval.js), which fuses the same two lists the same
+// way — one tuning for both, rather than two that drift apart.
+export const RRF_K = 60;
 const SEARCH_LIMIT = 30;
-const FUSE_DEPTH = 60; // how deep each list goes into the fusion
+export const FUSE_DEPTH = 60; // how deep each list goes into the fusion
 const SEMANTIC_SNIPPET_CHARS = 200;
 // hybrid fetches more candidates than it returns so the reranker has a pool to
 // reorder; the LLM then picks the best SEARCH_LIMIT.
@@ -43,7 +47,9 @@ const RERANK_PROMPT = `אתה מדרג רלוונטיות בחיפוש. תקבל
 לכל קטע תן ציון שלם בין 0 ל-100: עד כמה הקטע באמת רלוונטי *במשמעות* לשאילתה — 100 = בדיוק על הנושא שחיפשו, 0 = לא קשור כלל. אל תתגמל הופעה מקרית של מילה; דרג לפי התוכן.
 החזר JSON תקין בלבד במבנה: { "scores": [{ "index": <מספר הקטע>, "score": <0-100> }] } — ציון לכל הקטעים שקיבלת, בלי markdown ובלי הסברים.`;
 
-const rerankByRelevance = async (query, rows) => {
+// Exported for the search inside one lesson, which asks the same question of a
+// smaller pool. `limit` is how many survive; the library-wide search keeps 30.
+export const rerankByRelevance = async (query, rows, limit = SEARCH_LIMIT) => {
   if (rows.length === 0) return rows;
   const list = rows
     .map((r, i) => `${i + 1}. ${r.content.split(/\s+/).slice(0, RERANK_PREVIEW_WORDS).join(" ")}`)
@@ -79,7 +85,7 @@ const rerankByRelevance = async (query, rows) => {
   });
   scored.sort((a, b) => b.similarity - a.similarity);
   // Drop near-zero / irrelevant hits so the list isn't padded with 0% noise.
-  return scored.filter((r) => r.similarity >= RELEVANCE_FLOOR).slice(0, SEARCH_LIMIT);
+  return scored.filter((r) => r.similarity >= RELEVANCE_FLOOR).slice(0, limit);
 };
 
 // Pull { index → score } out of whatever shape GPT-4o returned. Tolerates the
