@@ -153,6 +153,31 @@ export const pageNumberFor = (pageOffsets, position) => {
   return 1;
 };
 
+// Pages for chunks that were stored WITHOUT them — a book processed before
+// migration 023, read again from its original file (db/backfillPageNumbers.js).
+//
+// The offsets of a fresh extraction only mean anything for the stored chunks
+// if the text is the same text. The extractor's cleaning has changed since some
+// books were processed, and a page computed against a different text is a
+// wrong citation shown with full confidence — worse than no page. So every
+// chunk is checked first, character for character, and a single mismatch
+// answers "do not write", for the whole book.
+//
+// Returns { aligned, mismatches, updates: [{ id, page_number }] }.
+export const pagesForStoredChunks = (chunks, text, pageOffsets) => {
+  const mismatches = chunks.filter(
+    (c) => !Number.isInteger(c.char_start) || !Number.isInteger(c.char_end) ||
+      text.slice(c.char_start, c.char_end) !== c.content
+  ).map((c) => c.id);
+  if (mismatches.length > 0 || !Array.isArray(pageOffsets) || pageOffsets.length === 0) {
+    return { aligned: mismatches.length === 0, mismatches, updates: [] };
+  }
+  const updates = chunks
+    .filter((c) => c.page_number == null)
+    .map((c) => ({ id: c.id, page_number: pageNumberFor(pageOffsets, c.char_start) }));
+  return { aligned: true, mismatches, updates };
+};
+
 // The document equivalent of saveChunks: paragraph-aligned chunks with
 // character offsets instead of timestamps, and — for a PDF — the page each one
 // begins on.
@@ -175,7 +200,14 @@ export const saveTextChunks = async (mediaId, text, pageOffsets = null) => {
 // unpublished draft straight from this endpoint, bypassing the is_published
 // gate that /api/media enforces. Unknown media and hidden media return the same
 // 404 so the endpoint doesn't reveal which ids exist.
-export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], drafts: [] }) => {
+// `content: false` returns every chunk WITHOUT its text — the ids, offsets,
+// times and pages a page needs to know what exists and where, but not the
+// words. A book's text is megabytes (816 chunks, 3MB for one sefer), and
+// shipping it on every page load took 8–13s through the pooler and crossed
+// query_timeout as a 503, so neither the summary nor the discussion tab of the
+// book would load. Nothing on a book's page reads chunk text; the download
+// menu fetches it in full on the click that needs it.
+export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], drafts: [] }, { content = true } = {}) => {
   logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} visible=${JSON.stringify(scope.courses)}`);
 
   // uploader_id rides along because the visibility rule now has two dimensions:
@@ -203,7 +235,7 @@ export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], dra
       // space a bookmark in a book anchors to (migration 022), so the reader
       // cannot place one without them. Two ints per chunk — trivial next to the
       // content, and nothing like the vector(1536) this list exists to exclude.
-      "SELECT id, media_id, chunk_index, start_time, end_time, char_start, char_end, page_number, content FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index",
+      `SELECT id, media_id, chunk_index, start_time, end_time, char_start, char_end, page_number${content ? ", content" : ""} FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index`,
       [mediaId]
     ),
   ]);

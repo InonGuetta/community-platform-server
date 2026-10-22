@@ -17,6 +17,7 @@
     "migrate:uploads-to-s3": "node db/migrateUploadsToS3.js",
     "backfill:embeddings": "node db/backfillEmbeddings.js",
     "backfill:durations": "node db/backfillDurations.js",
+    "backfill:pages": "node db/backfillPageNumbers.js",
     "extract:preview": "node scripts/extractPreview.js",
     "fix:stale-sessions": "node db/closeStaleSessions.js",
     "fix:publish-existing": "node db/publishExistingMedia.js",

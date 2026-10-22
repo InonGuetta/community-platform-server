@@ -19,9 +19,13 @@ const assertMayEditTranscript = async (req) => {
 
 export const getTranscript = async (req, res) => {
   const { mediaId } = req.params;
+  // ?content=0 — the chunks without their text; see getTranscriptByMediaId.
+  // Anything else, including absence, is the full transcript, so every
+  // existing caller is unchanged.
   const transcript = await servicesTranscripts.getTranscriptByMediaId(
     mediaId,
-    await viewerScopeFor(req.user)
+    await viewerScopeFor(req.user),
+    { content: req.query.content !== "0" }
   );
   logger.debug(`[BE:ctrl] GET /transcripts/${mediaId} ✓ status=${transcript.status} chunks=${transcript.chunks?.length ?? 0}`);
   res.status(200).json(transcript);

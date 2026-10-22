@@ -2,7 +2,7 @@ import "./setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cleanExtractedText, PAGE_SEPARATOR, joinPagesWithOffsets } from "../lib/textExtract.js";
-import { pageNumberFor } from "../services/transcripts/chunks.js";
+import { pageNumberFor, pagesForStoredChunks } from "../services/transcripts/chunks.js";
 
 // Citing a chunk by page.
 //
@@ -122,4 +122,67 @@ test("a chunk is stamped from where it BEGINS", () => {
   // 102. It belongs to page 1 — where a reader looking for its first line would
   // turn — rather than to the page it happens to end on.
   assert.equal(pageNumberFor(OFFSETS, 95), 1);
+});
+
+// ── Pages for a book stored before pages were recorded ──────────────────────
+// db/backfillPageNumbers.js re-extracts the original and writes pages only if
+// the fresh text IS the stored text. A page computed against different text is
+// a wrong citation shown with full confidence.
+
+const BOOK = "עמוד אחד.\n\nעמוד שני כאן.\n\nעמוד שלישי.";
+const BOOK_OFFSETS = [0, 11, 26];
+const stored = (id, start, end, page = null) => ({ id, char_start: start, char_end: end, page_number: page, content: BOOK.slice(start, end) });
+
+test("chunks that match the file get the page they begin on", () => {
+  const { aligned, updates } = pagesForStoredChunks([stored(1, 0, 9), stored(2, 11, 24), stored(3, 26, 37)], BOOK, BOOK_OFFSETS);
+  assert.equal(aligned, true);
+  assert.deepEqual(updates, [{ id: 1, page_number: 1 }, { id: 2, page_number: 2 }, { id: 3, page_number: 3 }]);
+});
+
+test("one chunk that no longer matches the file stops the whole book", () => {
+  const drifted = { ...stored(2, 11, 24), content: "טקסט שהשתנה" };
+  const result = pagesForStoredChunks([stored(1, 0, 9), drifted], BOOK, BOOK_OFFSETS);
+  assert.equal(result.aligned, false);
+  assert.deepEqual(result.mismatches, [2]);
+  assert.deepEqual(result.updates, [], "nothing is written for a book whose text has moved");
+});
+
+test("a chunk with no offsets cannot be checked, so it counts as a mismatch", () => {
+  assert.equal(pagesForStoredChunks([{ id: 1, char_start: null, char_end: null, content: "x" }], BOOK, BOOK_OFFSETS).aligned, false);
+});
+
+test("a page already stored is left alone", () => {
+  const { updates } = pagesForStoredChunks([stored(1, 0, 9, 1), stored(2, 11, 24)], BOOK, BOOK_OFFSETS);
+  assert.deepEqual(updates, [{ id: 2, page_number: 2 }]);
+});
+
+test("a file with no page boundaries writes nothing", () => {
+  assert.deepEqual(pagesForStoredChunks([stored(1, 0, 9)], BOOK, null).updates, []);
+});
+
+// ── A book's page without the book's text ───────────────────────────────────
+// A sefer's chunks are megabytes; loading them on every visit to its page ran
+// past query_timeout as a 503. ?content=0 leaves the words out.
+
+test("the transcript can be read without the chunks' text", async () => {
+  const { pool } = await import("../db/pool.js");
+  const { stubPoolQuery } = await import("./setup.js");
+  const { getTranscriptByMediaId } = await import("../services/transcripts/chunks.js");
+  const stub = stubPoolQuery(pool, (text) => {
+    if (/FROM media_items/i.test(text)) return { rows: [{ is_published: true, course_id: null, uploader_id: 1 }] };
+    if (/FROM transcripts/i.test(text)) return { rows: [{ media_id: 20, status: "done" }] };
+    return { rows: [{ id: 1, page_number: 4 }] };
+  });
+  try {
+    await getTranscriptByMediaId(20, { courses: null, drafts: null }, { content: false });
+    const read = stub.calls.find((c) => /FROM transcript_chunks/i.test(c.text));
+    assert.doesNotMatch(read.text, /\bcontent\b/);
+    assert.match(read.text, /page_number/, "where each passage is still comes back");
+
+    await getTranscriptByMediaId(20, { courses: null, drafts: null });
+    const full = stub.calls.filter((c) => /FROM transcript_chunks/i.test(c.text)).at(-1);
+    assert.match(full.text, /, content FROM/, "every existing caller still gets the text");
+  } finally {
+    stub.restore();
+  }
 });
