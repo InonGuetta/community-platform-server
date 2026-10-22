@@ -4,6 +4,7 @@ import * as servicesDonations from "../services/servicesDonations.js";
 import { reconcileMissingTranscripts } from "../services/servicesTranscripts.js";
 import * as servicesTags from "../services/servicesTags.js";
 import { logger } from "../lib/logger.js";
+import { badRequest } from "../lib/AppError.js";
 
 export const getStats = async (req, res) => {
   const stats = await servicesAdmin.getStats();
@@ -55,13 +56,19 @@ export const runReconcile = async (req, res) => {
 // The ledger and its totals together: a list an admin can read against Stripe,
 // and the sums to check it adds up to. getStats reports only the completed
 // total, which is a number with nothing behind it.
-// TODO(CR): `status` goes into `d.status = $2` unvalidated; anything outside the
-// donation_status enum (e.g. ?status=foo from a stale link) is a Postgres enum
-// error → 500. Check it against the enum values and answer 400.
+//
+// The filter is checked against the donation_status enum (migration 006): any
+// other value used to reach Postgres as "invalid input value for enum" — a 500
+// for what is a plain bad request.
+const DONATION_STATUSES = new Set(["pending", "completed", "failed"]);
+
 export const getDonations = async (req, res) => {
   const { status } = req.query;
+  if (status !== undefined && (typeof status !== "string" || !DONATION_STATUSES.has(status))) {
+    throw badRequest(`status must be one of: ${[...DONATION_STATUSES].join(", ")}`);
+  }
   const [donations, totals] = await Promise.all([
-    servicesDonations.getAllDonations({ status: typeof status === "string" ? status : undefined }),
+    servicesDonations.getAllDonations({ status }),
     servicesDonations.getDonationTotals(),
   ]);
   res.status(200).json({ donations, totals });

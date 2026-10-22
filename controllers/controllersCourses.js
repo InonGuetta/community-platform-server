@@ -2,27 +2,29 @@
 import * as servicesCourses from "../services/servicesCourses.js";
 import { optionalId } from "../lib/validate.js";
 import { forbidden, badRequest } from "../lib/AppError.js";
-
 // Managing a course follows the same shape as managing media: an admin may touch
-// any course, a lecturer only the ones they are responsible for. Kept next to the
-// handlers rather than in lib/permissions.js because it reads a course row, not a
-// media row — the two rules are similar but not the same one.
-const assertCanManageCourse = (user, course) => {
-  if (user?.role === "admin") return;
-  const owner = Number(course?.lecturer_id);
-  const caller = Number(user?.id);
-  if (Number.isInteger(owner) && Number.isInteger(caller) && owner === caller) return;
-  throw forbidden("You may only manage courses you teach");
+// any course, a lecturer only the ones they are responsible for. In
+// lib/permissions.js since uploads need the same rule — see canManageCourse.
+import { assertCanManageCourse, isPrivileged } from "../lib/permissions.js";
+
+// What a reader who does not manage courses gets. student_count is withheld for
+// the reason getStudentCourses already gives — a student has no business knowing
+// who else is enrolled — which the catalogue was quietly contradicting by
+// carrying it on every row. Same shape as publicMedia/publicSession.
+const publicCourse = (user) => (course) => {
+  if (isPrivileged(user)) return course;
+  const { student_count, ...rest } = course;
+  return rest;
 };
 
 export const getAllCourses = async (req, res) => {
-  const courses = await servicesCourses.getAllCourses();
-  res.status(200).json(courses);
+  const courses = await servicesCourses.getAllCourses({ activeOnly: !isPrivileged(req.user) });
+  res.status(200).json(courses.map(publicCourse(req.user)));
 };
 
 export const getCourseById = async (req, res) => {
   const course = await servicesCourses.getCourseById(req.params.id);
-  res.status(200).json(course);
+  res.status(200).json(publicCourse(req.user)(course));
 };
 
 export const createCourse = async (req, res) => {
@@ -51,6 +53,9 @@ export const updateCourse = async (req, res) => {
   const course = await servicesCourses.updateCourse(req.params.id, {
     title,
     description,
+    // Presence decides, as in updateMedia: lecturerId: null detaches the course
+    // from its lecturer; leaving the key out leaves it alone.
+    setLecturer: "lecturerId" in (req.body ?? {}),
     lecturerId: optionalId(lecturerId, "lecturerId"),
     isActive,
   });

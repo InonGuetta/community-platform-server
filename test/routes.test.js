@@ -57,6 +57,9 @@ const concrete = (path) => path.replace(/:[A-Za-z]+/g, "1");
 const PUBLIC = new Set([
   "post /api/auth/register",   // creating the account IS the way in
   "post /api/auth/login",
+  // Only clears the cookie. Requiring a session meant an expired cookie could
+  // never be cleared by the server — the 401 left the dead token in place.
+  "post /api/auth/logout",
   "get /api/auth/google",            // redirects the browser to Google
   "get /api/auth/google/callback",   // Google redirects back here
   // Recovery, for the one person who by definition cannot authenticate: someone
@@ -240,17 +243,19 @@ test("an authenticated GET /api/notes returns the rows the service read", async 
   const { token, row } = asUser({ role: "student" });
   const notes = [{ id: 1, title: "שיעור א", body: "..." }];
 
-  // Two queries run: verifyToken's user lookup, then the notes read. Answer
-  // them in order rather than by matching on SQL text, which would couple the
-  // test to the exact wording of a statement it is not testing.
+  // Three queries run: verifyToken's user lookup, the student's enrolments
+  // (the visibility scope the note titles are filtered by), then the notes read.
+  // Answer them in order rather than by matching on SQL text, which would couple
+  // the test to the exact wording of a statement it is not testing.
   let call = 0;
-  const stub = stubPoolQuery(pool, () => (call++ === 0 ? { rows: [row] } : { rows: notes }));
+  const answers = [{ rows: [row] }, { rows: [] }, { rows: notes }];
+  const stub = stubPoolQuery(pool, () => answers[call++] ?? { rows: [] });
 
   try {
     const res = await request(app).get("/api/notes").set("Cookie", `token=${token}`);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, notes);
-    assert.equal(call, 2, "expected exactly the auth lookup and the notes read");
+    assert.equal(call, 3, "expected exactly the auth lookup, the enrolment scope and the notes read");
   } finally {
     stub.restore();
   }

@@ -771,7 +771,17 @@ const checks = [
       // fall out of step with.
       const { rows } = await pool.query("SELECT to_regclass('public.password_resets') AS table");
       if (!rows[0].table) throw new Error("missing — migration 017 has not been applied");
-      return "present";
+      // `purpose` (031) is written by every token INSERT and read by both
+      // lookups, so without it registration, reset and verification are all
+      // 500s. Same existence-only reasoning as the table check above.
+      const purpose = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_name='password_resets' AND column_name='purpose'`
+      );
+      if (purpose.rows.length === 0) {
+        throw new Error("password_resets.purpose is missing — migration 031 has not been applied");
+      }
+      return "present, with purpose";
     },
   },
 ];

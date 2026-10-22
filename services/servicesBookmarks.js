@@ -2,6 +2,7 @@
 import { pool } from "../db/pool.js";
 import { getChunkForAnchor, getChunkContaining } from "./transcripts/chunks.js";
 import { logger } from "../lib/logger.js";
+import { visibleMediaSql } from "../lib/permissions.js";
 import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 
 // Imported from transcripts/chunks.js directly rather than through the
@@ -13,18 +14,23 @@ import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 // from without a request per bookmark. Ordering by title first groups a
 // cross-lecture list by lecture; for the media-scoped call every row shares one
 // title, so it collapses to the timestamp ordering NotesPanel relies on.
-// TODO(CR): no visibility filter. createBookmark checks the item is visible, but
-// once a student is unenrolled or the lesson is unpublished, its title keeps
-// coming back here (and in servicesNotes.getNotesByUser). Likes and saves
-// already apply visibleMediaSql to the same situation; do the same here, or at
-// least null out media_title for rows the caller can no longer see.
-export const getBookmarksByUser = async (userId, mediaId) => {
+//
+// The title is shown only while the caller may still see the item. createBookmark
+// checks visibility, but a student later unenrolled — or a lesson later
+// unpublished — kept getting its title back here. The bookmark itself is not
+// hidden: it is the user's own note and losing it silently would be worse. Only
+// the title goes, the way likes and saves already apply visibleMediaSql.
+// `scope` fails closed like every other read: absent means "may see nothing".
+export const getBookmarksByUser = async (userId, mediaId, scope = { courses: [], drafts: [] }) => {
   let query = `
-    SELECT b.*, m.title AS media_title, m.media_type
+    SELECT b.*,
+           CASE WHEN ${visibleMediaSql("$2", "m", "$3")} THEN m.title END AS media_title,
+           m.media_type
     FROM bookmarks b
     LEFT JOIN media_items m ON m.id = b.media_id
     WHERE b.user_id=$1`;
-  const params = [userId];
+  /** @type {Array<number|number[]|null>} */
+  const params = [userId, scope.courses, scope.drafts];
   if (mediaId) {
     params.push(mediaId);
     query += ` AND b.media_id=$${params.length}`;

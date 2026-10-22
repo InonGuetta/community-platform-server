@@ -74,3 +74,27 @@ test("nothing is written once the response has started", () => {
   assert.equal(sent.next, true, "handed to express so it can close the connection");
   assert.equal(sent.status, undefined);
 });
+
+// Postgres refusing the caller's VALUE is the caller's fault: a 4xx with a
+// generic code, and never the driver's own message (it names tables).
+test("a bad date or a duplicate from Postgres is a 4xx, not a 500", () => {
+  const badDate = run(Object.assign(new Error("invalid input syntax for type date"), { code: "22007" }));
+  assert.equal(badDate.status, 400);
+  assert.equal(badDate.body.code, "BAD_REQUEST");
+  assert.doesNotMatch(badDate.body.message, /syntax/);
+
+  const duplicate = run(Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" }));
+  assert.equal(duplicate.status, 409);
+});
+
+test("a foreign key error says missing or in-use, depending on which it is", () => {
+  const missing = run(Object.assign(new Error("fk"), {
+    code: "23503", detail: 'Key (media_id)=(9) is not present in table "media_items".',
+  }));
+  assert.equal(missing.status, 404);
+
+  const inUse = run(Object.assign(new Error("fk"), {
+    code: "23503", detail: 'Key (id)=(3) is still referenced from table "live_sessions".',
+  }));
+  assert.equal(inUse.status, 409);
+});

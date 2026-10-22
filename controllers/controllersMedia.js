@@ -17,18 +17,19 @@ import { decodeTextBuffer } from "../lib/textEncoding.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
-import { isPrivileged, assertCanManageMedia } from "../lib/permissions.js";
+import { isPrivileged, assertCanManageMedia, assertCanManageCourse } from "../lib/permissions.js";
+import * as servicesCourses from "../services/servicesCourses.js";
 import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
 import {
   requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
-  durationRangeFilter,
+  durationRangeFilter, optionalDateFilter, optionalQueryString,
 } from "../lib/validate.js";
 import {
   setMediaTags, cleanTagSelection, getTagTree,
   proposeTag, getPendingProposalsForMedia, withdrawProposal,
 } from "../services/servicesTags.js";
 import { suggestTags } from "../lib/tagSuggestions.js";
-import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
+import { AppError, badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // Same bundled binary the transcription worker uses, so the API and the worker
 // cannot end up transcoding with two different ffmpeg builds.
@@ -104,6 +105,10 @@ export const getAllMedia = async (req, res) => {
   // honour is the caller's mistake, and says so.
   const parsedSort = mediaSortFilter(sort);
   const duration = durationRangeFilter(minDuration, maxDuration);
+  const parsedAfter = optionalDateFilter(uploadedAfter, "uploadedAfter");
+  const parsedBefore = optionalDateFilter(uploadedBefore, "uploadedBefore");
+  const parsedSearch = optionalQueryString(search, "search");
+  const parsedCreator = optionalQueryString(creator, "creator");
   // Asking for a branch and asking for it to be left out is a contradiction, and
   // the query would honour the exclusion and answer with nothing. An empty
   // archive is exactly how somebody concludes the filter is broken, so it is
@@ -136,8 +141,8 @@ export const getAllMedia = async (req, res) => {
     // already entitled to, and it is meaningless to anyone who cannot see drafts
     // in the first place — so it is read only for a privileged caller.
     published: privileged && published !== undefined ? published === "true" : undefined,
-    search,
-    creator,
+    search: parsedSearch,
+    creator: parsedCreator,
     // Two lists, and they are not opposites of one another: one says which
     // branches to look in, the other says which parts of them to leave out.
     // "Everything in תורה except שמות" needs both, and could not be said with
@@ -150,8 +155,8 @@ export const getAllMedia = async (req, res) => {
     // floor, which would answer a filter nobody asked for.
     tagIds: parsedTagIds,
     excludeTagIds: parsedExcludeTagIds,
-    uploadedAfter,
-    uploadedBefore,
+    uploadedAfter: parsedAfter,
+    uploadedBefore: parsedBefore,
     // An order, not a filter: it changes which card comes first, never which
     // cards there are.
     sort: parsedSort,
@@ -168,6 +173,27 @@ export const getMediaById = async (req, res) => {
   const item = await servicesMedia.getMediaById(req.params.id);
   if (await refuseIfHidden(req, res, item)) return;
   res.status(200).json(publicMedia(item));
+};
+
+// The course a lesson is filed in and the lecturer it credits, checked against
+// the caller.
+//
+// Neither was checked before. A lecturer could file their upload into ANOTHER
+// lecturer's course — where it then appeared to that course's students as part
+// of it — and lecturerId could name anyone, a student included. The course rule
+// is the one that governs managing the course itself (lib/permissions.js); the
+// lecturer rule is the one a course's own lecturer field already follows.
+//
+// null/undefined pass through untouched: "no course" is the general library,
+// and is always allowed to the lesson's owner.
+const resolveAssignment = async (user, { courseId, lecturerId }) => {
+  if (courseId !== null && courseId !== undefined) {
+    assertCanManageCourse(user, await servicesCourses.getCourseById(courseId));
+  }
+  if (lecturerId !== null && lecturerId !== undefined) {
+    await servicesCourses.assertValidLecturer(lecturerId);
+  }
+  return { courseId, lecturerId };
 };
 
 export const createMedia = async (req, res) => {
@@ -206,6 +232,14 @@ export const createMedia = async (req, res) => {
           })
         : null;
 
+    // Where the lesson is filed, and who is credited with teaching it — checked
+    // before anything is stored, like the tags above, because both are the
+    // caller's input and refusing them after the S3 upload would waste it.
+    const assignment = await resolveAssignment(req.user, {
+      courseId: optionalId(courseId, "courseId"),
+      lecturerId: optionalId(lecturerId, "lecturerId"),
+    });
+
     // A recording's length, measured from the file itself while it is still on
     // this disk — once it has gone to S3, reading its header means fetching it
     // back. Documents have no length. Never fails the upload: an unreadable
@@ -232,13 +266,6 @@ export const createMedia = async (req, res) => {
       s3Key = `local/${req.file.filename}`;
     }
 
-    // TODO(CR): courseId is never checked against the caller. A lecturer can
-    // file their upload into ANOTHER lecturer's course (it then appears to that
-    // course's students as part of it), and lecturerId can name anyone,
-    // including a student. Same gap in updateMedia. Load the course and apply
-    // the assertCanManageCourse rule (move it to lib/permissions.js so both
-    // controllers share it), and validate lecturerId the way
-    // servicesCourses.assertValidLecturer does.
     const item = await servicesMedia.createMedia({
       uploaderId: req.user.id,
       title,
@@ -248,8 +275,8 @@ export const createMedia = async (req, res) => {
       durationSeconds,
       // Both optional: an unassigned upload lands in the general library, which
       // is what every item predating courses already is.
-      courseId: optionalId(courseId, "courseId"),
-      lecturerId: optionalId(lecturerId, "lecturerId"),
+      courseId: assignment.courseId,
+      lecturerId: assignment.lecturerId,
       // Passed raw. Trimming, the blank-to-"כללי" fallback and the length check
       // all live in servicesMedia, so a caller that skips this form gets the
       // same rules — see cleanCreatorName there.
@@ -294,28 +321,43 @@ export const createMedia = async (req, res) => {
   }
 };
 
+// The fields an edit may change, and nothing else. The body used to be spread
+// into the service, so a caller could also set durationSeconds — which the
+// archive's length filter trusts — and thumbnailUrl, neither of which is meant
+// to be editable. An allowlist rather than a denylist, for the reason
+// updateTranscript gives: it also covers whatever column is added next.
+const cleanEditedTitle = (title) => {
+  if (title === undefined || title === null) return undefined;
+  if (typeof title !== "string" || title.trim() === "") throw badRequest("Title cannot be empty");
+  return title.trim();
+};
+
 export const updateMedia = async (req, res) => {
   const body = req.body ?? {};
-  const { isPublished, courseId, lecturerId, ...rest } = body;
+  const { isPublished, courseId, lecturerId, title, description, creatorName } = body;
   // Ownership is checked here rather than in the route because requireRole runs
   // before the item exists. This body carries isPublished, so without the check a
   // lecturer could unpublish another lecturer's material.
   assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
-  // TODO(CR): `...rest` forwards the rest of the body unfiltered, so a caller
-  // can also set durationSeconds (which the duration filter trusts) and
-  // thumbnailUrl (any URL) — neither is meant to be user-editable. And title is
-  // not validated: `"title": ""` passes COALESCE and blanks it, although
-  // createMedia requires one. Use an explicit allowlist, as updateTranscript does.
-  let item = await servicesMedia.updateMedia(req.params.id, {
-    ...rest,
-    isPublished: optionalBoolean(isPublished, "isPublished"),
-    // Presence in the body — not the value — is what says "change this". Sending
-    // courseId: null detaches the lesson from its course; omitting the key
-    // entirely leaves whatever is there alone.
-    setCourse: "courseId" in body,
+
+  // Presence in the body — not the value — is what says "change this". Sending
+  // courseId: null detaches the lesson from its course; omitting the key
+  // entirely leaves whatever is there alone. A course or lecturer that IS named
+  // goes through the same check as an upload.
+  const assignment = await resolveAssignment(req.user, {
     courseId: optionalId(courseId, "courseId"),
-    setLecturer: "lecturerId" in body,
     lecturerId: optionalId(lecturerId, "lecturerId"),
+  });
+
+  let item = await servicesMedia.updateMedia(req.params.id, {
+    title: cleanEditedTitle(title),
+    description,
+    creatorName,
+    isPublished: optionalBoolean(isPublished, "isPublished"),
+    setCourse: "courseId" in body,
+    courseId: assignment.courseId,
+    setLecturer: "lecturerId" in body,
+    lecturerId: assignment.lecturerId,
   });
 
   // Presence in the body decides, as it does for the two associations above:
@@ -346,16 +388,19 @@ export const deleteMedia = async (req, res) => {
   // a refused caller must not get as far as touching storage.
   assertCanManageMedia(req.user, item);
 
-  // TODO(CR): the file is deleted BEFORE the row. If servicesMedia.deleteMedia
-  // then fails (DB blip, 503), the item stays in the archive pointing at a file
-  // that no longer exists — every play/download is a 404 and nothing will clean
-  // it up. Delete the row first, then the file best-effort (an orphaned file is
-  // the cheaper failure).
+  // The row FIRST, then the file. The other order meant a database failure
+  // after the unlink left the item in the archive pointing at a file that no
+  // longer existed — every play and download a 404, and nothing to clean it up.
+  // This way the worst case is an orphaned file nobody can reach, which is the
+  // cheaper failure.
+  const result = await servicesMedia.deleteMedia(req.params.id);
+
   if (item.s3_key.startsWith("local/")) {
     const filePath = path.join(LOCAL_UPLOAD_DIR, item.s3_key.slice("local/".length));
-    await fs.promises.unlink(filePath).catch(() => {});
+    await fs.promises.unlink(filePath).catch((err) =>
+      logger.warn(`Local delete failed for ${item.s3_key}: ${err.message}`));
   } else {
-    // Best-effort: a failed object delete shouldn't block removing the DB row.
+    // Best-effort: the row is already gone, so the caller's delete succeeded.
     try {
       await s3.send(new DeleteObjectCommand({ Bucket: env.s3Bucket, Key: item.s3_key }));
     } catch (s3Err) {
@@ -363,7 +408,6 @@ export const deleteMedia = async (req, res) => {
     }
   }
 
-  const result = await servicesMedia.deleteMedia(req.params.id);
   res.status(200).json(result);
 };
 
@@ -541,14 +585,15 @@ const streamLocalFile = async (item, req, res) => {
 
 const streamS3Object = async (item, req, res) => {
   // S3 applies the Range itself and answers 206 + Content-Range when it honored
-  // it, so the header is passed through untouched.
-  // TODO(CR): the Range is forwarded BEFORE we know the object is a .txt or a
-  // Word file. For those two branches below, a ranged request gets back only
-  // part of the object, which is then decoded as if whole (truncated text) or
-  // handed to mammoth (a partial zip → DOCUMENT_UNREADABLE). The local-file path
-  // ignores Range for these types; do the same here — decide by extension
-  // (item.s3_key) first and only forward Range for media.
-  const range = req.headers.range;
+  // it, so the header is passed through untouched — for media only.
+  //
+  // A .txt or a Word file is converted whole below (decoded, or turned into
+  // HTML), so it must be FETCHED whole. Forwarding a Range for those returned
+  // part of the object, which was then decoded as if complete (truncated text)
+  // or handed to mammoth as a partial zip (DOCUMENT_UNREADABLE). Decided by the
+  // extension, before the request, exactly as streamLocalFile decides it.
+  const convertedWhole = isPlainText(item.s3_key) || isWordFile(item.s3_key);
+  const range = convertedWhole ? undefined : req.headers.range;
   const s3Response = await s3.send(
     new GetObjectCommand({
       Bucket: env.s3Bucket,
@@ -665,10 +710,9 @@ export const downloadMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (await refuseIfHidden(req, res, item)) return;
-    // TODO(CR): for a key with no dot this yields the whole key
-    // ("local/1700-abc"), so the download is named "<title>.local/1700-abc".
-    // Use extensionOf() like the rest of this file.
-    const ext = item.s3_key.split(".").pop();
+    // extensionOf, not split(".").pop(): for a key with no dot the latter is the
+    // whole key, and the download was named "<title>.local/1700-abc".
+    const ext = extensionOf(item.s3_key) || "bin";
 
     if (item.s3_key.startsWith("local/")) {
       const filename = item.s3_key.slice("local/".length);
@@ -721,8 +765,17 @@ const resolveSeekablePath = async (s3Key) => {
 //
 // 128kbps stereo, unlike the transcription worker's 16kHz mono 64k — that one
 // feeds Whisper, this one is for a person to listen to.
+//
+// Each extraction is a full ffmpeg transcode on the API host. The route limits
+// how often one user may ask; this caps how many run at once across everybody,
+// so a burst cannot starve the requests the API exists to answer. A refusal is
+// a 429 the user can retry in a moment, not a queue nobody can see.
+const MAX_CONCURRENT_AUDIO_EXTRACTS = 3;
+let activeAudioExtracts = 0;
+
 export const downloadMediaAudio = async (req, res, next) => {
   let temp = null;
+  let holdsSlot = false;
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
     if (await refuseIfHidden(req, res, item)) return;
@@ -731,6 +784,13 @@ export const downloadMediaAudio = async (req, res, next) => {
     if (item.media_type !== "video") {
       return next(badRequest("Audio extraction is only available for video items"));
     }
+
+    if (activeAudioExtracts >= MAX_CONCURRENT_AUDIO_EXTRACTS) {
+      res.set("Retry-After", "30");
+      return next(new AppError("The server is busy preparing other audio downloads — try again in a moment", 429));
+    }
+    activeAudioExtracts++;
+    holdsSlot = true;
 
     const source = await resolveSeekablePath(item.s3_key);
     temp = source.isTemp ? source.path : null;
@@ -773,6 +833,7 @@ export const downloadMediaAudio = async (req, res, next) => {
     }
     next(err);
   } finally {
+    if (holdsSlot) activeAudioExtracts--;
     if (temp) fs.promises.rm(temp, { force: true }).catch(() => {});
   }
 };
@@ -789,18 +850,23 @@ export const getContinueWatching = async (req, res) => {
   res.status(200).json(items.map(publicMedia));
 };
 
-// TODO(CR): neither progress handler checks canUserSeeMedia. saveProgress on a
-// media id that does not exist fails the FK and answers 500, while one that
-// exists (draft or not) answers 200 — an existence oracle over the id space that
-// the 404-not-403 rule elsewhere in this file is designed to prevent. Load the
-// item and refuseIfHidden first, as the stream/download handlers do.
+// Both progress handlers load the item and answer 404 for one the caller may
+// not see, as the stream and download handlers do. They did not: saveProgress on
+// an id that did not exist failed the FK as a 500 while one that existed — draft
+// or not — answered 200, an existence oracle over the id space.
 export const getProgress = async (req, res) => {
+  const item = await servicesMedia.getMediaById(req.params.id);
+  if (await refuseIfHidden(req, res, item)) return;
   const progress = await servicesMedia.getWatchProgress(req.user.id, req.params.id);
   res.status(200).json(progress);
 };
 
 export const saveProgress = async (req, res) => {
+  // Body first, as createBookmark does: a malformed position is a 400 whatever
+  // the item, and costs no query.
   const positionSeconds = requireSeconds(req.body?.positionSeconds, "positionSeconds");
+  const item = await servicesMedia.getMediaById(req.params.id);
+  if (await refuseIfHidden(req, res, item)) return;
   const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
   res.status(200).json(progress);
 };

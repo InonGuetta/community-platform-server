@@ -28,6 +28,49 @@ export const assertUsablePassword = (password) => {
   }
 };
 
+// Matches display_name VARCHAR(100) in 001. The profile form used to allow 120,
+// so 101–120 characters passed the check and failed at the driver as a 500.
+export const DISPLAY_NAME_MAX = 100;
+
+// A display name from a request body: trimmed, length-checked, and null when the
+// caller did not send one (which COALESCE reads as "leave it alone"). `required`
+// is for the profile edit, where sending an EMPTY name is a mistake worth saying;
+// at registration the name is optional and blank simply means none.
+export const cleanDisplayName = (value, { required }) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw badRequest("Display name must be text");
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    if (required) throw badRequest("Display name cannot be empty");
+    return null;
+  }
+  if (trimmed.length > DISPLAY_NAME_MAX) {
+    throw badRequest(`Display name must be at most ${DISPLAY_NAME_MAX} characters`);
+  }
+  return trimmed;
+};
+
+// An avatar is shown to OTHER users as an <img src>, so whatever is stored here
+// is a URL their browsers fetch. Any scheme and any length used to be accepted —
+// enough to point it at a tracking pixel that logs the IP of everyone who sees
+// the avatar, or a data: URL megabytes long. https only, and bounded. Google's
+// own avatars (the only source today) are https.
+const AVATAR_URL_MAX = 2048;
+export const cleanAvatarUrl = (value) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || value.length > AVATAR_URL_MAX) {
+    throw badRequest("Avatar must be an https URL");
+  }
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw badRequest("Avatar must be an https URL");
+  }
+  if (parsed.protocol !== "https:") throw badRequest("Avatar must be an https URL");
+  return parsed.href;
+};
+
 // A single-use credential sent to an inbox, in the two places that need one.
 //
 // 32 random bytes, and only their SHA-256 reaches the database — see migration
@@ -88,33 +131,37 @@ export const register = async (email, password, displayName, requestedRole = "st
   if (!REQUESTABLE_ROLES.has(requestedRole)) {
     throw badRequest(`Invalid role: ${requestedRole}`);
   }
-  // TODO(CR): check-then-insert races — two registrations of the same address
-  // both pass this SELECT and the second INSERT hits the unique index as 23505,
-  // which errorHandler answers with a 500. Catch 23505 around the INSERT and
-  // throw EMAIL_TAKEN, as servicesUsers.updateUserRow already does. Also
-  // displayName is not trimmed or length-checked here, while updateProfile caps
-  // it at 120 and the column is VARCHAR(100) — a long name is a 500 at the driver.
+  const cleanName = cleanDisplayName(displayName, { required: false });
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
   if (existing.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
 
   const pending = NEEDS_APPROVAL(requestedRole);
   const password_hash = await bcrypt.hash(password, 12);
-  const result = await pool.query(
-    // `role` is deliberately absent from the column list. See the block above.
-    `INSERT INTO users (email, password_hash, display_name, requested_role, approval_status)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, email, role, display_name, requested_role, approval_status`,
-    [
-      normalizedEmail,
-      password_hash,
-      displayName,
-      // Recorded even for a plain student, so "asked for nothing" and "asked to
-      // be a student" are the same row rather than a NULL somebody has to guess
-      // about later.
-      requestedRole,
-      pending ? "pending" : "approved",
-    ]
-  );
+  let result;
+  try {
+    result = await pool.query(
+      // `role` is deliberately absent from the column list. See the block above.
+      `INSERT INTO users (email, password_hash, display_name, requested_role, approval_status)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, email, role, display_name, requested_role, approval_status`,
+      [
+        normalizedEmail,
+        password_hash,
+        cleanName,
+        // Recorded even for a plain student, so "asked for nothing" and "asked to
+        // be a student" are the same row rather than a NULL somebody has to guess
+        // about later.
+        requestedRole,
+        pending ? "pending" : "approved",
+      ]
+    );
+  } catch (err) {
+    // The SELECT above is a courtesy, not the guard: two registrations of the
+    // same address both pass it, and the unique index is what refuses the
+    // second. Same translation servicesUsers.updateUserRow makes.
+    if (err?.code === "23505") throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
+    throw err;
+  }
   const user = result.rows[0];
   const token = issueSessionToken(user);
   // The verification token rides back to the controller rather than being mailed
@@ -125,51 +172,59 @@ export const register = async (email, password, displayName, requestedRole = "st
 
 // ── Proving the address belongs to whoever is using the account ─────────────
 
-// TODO(CR): password_resets has no `purpose` column, so a verification token is
-// accepted by resetPassword() too (it looks up by token_hash alone). That turns
-// every verification link into a 24h password-reset credential — longer than the
-// 1h RESET_TTL_MS the reset flow promises — and a reset token can likewise verify
-// an address. Add a `purpose` column (new migration) and filter on it in
-// verifyEmail/resetPassword. While here: verifyEmail runs its UPDATE users and its
-// "mark used" as two statements outside a transaction, so two concurrent clicks
-// both succeed; fold them into one statement or a transaction.
-const issueVerificationToken = async (userId) => {
+// Reuses the password_resets table: it is the same kind of thing — a
+// single-use, expiring, hashed credential mailed to an address. What makes the
+// sharing safe is `purpose` (migration 031). Without it each lookup accepted the
+// other flow's token, and a 24-hour verification link was also a working
+// password reset.
+export const TOKEN_PURPOSE = { RESET: "reset", VERIFY: "verify" };
+
+const insertMailedToken = async (userId, purpose, ttlMs) => {
   const { token, hash } = newToken();
-  // Reuses the password_resets table, and the reason is that it is the same
-  // thing: a single-use, expiring, hashed credential mailed to an address. A
-  // second table identical but for its name would double the sweep, the index
-  // and the reasoning about token handling, for a distinction nothing acts on.
   await pool.query(
-    `INSERT INTO password_resets (user_id, token_hash, expires_at)
-     VALUES ($1, $2, NOW() + ($3 || ' milliseconds')::interval)`,
-    [userId, hash, VERIFICATION_TTL_MS]
+    `INSERT INTO password_resets (user_id, token_hash, expires_at, purpose)
+     VALUES ($1, $2, NOW() + ($3 || ' milliseconds')::interval, $4)`,
+    [userId, hash, ttlMs, purpose]
   );
   return token;
 };
 
+// Exported for the admin path that changes somebody's address
+// (controllersUsers.updateUser), which has to send the new one a link.
+export const issueVerificationToken = (userId) =>
+  insertMailedToken(userId, TOKEN_PURPOSE.VERIFY, VERIFICATION_TTL_MS);
+
+// One statement, so spending the token and verifying the address cannot be
+// separated: the CTE marks the token used only if it was still unused, and the
+// UPDATE of users runs only on the row that CTE returned. Two concurrent clicks
+// therefore produce one success and one "invalid or expired", rather than two
+// successes on a single-use link.
 export const verifyEmail = async (token) => {
   const result = await pool.query(
-    `UPDATE users SET email_verified = TRUE
-     WHERE id = (
-       SELECT user_id FROM password_resets
-       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+    `WITH spent AS (
+       UPDATE password_resets SET used_at = NOW()
+       WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > NOW()
+       RETURNING user_id
      )
+     UPDATE users SET email_verified = TRUE
+     WHERE id = (SELECT user_id FROM spent)
      RETURNING id, email, role, display_name, email_verified`,
-    [hashOf(token)]
+    [hashOf(token), TOKEN_PURPOSE.VERIFY]
   );
   if (result.rows.length === 0) {
     throw badRequest("This link is invalid or has expired", ERROR_CODES.INVALID_RESET_TOKEN);
   }
-  await pool.query("UPDATE password_resets SET used_at = NOW() WHERE token_hash = $1", [hashOf(token)]);
   return result.rows[0];
 };
 
-// TODO(CR): `email` and `password` are only checked for truthiness in the
-// controller. A JSON body with a non-string (e.g. {"email": 1} or
-// {"password": {}}) makes normalizeEmail / bcrypt.compare throw a TypeError and
-// the caller gets a 500 instead of 400/401. Same for register(). Check
-// `typeof === "string"` before use.
+// Both values come from a JSON body, so they can be anything. A number or an
+// object reached normalizeEmail / bcrypt.compare and threw a TypeError — a 500
+// for what is a malformed request. Same answer as wrong credentials, so a type
+// probe learns nothing more than a wrong password would.
 export const login = async (email, password) => {
+  if (typeof email !== "string" || typeof password !== "string") {
+    throw unauthorized("Invalid credentials", ERROR_CODES.INVALID_CREDENTIALS);
+  }
   const normalizedEmail = normalizeEmail(email);
   const result = await pool.query("SELECT * FROM users WHERE email=$1 AND is_active=TRUE", [normalizedEmail]);
   const user = result.rows[0];
@@ -197,23 +252,42 @@ const emailIsVerified = (profile) =>
 export const googleOAuthLogin = async (profile) => {
   const email = profile.emails?.[0]?.value ? normalizeEmail(profile.emails[0].value) : null;
   const googleId = profile.id;
-  const displayName = profile.displayName;
+  // Google's name is not ours to refuse, so it is cut to the column rather than
+  // checked — a longer one would otherwise fail the INSERT as a 500.
+  const displayName =
+    typeof profile.displayName === "string" ? profile.displayName.slice(0, DISPLAY_NAME_MAX) : null;
   const avatarUrl = profile.photos?.[0]?.value;
 
-  // TODO(CR): three gaps on this path.
-  //  1. `google_id=$1 OR email=$2` can match TWO rows (one by google_id, another
-  //     by email) and rows[0] is then whichever the planner returns first — the
-  //     caller may be signed into the wrong account. Prefer the google_id match
-  //     explicitly (ORDER BY (google_id = $1) DESC) or query twice.
-  //  2. A row matched by email whose google_id is set to a DIFFERENT Google id
-  //     skips the `!user.google_id` branch and signs in anyway. Refuse when
-  //     user.google_id && user.google_id !== googleId.
-  //  3. A profile with no email reaches the INSERT below with email=NULL, which
-  //     violates users.email NOT NULL (001) and answers 500. Refuse it up front.
-  const existing = await pool.query("SELECT * FROM users WHERE google_id=$1 OR email=$2", [googleId, email]);
+  // users.email is NOT NULL (001). A Google account that shares no address
+  // reached the INSERT below with NULL and answered 500.
+  if (!email) {
+    throw unauthorized("Google did not share an email address for this account", ERROR_CODES.UNAUTHORIZED);
+  }
+
+  // The google_id match first, explicitly. `google_id=$1 OR email=$2` can match
+  // TWO rows — this Google identity on one account, this address on another —
+  // and without an order rows[0] was whichever the planner produced, which could
+  // sign the caller into the wrong account.
+  const existing = await pool.query(
+    `SELECT * FROM users WHERE google_id=$1 OR email=$2
+     ORDER BY (google_id IS NOT DISTINCT FROM $1) DESC
+     LIMIT 1`,
+    [googleId, email]
+  );
 
   if (existing.rows.length > 0) {
     const user = existing.rows[0];
+
+    // Matched by email, but the account is already linked to a DIFFERENT Google
+    // identity. Two Google accounts can claim one address over time (a recycled
+    // Workspace address, a renamed account); the one already linked is the one
+    // the owner proved, and the newcomer gets nothing by matching the string.
+    if (user.google_id && user.google_id !== googleId) {
+      throw unauthorized(
+        "This email is already linked to a different Google account",
+        ERROR_CODES.UNAUTHORIZED
+      );
+    }
 
     // Deactivation has to mean the same thing on both ways in. login() filters on
     // is_active in its WHERE clause; this path had no equivalent, so a deactivated
@@ -300,7 +374,9 @@ export const googleOAuthLogin = async (profile) => {
 // this one already runs on every single request.
 export const getActiveUserById = async (userId) => {
   const result = await pool.query(
-    "SELECT id, email, role, password_changed_at FROM users WHERE id=$1 AND is_active=TRUE",
+    // display_name is for the socket handshake, which labels chat messages with
+    // it; verifyToken still copies only id/email/role into req.user.
+    "SELECT id, email, role, display_name, password_changed_at FROM users WHERE id=$1 AND is_active=TRUE",
     [userId]
   );
   return result.rows[0] || null;
@@ -352,13 +428,7 @@ export const requestPasswordReset = async (email) => {
     return null;
   }
 
-  const { token, hash } = newToken();
-  await pool.query(
-    `INSERT INTO password_resets (user_id, token_hash, expires_at)
-     VALUES ($1, $2, NOW() + ($3 || ' milliseconds')::interval)`,
-    [user.id, hash, RESET_TTL_MS]
-  );
-  return token;
+  return insertMailedToken(user.id, TOKEN_PURPOSE.RESET, RESET_TTL_MS);
 };
 
 // Spending a token: set the new password, burn every outstanding token for that
@@ -374,12 +444,12 @@ export const resetPassword = async (token, newPassword) => {
     await client.query("BEGIN");
 
     // FOR UPDATE so two confirms of the same token serialise rather than both
-    // seeing it unused.
+    // seeing it unused. `purpose` keeps a verification link from working here.
     const { rows } = await client.query(
       `SELECT id, user_id FROM password_resets
-       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()
+       WHERE token_hash = $1 AND purpose = $2 AND used_at IS NULL AND expires_at > NOW()
        FOR UPDATE`,
-      [hashOf(token)]
+      [hashOf(token), TOKEN_PURPOSE.RESET]
     );
     if (rows.length === 0) {
       throw badRequest("This link is invalid or has expired", ERROR_CODES.INVALID_RESET_TOKEN);
@@ -460,20 +530,9 @@ export const changePassword = async (userId, currentPassword, newPassword) => {
 // row, and role, is_active and email must not be reachable from it. Changing an
 // email address is a re-verification flow, not a profile edit, and it is
 // deliberately not here.
-// TODO(CR): avatarUrl accepts any string of any length and any scheme. It is
-// rendered as an <img src> to other users, so it can point at a tracking pixel
-// that logs every viewer's IP. Restrict to https:// (or to our own storage) and
-// cap the length. Separately, the 120-char display-name cap below is wider than
-// display_name VARCHAR(100) in 001 — 101..120 chars pass this check and then fail
-// at the driver as a 500.
 export const updateProfile = async (userId, { displayName, avatarUrl }) => {
-  const trimmed = typeof displayName === "string" ? displayName.trim() : null;
-  if (trimmed !== null && trimmed.length === 0) {
-    throw badRequest("Display name cannot be empty");
-  }
-  if (trimmed !== null && trimmed.length > 120) {
-    throw badRequest("Display name must be at most 120 characters");
-  }
+  const trimmed = cleanDisplayName(displayName, { required: true });
+  const avatar = cleanAvatarUrl(avatarUrl);
 
   const result = await pool.query(
     `UPDATE users SET
@@ -481,7 +540,7 @@ export const updateProfile = async (userId, { displayName, avatarUrl }) => {
        avatar_url   = COALESCE($2, avatar_url)
      WHERE id = $3
      RETURNING id, email, role, display_name, avatar_url, email_verified, created_at`,
-    [trimmed, typeof avatarUrl === "string" ? avatarUrl : null, userId]
+    [trimmed, avatar, userId]
   );
   if (result.rows.length === 0) throw notFound("User not found");
   return result.rows[0];

@@ -20,6 +20,8 @@ declare module "socket.io" {
     user?: {
       id: number;
       role: string;
+      // From the users row at handshake; labels chat messages.
+      displayName?: string | null;
     };
   }
 }

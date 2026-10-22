@@ -2,7 +2,7 @@
 import * as servicesSaves from "../services/servicesSaves.js";
 import { optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";
-import { viewerScopeFor } from "../services/servicesVisibility.js";
+import { viewerScopeFor, assertUserCanSeeMediaId } from "../services/servicesVisibility.js";
 
 // ── The general save ────────────────────────────────────────────────────────
 
@@ -24,11 +24,12 @@ export const getSaves = async (req, res) => {
   res.status(200).json(media);
 };
 
-// TODO(CR): no visibility check on mediaId — see the TODO on createLike. Applies
-// to addPlaylistItem and createPlaylist below too.
+// Every write here that names a media item checks the caller may see it first —
+// see assertUserCanSeeMediaId for what writing against any id allowed.
 export const createSave = async (req, res) => {
   const mediaId = optionalId(req.body?.mediaId, "mediaId");
   if (!mediaId) throw badRequest("mediaId is required");
+  await assertUserCanSeeMediaId(req.user, mediaId);
   const result = await servicesSaves.addSave(req.user.id, mediaId);
   res.status(201).json(result);
 };
@@ -80,6 +81,7 @@ export const getPlaylist = async (req, res) => {
 // the lecture already in it, in one transaction rather than two requests.
 export const createPlaylist = async (req, res) => {
   const mediaId = optionalId(req.body?.mediaId, "mediaId");
+  if (mediaId) await assertUserCanSeeMediaId(req.user, mediaId);
   const playlist = await servicesSaves.createPlaylist(req.user.id, req.body?.title, mediaId);
   res.status(201).json(playlist);
 };
@@ -103,6 +105,7 @@ export const deletePlaylist = async (req, res) => {
 export const addPlaylistItem = async (req, res) => {
   const mediaId = optionalId(req.body?.mediaId, "mediaId");
   if (!mediaId) throw badRequest("mediaId is required");
+  await assertUserCanSeeMediaId(req.user, mediaId);
   const result = await servicesSaves.addToPlaylist(req.user.id, Number(req.params.id), mediaId);
   res.status(201).json(result);
 };

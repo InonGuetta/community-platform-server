@@ -10,6 +10,8 @@ import {
   changePassword,
   updateProfile,
   tokenPredatesPasswordChange,
+  verifyEmail,
+  TOKEN_PURPOSE,
 } from "../services/servicesAuth.js";
 
 // Getting back into an account you are locked out of, which until now was not
@@ -244,6 +246,55 @@ test("a blank display name is refused rather than saved", async () => {
   const stub = stubPoolQuery(pool, () => ({ rows: [{ id: 4 }] }));
   try {
     await assert.rejects(() => updateProfile(4, { displayName: "   " }), { statusCode: 400 });
+  } finally {
+    stub.restore();
+  }
+});
+
+// ── Purpose (migration 031) ─────────────────────────────────────────────────
+//
+// Verification and reset share one table. Without the purpose in both the write
+// and the lookup, each flow accepted the other's token — a 24-hour verification
+// link was a working password reset.
+
+test("a reset token is written with the reset purpose", async () => {
+  const stub = stubPoolQuery(pool, (text) =>
+    /FROM users/i.test(text) ? { rows: [ACTIVE] } : { rows: [] }
+  );
+  try {
+    await requestPasswordReset("a@example.com");
+    const insert = stub.calls.find((c) => /INSERT INTO password_resets/i.test(c.text));
+    assert.match(insert.text, /purpose/);
+    assert.equal(insert.params.at(-1), TOKEN_PURPOSE.RESET);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("the reset lookup accepts only reset tokens", async () => {
+  const db = resetWith([{ id: 1, user_id: 4 }]);
+  try {
+    await resetPassword("t".repeat(64), "a-long-enough-password");
+    const lookup = db.calls.find((c) => /FROM password_resets/i.test(c.text));
+    assert.match(lookup.text, /purpose = \$2/);
+    assert.equal(lookup.params[1], TOKEN_PURPOSE.RESET);
+  } finally {
+    db.restore();
+  }
+});
+
+// One statement: the token is spent only if it was unused, and the address is
+// verified only on the row that spending returned — so two clicks cannot both
+// succeed on a single-use link.
+test("verifying spends the token in the same statement, and only a verify token", async () => {
+  const stub = stubPoolQuery(pool, () => ({ rows: [{ id: 4, email_verified: true }] }));
+  try {
+    await verifyEmail("t".repeat(64));
+    assert.equal(stub.calls.length, 1, "spending and verifying must be one statement");
+    const [call] = stub.calls;
+    assert.match(call.text, /UPDATE password_resets SET used_at/);
+    assert.match(call.text, /purpose = \$2/);
+    assert.equal(call.params[1], TOKEN_PURPOSE.VERIFY);
   } finally {
     stub.restore();
   }

@@ -4,19 +4,20 @@ import { Router } from "express";
 import multer from "multer";
 import { verifyToken } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
+import { userRateLimit } from "../middleware/userRateLimit.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
 import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { MEDIA_TYPE_BY_EXT, extensionOf } from "../lib/mediaFormats.js";
 import { logger } from "../lib/logger.js";
+import { env } from "../lib/env.js";
 
 const router = Router();
 
 // Default matches the previous hard-coded value so nothing that uploads today
 // starts failing. Now that the destination is disk rather than the heap, the
 // real constraint is free space — lower this once you know what the box has.
-// TODO(CR): read through lib/env.js like every other variable (project rule).
-const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 2 * 1024 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = env.maxUploadBytes;
 
 // The stored filename is generated, never taken from the client, so an
 // originalname of "../../etc/passwd" cannot escape the directory.
@@ -108,11 +109,15 @@ router.delete(
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
 router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
 router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);
-// TODO(CR): each request here spawns a full ffmpeg transcode of a lecture, with
-// no rate limit and no concurrency cap. A handful of parallel requests from one
-// signed-in student saturates the API host's CPU. Add a per-user limiter and a
-// global cap on concurrent extractions (or move it to the worker and cache).
-router.get("/:id/download/audio", validateIntParam("id"), controllersMedia.downloadMediaAudio);
+// Each request here is a full ffmpeg transcode of a lecture on the API host, so
+// it is limited per user here and capped globally in the controller
+// (MAX_CONCURRENT_AUDIO_EXTRACTS). Nobody downloads ten lectures a minute.
+const audioExtractLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  message: "Too many audio downloads, please try again in a minute",
+});
+router.get("/:id/download/audio", audioExtractLimiter, validateIntParam("id"), controllersMedia.downloadMediaAudio);
 router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
 router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);
 

@@ -61,11 +61,11 @@ export const API_ROUTERS = [
 export const createApp = () => {
   const app = express();
 
-  // TODO(CR): no `app.set("trust proxy", ...)`. Behind nginx / a PaaS load
-  // balancer req.ip is the proxy's address, so every express-rate-limit bucket
-  // (login, recovery, search, AI) is shared by ALL users — ten failed logins
-  // from anyone lock everyone out for a minute. Set it to the real hop count in
-  // production (and keep it off in dev so X-Forwarded-For cannot be spoofed).
+  // Behind nginx / a PaaS load balancer req.ip is the proxy's address, so every
+  // express-rate-limit bucket would be shared by ALL users. TRUST_PROXY names
+  // the real hop count; unset means no proxy, so X-Forwarded-For is ignored and
+  // cannot be used to pick a bucket.
+  app.set("trust proxy", env.trustProxy);
 
   // First in the chain on purpose: it opens the request-id scope that every log
   // line below inherits, and a request rejected by helmet or cors should still
@@ -98,15 +98,18 @@ export const createApp = () => {
   // Hebrew lecture is hundreds of KB (UTF-8 Hebrew is ~2 bytes/char), well past the
   // 100KB body-parser default — which silently rejected the PUT with 413 and lost
   // the edit. 20mb leaves ample headroom for any realistic transcript.
-  // TODO(CR): 20mb applies to EVERY route, including the unauthenticated
-  // /api/auth/register, /login and /forgot-password — the body is read and
-  // JSON-parsed before any auth or rate limit decides the request is worthless.
-  // Keep the default (~100kb) globally and raise it only on PUT /api/transcripts
-  // (and notes, if needed).
-  const jsonParser = express.json({ limit: "20mb" });
+  // Only the two resources that legitimately carry large bodies get it: a
+  // transcript, and a note (which may embed pasted images as base64). Every
+  // other route — including the unauthenticated register/login/forgot-password
+  // — is capped low, so nobody can make the server read and parse 20MB before
+  // auth or a rate limit has looked at the request.
+  const largeJsonParser = express.json({ limit: "20mb" });
+  const jsonParser = express.json({ limit: "1mb" });
+  const LARGE_BODY_PREFIXES = ["/api/transcripts/", "/api/notes"];
   app.use((req, res, next) => {
     if (req.originalUrl === "/api/donations/webhook") return next();
-    jsonParser(req, res, next);
+    const large = LARGE_BODY_PREFIXES.some((prefix) => req.originalUrl.startsWith(prefix));
+    (large ? largeJsonParser : jsonParser)(req, res, next);
   });
 
   app.use(cookieParser());

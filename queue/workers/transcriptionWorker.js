@@ -9,9 +9,8 @@ import { GetObjectCommand } from "@aws-sdk/client-s3";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { transcriptionQueue } from "../transcriptionQueue.js";
-import { llmQueue } from "../llmQueue.js";
 import { pool } from "../../db/pool.js";
-import { saveChunks, reconcileMissingTranscripts } from "../../services/servicesTranscripts.js";
+import { saveChunks, reconcileMissingTranscripts, queueLlmForMedia } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { setDurationIfMissing } from "../../services/servicesMedia.js";
 import { probeDurationSeconds } from "../../lib/mediaDuration.js";
@@ -147,18 +146,23 @@ const extractAndSegment = (inputPath) =>
             "-segment_list_type", "csv",
           ])
           .output(pattern)
-          // TODO(CR): an async listener whose rejection nobody observes. If
-          // readdir throws here, the promise returned by extractAndSegment never
-          // settles — the job hangs at 'processing' forever (Bull's stalled check
-          // does not catch a job that is still "active" in a live process) and
-          // the error is an unhandledRejection. Wrap the body in try/catch and
-          // reject(err).
+          // The listener is async, and nothing observes its promise — so it
+          // must settle the outer one itself on EVERY path. Without the catch a
+          // failing readdir left extractAndSegment pending forever (the job
+          // hung at 'processing'; Bull's stalled check does not catch a job a
+          // live process still holds) and surfaced only as an
+          // unhandledRejection.
           .on("end", async () => {
-            const files = (await fs.promises.readdir(dir))
-              .filter((f) => f.endsWith(".mp3"))
-              .sort() // chunk000, chunk001, ... lexical sort is correct
-              .map((f) => path.join(dir, f));
-            resolve({ dir, files, starts: await readSegmentStarts(listPath, files) });
+            try {
+              const files = (await fs.promises.readdir(dir))
+                .filter((f) => f.endsWith(".mp3"))
+                .sort() // chunk000, chunk001, ... lexical sort is correct
+                .map((f) => path.join(dir, f));
+              resolve({ dir, files, starts: await readSegmentStarts(listPath, files) });
+            } catch (err) {
+              fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+              reject(new Error(`could not read the segments ffmpeg wrote: ${err.message}`));
+            }
           })
           .on("error", (err) => {
             // ffmpeg failed after the temp dir was created — remove it here
@@ -275,7 +279,9 @@ transcriptionQueue.process(async (job) => {
     // Only the id: the text is already in transcript_chunks, and putting a
     // multi-hour transcript in the job body meant Redis held a second copy of
     // every transcript indefinitely. The LLM worker reads it back from there.
-    const llmJob = await llmQueue.add({ mediaId });
+    // Under the media item's fixed id, so triggerPipeline can see this step is
+    // still running and refuse a re-trigger that would rewrite its chunks.
+    const llmJob = await queueLlmForMedia(mediaId);
     logger.info(`[WORKER:transcription] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms — queued LLM job id=${llmJob.id}`);
   } catch (err) {
     logger.error(`[WORKER:transcription] ✗ FAILED mediaId=${mediaId} ${Date.now() - t0}ms — ${err.message}`);
@@ -296,12 +302,19 @@ transcriptionQueue.process(async (job) => {
     // connection timeout for a job that actually died in ffmpeg, and Bull would
     // record the wrong reason, because `throw err` below never runs. This is the
     // shape llmWorker already uses.
-    await pool.query(
-      "UPDATE transcripts SET status='error', updated_at=NOW() WHERE media_id=$1",
-      [mediaId]
-    ).catch((dbErr) =>
-      logger.error(`[WORKER:transcription]   could not set status='error': ${dbErr.message} — the row stays at 'processing'`)
-    );
+    //
+    // And only on the final attempt, for llmWorker's reason: TRANSCRIPTION_ATTEMPTS
+    // can be raised above 1, and an 'error' written before a retry stops the
+    // page polling for a run that may yet succeed.
+    const attemptsAllowed = job.opts?.attempts ?? 1;
+    if (job.attemptsMade + 1 >= attemptsAllowed) {
+      await pool.query(
+        "UPDATE transcripts SET status='error', updated_at=NOW() WHERE media_id=$1",
+        [mediaId]
+      ).catch((dbErr) =>
+        logger.error(`[WORKER:transcription]   could not set status='error': ${dbErr.message} — the row stays at 'processing'`)
+      );
+    }
     throw err;
   } finally {
     // Clean up temp artifacts: the whole segment dir, and the source too if it

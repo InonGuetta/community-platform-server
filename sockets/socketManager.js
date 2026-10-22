@@ -2,7 +2,7 @@
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { getSessionByRoomToken, endSessionByRoomToken } from "../services/servicesSessions.js";
-import { getActiveUserById } from "../services/servicesAuth.js";
+import { getActiveUserById, tokenPredatesPasswordChange } from "../services/servicesAuth.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
 import { SOCKET_EVENTS, SOCKET_LIFECYCLE } from "./socketEvents.js";
@@ -53,16 +53,18 @@ export const authenticateSocket = async (socket, next) => {
       logger.debug("[socket] handshake rejected: no active user behind the token");
       return next(new Error("Unauthorized"));
     }
-    // TODO(CR): verifyToken also refuses a token older than the last password
-    // change (tokenPredatesPasswordChange); this handshake does not. A stolen
-    // cookie therefore keeps opening signalling connections for the rest of its
-    // seven days after the owner resets their password — the exact case the
-    // REST check exists for. Call tokenPredatesPasswordChange(user, payload.iat)
-    // here too. Note also that auth is checked only at handshake: an already-open
-    // socket survives deactivation until it disconnects.
+    // The same rule verifyToken applies: a token older than the last password
+    // change is spent. Without it a stolen cookie kept opening signalling
+    // connections for the rest of its seven days after the owner reset their
+    // password — the exact case the REST check exists for.
+    if (tokenPredatesPasswordChange(user, payload.iat)) {
+      logger.debug("[socket] handshake rejected: token predates the last password change");
+      return next(new Error("Unauthorized"));
+    }
     // The row, not the token's claims — a role changed since the token was signed
-    // takes effect on the next connection rather than on expiry.
-    socket.user = { id: user.id, role: user.role };
+    // takes effect on the next connection rather than on expiry. The display name
+    // rides along so chat messages can say who wrote them.
+    socket.user = { id: user.id, role: user.role, displayName: user.display_name ?? null };
     next();
   } catch (err) {
     // The database being unreachable is not the caller's fault, but a handshake
@@ -156,12 +158,58 @@ const relaySignal = (io, socket, event, to, body) => {
   io.to(to).emit(event, { from: socket.id, ...body });
 };
 
+// ── Chat flood control ──────────────────────────────────────────────────────
+//
+// A token bucket per socket: a burst of CHAT_BURST messages, then one every
+// CHAT_REFILL_MS. Nothing limited this before, so one client in a loop could
+// broadcast 2000-character messages to every participant as fast as the socket
+// allowed. Generous for a person typing; useless for a script.
+//
+// Exported, with the clock injectable, so the rule can be tested without timers.
+const CHAT_BURST = 5;
+const CHAT_REFILL_MS = 1000;
+
+export const createChatBucket = ({ burst = CHAT_BURST, refillMs = CHAT_REFILL_MS, now = Date.now } = {}) => {
+  let tokens = burst;
+  let last = now();
+  return () => {
+    const current = now();
+    tokens = Math.min(burst, tokens + (current - last) / refillMs);
+    last = current;
+    if (tokens < 1) return false;
+    tokens -= 1;
+    return true;
+  };
+};
+
+// Ending a room: tell everyone in it, then take every socket OUT of it. The
+// broadcast alone left the sockets in the room, so a client that ignored
+// SESSION_ENDED could keep chatting and relaying signalling in a session the
+// database says is over.
+const closeRoom = (io, roomToken) => {
+  traceOut("room", SOCKET_EVENTS.SESSION_ENDED);
+  io.to(roomToken).emit(SOCKET_EVENTS.SESSION_ENDED);
+  io.in(roomToken).socketsLeave(roomToken);
+};
+
+// The live server, for the one caller outside this file that needs it: the
+// REST "end session" route, which used to update the row and tell nobody in the
+// room. Set by initSockets; null in tests and in the worker processes, where
+// there are no sockets to close.
+let liveIo = null;
+
+export const closeSessionRoom = (roomToken) => {
+  if (!liveIo || !roomToken) return;
+  closeRoom(liveIo, roomToken);
+};
+
 // Returns the io instance so the caller can close it during shutdown —
 // websockets are long-lived and would otherwise hold the process open.
 export const initSockets = (httpServer) => {
   const io = new Server(httpServer, {
     cors: { origin: env.clientUrl, credentials: true },
   });
+  liveIo = io;
 
   // Reject unauthenticated sockets before any signaling can flow. The verified
   // identity — not client-supplied values — is what we relay to the room.
@@ -192,6 +240,16 @@ export const initSockets = (httpServer) => {
     // but the session behind it now has to be real and still running.
     onEvent(socket, SOCKET_EVENTS.JOIN_ROOM, async ({ roomToken }) => {
       try {
+        // The handshake checked the account once; a socket can outlive that by
+        // hours. Re-asked on every join (which is also every reconnect), so a
+        // deactivated user's open connection cannot enter another room.
+        const stillActive = await getActiveUserById(socket.user.id);
+        if (!stillActive) {
+          logger.debug(`[socket] join refused for ${socket.id}: account no longer active`);
+          socket.emit(SOCKET_EVENTS.JOIN_ERROR, { message: "Unauthorized" });
+          return socket.disconnect(true);
+        }
+
         const session = await getSessionByRoomToken(roomToken);
         if (!session || !session.is_active) {
           logger.debug(`[socket] join refused for ${socket.id}: session missing or ended`);
@@ -219,6 +277,19 @@ export const initSockets = (httpServer) => {
         // no await between them, so on a single event loop no other join can
         // interleave — the count each one reads already includes itself and every
         // socket that got in first.
+        //
+        // One room per socket. Chat sends to "the room this socket is in", and
+        // with two of them it picked one arbitrarily. Joining a new room leaves
+        // the previous one, announced the same way a disconnect is. Re-joining
+        // the room it is already in (a duplicate emit) changes nothing.
+        if (socket.rooms.has(roomToken)) {
+          logger.debug(`[socket] ${socket.id} already in session ${session.id}`);
+          return;
+        }
+        for (const previous of sessionRoomsOf(socket)) {
+          socket.leave(previous);
+          socket.to(previous).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
+        }
         socket.join(roomToken);
         const occupants = io.sockets.adapter.rooms.get(roomToken)?.size ?? 0;
         if (exceedsCapacity(occupants, session.max_participants)) {
@@ -267,15 +338,15 @@ export const initSockets = (httpServer) => {
     // be read back, none of which anyone has asked for. CHAT_HISTORY exists so a
     // reconnect is not silent about that — it replays what the server holds,
     // which for now is nothing.
-    // TODO(CR): no per-socket rate limit on chat (or on any event). One client in
-    // a loop can broadcast 2000-char messages to every participant as fast as the
-    // socket allows. A small token bucket per socket.id would do. Also, a socket
-    // may JOIN_ROOM several rooms; `[room]` below picks the first arbitrarily —
-    // either refuse a second join or leave the previous room on join.
+    const allowChat = createChatBucket();
     onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, ({ text }) => {
       const [room] = sessionRoomsOf(socket);
       if (!room) {
         logger.debug(`[socket] chat from ${socket.id} ignored: not in a room`);
+        return;
+      }
+      if (!allowChat()) {
+        logger.debug(`[socket] chat from ${socket.id} dropped: rate limited`);
         return;
       }
       // Trimmed and capped here rather than trusted: it is broadcast verbatim to
@@ -287,6 +358,9 @@ export const initSockets = (httpServer) => {
       const message = {
         from: socket.id,
         userId: socket.user.id,
+        // From the verified row, like userId — so a participant can see who
+        // wrote a message, and nobody can claim to be someone else.
+        displayName: socket.user.displayName,
         text: body,
         at: Date.now(),
       };
@@ -323,12 +397,7 @@ export const initSockets = (httpServer) => {
           return socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Only the host can end the session" });
         }
         logger.info(`[socket] session ended by user ${socket.user.id}`);
-        traceOut("room", SOCKET_EVENTS.SESSION_ENDED);
-        io.to(roomToken).emit(SOCKET_EVENTS.SESSION_ENDED);
-        // TODO(CR): the sockets stay IN the room after this. A client that ignores
-        // SESSION_ENDED (or a scripted one) can keep chatting and relaying
-        // signalling in a session the database says is over. Follow with
-        // io.in(roomToken).socketsLeave(roomToken).
+        closeRoom(io, roomToken);
       } catch (err) {
         logger.error(`[socket] end-session failed: ${err.message}`);
         socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Could not end the session" });
