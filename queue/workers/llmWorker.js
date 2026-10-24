@@ -10,6 +10,7 @@ import {
 } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { extractDocumentText } from "../../lib/textExtract.js";
+import { textQuality } from "../../lib/textQuality.js";
 import { readMediaBuffer } from "../../lib/storage.js";
 import { AppError } from "../../lib/AppError.js";
 import { logger } from "../../lib/logger.js";
@@ -85,9 +86,14 @@ const prepareText = async (mediaId) => {
   const chunkCount = await saveTextChunks(mediaId, text, pageOffsets);
   if (chunkCount === 0) throw new AppError("לא נמצא טקסט קריא בקובץ.", 400);
 
+  // How much of the text reads (migration 033) — measured here, the one place
+  // the whole extracted text is in hand, and written with the status change so
+  // the page that sees 'analyzing' already sees the quality too.
+  const quality = textQuality(text);
+  logger.info(`[WORKER:llm] text mediaId=${mediaId} — ${quality ?? "?"}% of the text is readable`);
   await pool.query(
-    "UPDATE transcripts SET status='analyzing', updated_at=NOW() WHERE media_id=$1",
-    [mediaId]
+    "UPDATE transcripts SET status='analyzing', text_quality=$2, updated_at=NOW() WHERE media_id=$1",
+    [mediaId, quality]
   );
 
   // Best-effort, exactly as on the audio path: the chunks are already saved and
