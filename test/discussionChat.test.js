@@ -497,3 +497,65 @@ test("the streaming route refuses as JSON, before any stream is opened", async (
     stub.restore();
   }
 });
+
+// ── What the reader is told while waiting ───────────────────────────────────
+// The slow part of a long lesson is finding the passages. The stream now opens
+// before it, and says which step is running.
+
+test("the stream says it is searching, then writing, then sends the answer", async () => {
+  const { stub } = flowDb();
+  const { deps } = fakeDeps({ pieces: ["תשובה [1]."] });
+  try {
+    const events = [];
+    await streamAsk(await prepare(deps), {
+      onStage: (s) => events.push(`stage:${s}`),
+      onDelta: () => events.push("delta"),
+    });
+    assert.deepEqual(events, ["stage:searching", "stage:writing", "delta"]);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("when nothing is found there is no 'writing' — no model is asked", async () => {
+  const big = "א".repeat(FULL_TEXT_MAX_CHARS + 1);
+  const { stub } = flowDb({ chunks: [recording(0, big)] });
+  const { deps } = fakeDeps({ hits: [] });
+  try {
+    const stages = [];
+    await streamAsk(await prepare(deps), { onStage: (s) => stages.push(s), onDelta: () => {} });
+    assert.deepEqual(stages, ["searching"]);
+  } finally {
+    stub.restore();
+  }
+});
+
+// The refusals stay before the stream; the search no longer is. prepareAsk
+// must not do it, or the reader waits through it with nothing on screen.
+test("preparing a question does not search — that waits for the open stream", async () => {
+  const big = "א".repeat(FULL_TEXT_MAX_CHARS + 1);
+  const { stub } = flowDb({ chunks: [recording(0, big)] });
+  const { deps, seen } = fakeDeps({ hits: [recording(0)] });
+  try {
+    await prepare(deps);
+    assert.equal(seen.search.length, 0);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a search that fails once the stream is open is a 502, and stores nothing", async () => {
+  const big = "א".repeat(FULL_TEXT_MAX_CHARS + 1);
+  const { stub, stored } = flowDb({ chunks: [recording(0, big)] });
+  const { deps } = fakeDeps();
+  deps.search = async () => { throw new Error("database gone"); };
+  try {
+    await assert.rejects(
+      async () => streamAsk(await prepare(deps), { onDelta: () => {} }),
+      { statusCode: 502, code: "AI_ANSWER_FAILED" }
+    );
+    assert.equal(stored.length, 0);
+  } finally {
+    stub.restore();
+  }
+});

@@ -86,6 +86,7 @@ export const postMessage = async (req, res) => {
 // handled by errorHandler like every other route. Once the stream is open the
 // status is committed, and a failure becomes an `error` event instead.
 //
+//   event: stage  data: { stage }                       "searching", then "writing"
 //   event: delta  data: { text }                        what the gate let through
 //   event: done   data: { conversation, messages }      the stored exchange
 //   event: error  data: { code, message }               the answer failed
@@ -119,6 +120,7 @@ export const postMessageStream = async (req, res) => {
 
   try {
     const result = await servicesDiscussion.streamAsk(prepared, {
+      onStage: (stage) => send("stage", { stage }),
       onDelta: (text) => send("delta", { text }),
       signal: abort.signal,
     });

@@ -274,9 +274,11 @@ const loadLesson = async (mediaId) => {
 };
 
 /**
- * Everything before the model is asked. Every refusal (404, 409) happens
+ * The checks before a question is taken: every refusal (404, 409) happens
  * here, so the streaming route can still answer it as an ordinary JSON error
- * before it commits to an event stream.
+ * before it commits to an event stream. Deliberately quick — the slow part,
+ * finding the passages, is gatherContext's, which the stream runs AFTER it has
+ * opened, so the reader is told what is happening while it happens.
  * @param {object} args
  * @param {{ id: number }} args.user
  * @param {number|string} args.mediaId
@@ -297,19 +299,31 @@ export const prepareAsk = async ({ user, mediaId, question, scope, deps = DEFAUL
   const lesson = await loadLesson(mediaId);
   const conversation = await getOrStartConversation(user.id, mediaId);
   const history = await getRecentMessages(conversation.id, HISTORY_MESSAGES);
-  const { mode, passages } = await buildContext({ mediaId, question, history, chunks, scope, deps });
+  return { mediaId, question, scope, conversation, history, chunks, lesson, deps };
+};
 
+/**
+ * The passages the question is answered from, and the messages for the model
+ * (null when retrieval found nothing — then no model is asked). For a long
+ * lesson this is the slow step: the rewrite, the embedding, the search and the
+ * rerank (./context.js).
+ * @param {Awaited<ReturnType<typeof prepareAsk>>} prepared
+ */
+export const gatherContext = async (prepared) => {
+  const { mediaId, question, scope, history, chunks, lesson, deps } = prepared;
+  const { mode, passages } = await buildContext({ mediaId, question, history, chunks, scope, deps });
   const messages = passages.length === 0 ? null : [
     { role: "system", content: systemPrompt(lesson) },
     ...historyMessages(history),
     { role: "user", content: `קטעים:\n\n${formatPassages(passages)}\n\nשאלה: ${question}` },
   ];
-  return { mediaId, question, conversation, passages, mode, messages, deps };
+  return { mode, passages, messages };
 };
 
 // Store the exchange — only once the answer exists (property 4).
-const storeExchange = async (prepared, { answer, cited }) => {
-  const { conversation, passages, question, mediaId, mode } = prepared;
+const storeExchange = async (prepared, context, { answer, cited }) => {
+  const { conversation, question, mediaId } = prepared;
+  const { passages, mode } = context;
   const citations = cited.map((n) => citationSnapshot(passages[n - 1], n));
   const asked = await appendMessage(conversation.id, { role: "user", content: question });
   const answered = await appendMessage(conversation.id, { role: "assistant", content: answer, citations });
@@ -336,36 +350,53 @@ const answerFailed = (mediaId, err) => {
  */
 export const askInLesson = async (args) => {
   const prepared = await prepareAsk(args);
-  if (!prepared.messages) return storeExchange(prepared, { answer: NOTHING_FOUND_ANSWER, cited: [] });
+  const context = await gatherContext(prepared);
+  if (!context.messages) return storeExchange(prepared, context, { answer: NOTHING_FOUND_ANSWER, cited: [] });
 
   let result;
   try {
-    result = validateAnswer(await prepared.deps.answer(prepared.messages), prepared.passages.length);
+    result = validateAnswer(await prepared.deps.answer(context.messages), context.passages.length);
   } catch (err) {
     throw answerFailed(prepared.mediaId, err);
   }
   noteWithheld(prepared.mediaId, result.grounded);
-  return storeExchange(prepared, result);
+  return storeExchange(prepared, context, result);
 };
+
+// What the stream tells the reader while they wait, in the order it happens:
+// finding the passages (the slow part of a long lesson), then writing.
+export const STAGES = { searching: "searching", writing: "writing" };
 
 /**
  * The answer to a prepared question, sent as it is written.
  *
- * `onDelta(text)` receives only what the citation gate has let through. The
- * resolved value is the stored exchange, exactly as askInLesson returns it —
- * the client replaces the streamed draft with it, so the answer on screen is
- * always the one in the database. Resolves to null, storing nothing, when
- * `signal` aborts (the reader left).
+ * `onStage(stage)` is told when the passages are being found and when the
+ * answer is being written. `onDelta(text)` receives only what the citation
+ * gate has let through. The resolved value is the stored exchange, exactly as
+ * askInLesson returns it — the client replaces the streamed draft with it, so
+ * the answer on screen is always the one in the database. Resolves to null,
+ * storing nothing, when `signal` aborts (the reader left).
  * @param {Awaited<ReturnType<typeof prepareAsk>>} prepared
- * @param {{ onDelta: (text: string) => void, signal?: AbortSignal }} io
+ * @param {{ onDelta: (text: string) => void, onStage?: (stage: string) => void, signal?: AbortSignal }} io
  */
-export const streamAsk = async (prepared, { onDelta, signal }) => {
-  if (!prepared.messages) return storeExchange(prepared, { answer: NOTHING_FOUND_ANSWER, cited: [] });
+export const streamAsk = async (prepared, { onDelta, onStage, signal }) => {
+  onStage?.(STAGES.searching);
+  let context;
+  try {
+    context = await gatherContext(prepared);
+  } catch (err) {
+    // The stream is already open, so a failure here can no longer be a JSON
+    // error: it becomes the same "try again" the answer's own failure is.
+    throw answerFailed(prepared.mediaId, err);
+  }
+  if (signal?.aborted) return null;
+  if (!context.messages) return storeExchange(prepared, context, { answer: NOTHING_FOUND_ANSWER, cited: [] });
 
-  const gate = createCitationGate(prepared.passages.length);
+  onStage?.(STAGES.writing);
+  const gate = createCitationGate(context.passages.length);
   let result;
   try {
-    for await (const piece of prepared.deps.answerStream(prepared.messages, signal)) {
+    for await (const piece of prepared.deps.answerStream(context.messages, signal)) {
       if (signal?.aborted) return null;
       const shown = gate.push(piece);
       if (shown) onDelta(shown);
@@ -378,5 +409,5 @@ export const streamAsk = async (prepared, { onDelta, signal }) => {
   }
   if (result.tail) onDelta(result.tail);
   noteWithheld(prepared.mediaId, result.grounded);
-  return storeExchange(prepared, result);
+  return storeExchange(prepared, context, result);
 };
