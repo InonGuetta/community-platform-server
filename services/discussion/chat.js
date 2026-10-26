@@ -42,13 +42,22 @@ import { pool } from "../../db/pool.js";
 import { interactiveOpenai as openai, GPT_MODEL } from "../transcripts/gpt.js";
 import { assertCanSeeLesson } from "./access.js";
 import { searchWithinMedia } from "./retrieval.js";
-import { getOrStartConversation, getRecentMessages, appendMessage } from "./conversations.js";
+import { getOrStartConversation, getRecentMessages, appendMessage, countQuestionsToday } from "./conversations.js";
 import { lessonChunks, buildContext, formatPassages, citationSnapshot } from "./context.js";
 
 // The last few turns go back to the model, so a follow-up ("ומה עוד?") has
 // something to follow. Six messages is three exchanges — enough for a thread,
 // short enough that a long conversation does not grow the bill per question.
 export const HISTORY_MESSAGES = 6;
+
+// Questions a student may have answered per day, across all lessons (PRD
+// ASK-5). A question on a large book costs ~$0.15–0.20 — the rerank reads 15
+// passages and GPT-4o answers over 8 — and the per-minute rate limit alone put
+// no ceiling on a day. Fifty is far past a day of study, and is the line
+// between a reader and a script. Lecturers and admins are not counted: they
+// are the ones preparing the material, and the ones paying for it.
+export const DAILY_QUESTION_LIMIT = 50;
+const QUOTA_EXEMPT_ROLES = new Set(["lecturer", "admin"]);
 
 // The rewrite only turns a follow-up into a standalone sentence; a small model
 // does that as well as a large one, at a fraction of the cost and latency.
@@ -280,7 +289,7 @@ const loadLesson = async (mediaId) => {
  * finding the passages, is gatherContext's, which the stream runs AFTER it has
  * opened, so the reader is told what is happening while it happens.
  * @param {object} args
- * @param {{ id: number }} args.user
+ * @param {{ id: number, role?: string }} args.user
  * @param {number|string} args.mediaId
  * @param {string} args.question
  * @param {{ courses: number[]|null, drafts: number[]|null }} args.scope
@@ -288,6 +297,12 @@ const loadLesson = async (mediaId) => {
  */
 export const prepareAsk = async ({ user, mediaId, question, scope, deps = DEFAULT_DEPS }) => {
   await assertCanSeeLesson(mediaId, scope);
+
+  // Before anything is paid for — and before the stream opens, so the refusal
+  // is an ordinary 429 the client can say something precise about.
+  if (!QUOTA_EXEMPT_ROLES.has(user.role) && (await countQuestionsToday(user.id)) >= DAILY_QUESTION_LIMIT) {
+    throw new AppError("Daily question limit reached", 429, ERROR_CODES.AI_DAILY_LIMIT);
+  }
 
   // Before a conversation is opened: a lesson with no text yet must not leave
   // an empty conversation behind for every student who tried too early.

@@ -18,7 +18,7 @@ import {
 import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
-import { getLatestConversation } from "../services/discussion/conversations.js";
+import { getLatestConversation, countQuestionsToday } from "../services/discussion/conversations.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -809,9 +809,12 @@ const checks = [
       const result = await getLatestConversation(
         user.rows[0].id, media.rows[0].id, { courses: UNRESTRICTED, drafts: UNRESTRICTED }
       );
-      return result.conversation
+      // The daily quota's count — its "midnight in Jerusalem" boundary is SQL
+      // that only a real database can parse and evaluate.
+      const today = await countQuestionsToday(user.rows[0].id);
+      return (result.conversation
         ? `conversation ${result.conversation.id}, ${result.messages.length} message(s)`
-        : "tables present, no conversation yet";
+        : "tables present, no conversation yet") + `; ${today} question(s) today`;
     },
   },
   {

@@ -147,6 +147,35 @@ export const appendMessage = async (conversationId, { role, content, citations =
 };
 
 /**
+ * How many questions this user has had answered today, across every lesson —
+ * what the daily quota is counted against (PRD ASK-5).
+ *
+ * Counted from ai_messages rather than a counter of its own: a question is
+ * stored only together with its answer (chat.js, property 4), so a failed
+ * answer — which the reader is told to retry — never uses up the quota.
+ *
+ * "Today" is the day in Jerusalem, so the quota resets at midnight where the
+ * readers are, not at midnight UTC. created_at is a timestamp WITHOUT time
+ * zone written by NOW(), i.e. wall-clock time in the database session's zone;
+ * Jerusalem's midnight is converted into that same zone before comparing.
+ * @param {number} userId
+ */
+export const countQuestionsToday = async (userId) => {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS n
+     FROM ai_messages m
+     JOIN ai_conversations c ON c.id = m.conversation_id
+     WHERE c.user_id = $1
+       AND m.role = 'user'
+       AND m.created_at >= (
+         date_trunc('day', NOW() AT TIME ZONE 'Asia/Jerusalem') AT TIME ZONE 'Asia/Jerusalem'
+       ) AT TIME ZONE current_setting('TimeZone')`,
+    [userId]
+  );
+  return rows[0]?.n ?? 0;
+};
+
+/**
  * The last `limit` messages, oldest first — the history the chat sends the
  * model with each question.
  * @param {number} conversationId
