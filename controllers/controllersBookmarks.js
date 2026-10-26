@@ -1,7 +1,7 @@
 // @ts-check
 import * as servicesBookmarks from "../services/servicesBookmarks.js";
 import * as servicesMedia from "../services/servicesMedia.js";
-import { canUserSeeMedia } from "../services/servicesVisibility.js";
+import { canUserSeeMedia, viewerScopeFor } from "../services/servicesVisibility.js";
 import {
   requireSeconds, optionalSeconds, optionalId, optionalNote, optionalRect,
 } from "../lib/validate.js";
@@ -9,7 +9,11 @@ import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
 export const getBookmarks = async (req, res) => {
   const mediaId = optionalId(req.query.mediaId, "mediaId");
-  const bookmarks = await servicesBookmarks.getBookmarksByUser(req.user.id, mediaId);
+  const bookmarks = await servicesBookmarks.getBookmarksByUser(
+    req.user.id,
+    mediaId,
+    await viewerScopeFor(req.user)
+  );
   res.status(200).json(bookmarks);
 };
 
@@ -58,13 +62,19 @@ export const createBookmark = async (req, res) => {
   if (!hasTime && !hasPosition && place === null) {
     throw badRequest("One of timestampSeconds, charPosition or rect is required");
   }
-  // TODO(CR): the comment above says "never to both", but only "neither" is
-  // refused. A body with timestampSeconds AND rect (or AND charPosition) is
-  // stored with two anchors, and client/src/utilities/bookmarks.js classifies it
-  // by whichever test runs first — the exact two-vs-three-anchor confusion
-  // CLAUDE.md warns about. Refuse more than one anchor kind here. It would also
-  // be worth checking the anchor kind against media.media_type once loaded
-  // (a timestamp on a text item, a rect on a video).
+  // "Never to both" is enforced, not just documented. Only "neither" used to be
+  // refused, so a body with a timestamp AND a rect was stored with two anchors,
+  // and client/src/utilities/bookmarks.js then classified it by whichever test
+  // ran first — the anchor confusion CLAUDE.md warns about. A text anchor and a
+  // page anchor are different kinds too: a passage carries its own page, but a
+  // rect means "this place on the original page", not a passage.
+  const anchorKinds = [hasTime, hasPosition, place !== null].filter(Boolean).length;
+  if (anchorKinds > 1) {
+    throw badRequest(
+      "A bookmark has exactly one anchor: timestampSeconds, charPosition or rect",
+      ERROR_CODES.BOOKMARK_ANCHOR_INVALID
+    );
+  }
 
   if (quotedText !== undefined && quotedText !== null) {
     if (typeof quotedText !== "string") throw badRequest("quotedText must be a string");
@@ -109,6 +119,20 @@ export const createBookmark = async (req, res) => {
   const media = await servicesMedia.getMediaById(id);
   if (!(await canUserSeeMedia(req.user, media))) {
     throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
+  }
+
+  // The anchor has to suit the item: a moment belongs to a recording, a place
+  // in a text to a document. A timestamp on a book or a rect on a video is a
+  // row that is listed and can never be jumped to. Checked after visibility, so
+  // a hidden item still answers 404 rather than revealing its type.
+  const isDocument = media.media_type === "text";
+  if (hasTime === isDocument) {
+    throw badRequest(
+      isDocument
+        ? "A document is bookmarked by a place in its text, not a timestamp"
+        : "A recording is bookmarked by a timestamp",
+      ERROR_CODES.BOOKMARK_ANCHOR_INVALID
+    );
   }
 
   const bookmark = await servicesBookmarks.createBookmark({

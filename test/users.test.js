@@ -12,7 +12,7 @@ import { updateUser, deleteUser } from "../services/servicesUsers.js";
 const fakeDb = ({ target, activeAdmins = [], emailTakenBy = null }) =>
   stubPoolConnect(pool, (text) => {
     if (/^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(text)) return { rows: [] };
-    if (/SELECT role, is_active FROM users WHERE id=/i.test(text)) {
+    if (/SELECT role, is_active[^]*?FROM users WHERE id=/i.test(text)) {
       return { rows: target ? [target] : [] };
     }
     if (/SELECT id FROM users WHERE email=/i.test(text)) {

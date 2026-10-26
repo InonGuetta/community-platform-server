@@ -33,6 +33,17 @@ const DB_CONN_MESSAGES = [
   /read ECONNRESET/i,
 ];
 
+// SQLSTATEs that mean "the value you sent is not acceptable", by class.
+const PG_INPUT_ERRORS = {
+  "23505": { status: 409, code: ERROR_CODES.CONFLICT, message: "This already exists" },
+  "23503": { status: 404, code: ERROR_CODES.NOT_FOUND, message: "A referenced item does not exist" },
+  "22007": { status: 400, code: ERROR_CODES.BAD_REQUEST, message: "Invalid date" },
+  "22008": { status: 400, code: ERROR_CODES.BAD_REQUEST, message: "Invalid date" },
+  "22P02": { status: 400, code: ERROR_CODES.BAD_REQUEST, message: "Invalid value" },
+  "22001": { status: 400, code: ERROR_CODES.BAD_REQUEST, message: "A value is too long" },
+  "22003": { status: 400, code: ERROR_CODES.BAD_REQUEST, message: "A number is out of range" },
+};
+
 const isDbConnError = (err) =>
   DB_CONN_CODES.has(err?.code) ||
   DB_CONN_MESSAGES.some((pattern) => pattern.test(err?.message || ""));
@@ -60,12 +71,23 @@ export const errorHandler = (err, req, res, next) => {
     });
   }
 
-  // TODO(CR): Postgres input/constraint errors fall through to the 500 below:
-  // 23505 unique_violation (register race), 23503 foreign_key_violation (like /
-  // save / progress on a media id that does not exist), 22007/22008 bad date
-  // (?uploadedAfter=abc), 22P02 bad text representation, 22001 string too long.
-  // These are the caller's fault and should be 4xx. Map them here as a backstop
-  // (409 / 404 / 400) — the per-call-site 23505 catches stay as the precise form.
+  // Postgres refusing the caller's INPUT is the caller's fault, not ours. The
+  // call sites that can say something precise still catch these themselves
+  // (23505 → EMAIL_TAKEN etc.); this is the backstop for the ones that do not,
+  // so a malformed value answers 4xx instead of the generic 500 below. The
+  // driver's message is not echoed: it names tables and constraints.
+  // 23503 covers two opposite cases: inserting a reference to a row that does
+  // not exist (404), and deleting a row something still references (409).
+  // Only the detail text tells them apart.
+  const pgInput =
+    err?.code === "23503" && /still referenced/i.test(err?.detail || "")
+      ? { status: 409, code: ERROR_CODES.CONFLICT, message: "This item is still in use" }
+      : PG_INPUT_ERRORS[err?.code];
+  if (pgInput) {
+    logger.warn(`Postgres rejected input on ${req.method} ${req.path}: ${err.code}`);
+    return res.status(pgInput.status).json({ message: pgInput.message, code: pgInput.code });
+  }
+
   // req.path rather than originalUrl: the query string is where user input
   // lands (?search=…, ?code=… on the OAuth callback), and this line goes to the
   // log at error level where it is kept the longest.

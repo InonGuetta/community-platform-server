@@ -132,18 +132,13 @@ export const MEDIA_ORDER = {
   liked: `like_count DESC, ${TIE_BREAK}`,
 };
 
-// TODO(CR): three things on the busiest read in the app.
-//  1. No LIMIT / pagination: every archive load returns the whole visible
-//     library, and each row runs five correlated subqueries (MEDIA_COLUMNS).
-//     This grows linearly with the archive. Add keyset pagination.
-//  2. like_count's subquery filters likes by media_id, but likes only has
-//     UNIQUE(user_id, media_id) and (user_id, created_at) — neither leads with
-//     media_id, so it is a scan per row. Needs a new migration with an index on
-//     likes(media_id) (same for watch_progress(media_id) and saved_items(media_id)).
-//  3. uploadedAfter / uploadedBefore reach `$n::date` unvalidated:
-//     ?uploadedAfter=abc is a 22007 from Postgres → 500. `creator` (and
-//     `search`) given twice arrive as arrays and fail the same way. Validate
-//     them in lib/validate.js with the other filters.
+// TODO(CR): no LIMIT / pagination — every archive load returns the whole
+// visible library, each row running the correlated subqueries in MEDIA_COLUMNS.
+// Left open deliberately: paging changes what the archive screen IS (infinite
+// scroll vs numbered pages, what "N results" means, how a filter change resets
+// position), which is a product decision and a client change, not a server one.
+// The per-row cost is already reduced by 030_media_reference_indexes.sql, and
+// the date/text filters are validated in the controller (lib/validate.js).
 export const getAllMedia = async (filters = {}) => {
   // The visibility rule opens the WHERE clause rather than being one more
   // optional `if` below, and that is the point: it is not a filter the caller

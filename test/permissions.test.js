@@ -3,7 +3,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
-import { canManageMedia, isPrivileged } from "../lib/permissions.js";
+import { canManageMedia, isPrivileged, canManageCourse } from "../lib/permissions.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
 import * as controllersTranscripts from "../controllers/controllersTranscripts.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
@@ -117,6 +117,74 @@ test("updateMedia allows an admin", async () => {
     const res = fakeRes();
     await controllersMedia.updateMedia(fakeReq(ADMIN, { title: "x" }), res);
     assert.equal(res.statusCode, 200);
+  } finally {
+    db.restore();
+  }
+});
+
+// ── Filing a lesson into a course ───────────────────────────────────────────
+//
+// A lesson's courseId was never checked, so a lecturer could file their own
+// lesson into ANOTHER lecturer's course, where it appeared to that course's
+// students. The rule is the one that governs managing the course itself.
+
+test("canManageCourse: an admin any course, a lecturer only their own", () => {
+  const course = { lecturer_id: 2 };
+  assert.equal(canManageCourse(ADMIN, course), true);
+  assert.equal(canManageCourse(OWNER, course), true);
+  assert.equal(canManageCourse(OTHER, course), false);
+  assert.equal(canManageCourse({ id: "2", role: "lecturer" }, course), true, "ids compare numerically");
+});
+
+const stubMediaAndCourse = (course) =>
+  stubPoolQuery(pool, (text) => {
+    if (/FROM courses c/i.test(text)) return { rows: course ? [course] : [] };
+    if (/FROM media_items/i.test(text)) return { rows: [ITEM] };
+    if (/^\s*UPDATE media_items/i.test(text)) return { rows: [ITEM] };
+    return { rows: [] };
+  });
+
+test("updateMedia refuses moving a lesson into someone else's course", async () => {
+  const db = stubMediaAndCourse({ id: 9, lecturer_id: OTHER.id });
+  try {
+    const err = await controllersMedia.updateMedia(fakeReq(OWNER, { courseId: 9 }), fakeRes()).catch((e) => e);
+    assert.equal(err?.statusCode, 403);
+    assert.equal(db.calls.some((c) => /^\s*UPDATE media_items/i.test(c.text)), false, "nothing may be written");
+  } finally {
+    db.restore();
+  }
+});
+
+test("updateMedia files a lesson into the uploader's own course", async () => {
+  const db = stubMediaAndCourse({ id: 9, lecturer_id: OWNER.id });
+  try {
+    const res = fakeRes();
+    await controllersMedia.updateMedia(fakeReq(OWNER, { courseId: 9 }), res);
+    assert.equal(res.statusCode, 200);
+  } finally {
+    db.restore();
+  }
+});
+
+// Fields outside the allowlist never reach the UPDATE — durationSeconds is
+// trusted by the archive's length filter and is not the editor's to set.
+test("updateMedia ignores fields that are not editable", async () => {
+  const db = stubMediaRow();
+  try {
+    await controllersMedia.updateMedia(fakeReq(OWNER, { durationSeconds: 99999, thumbnailUrl: "http://x" }), fakeRes());
+    const update = db.calls.find((c) => /^\s*UPDATE media_items/i.test(c.text));
+    assert.equal(update.params.includes(99999), false);
+    assert.equal(update.params.includes("http://x"), false);
+  } finally {
+    db.restore();
+  }
+});
+
+test("updateMedia refuses an empty title", async () => {
+  const db = stubMediaRow();
+  try {
+    const err = await controllersMedia.updateMedia(fakeReq(OWNER, { title: "  " }), fakeRes()).catch((e) => e);
+    assert.equal(err?.statusCode, 400);
   } finally {
     db.restore();
   }

@@ -41,6 +41,10 @@ const VISIBLE_BOOK = {
   uploader_id: 1,
 };
 
+// A recording, for the tests about timestamps: a moment belongs to a recording,
+// and the controller refuses one placed on a book.
+const VISIBLE_RECORDING = { ...VISIBLE_BOOK, title: "שיעור", media_type: "audio" };
+
 // One wide chunk, so a test can pick any offset inside it without arithmetic.
 const CHUNK = { id: 55, char_start: 0, char_end: 9999, page_number: 12 };
 
@@ -257,14 +261,14 @@ test("offset zero is a real position and is not treated as missing", async () =>
 // ── The old case, unchanged ─────────────────────────────────────────────────
 
 test("a bookmark on a recording still works exactly as before", async () => {
-  const calls = capture();
+  const calls = capture({ media: VISIBLE_RECORDING });
   const res = await post({ mediaId: 7, timestampSeconds: 754, note: "כאן" });
   assert.equal(res.status, 201);
   assert.equal(param(calls, "timestampSeconds"), 754);
 });
 
 test("timestamp zero still means the start of a recording", async () => {
-  const calls = capture();
+  const calls = capture({ media: VISIBLE_RECORDING });
   const res = await post({ mediaId: 7, timestampSeconds: 0 });
   assert.equal(res.status, 201);
   assert.equal(param(calls, "timestampSeconds"), 0);
@@ -273,7 +277,7 @@ test("timestamp zero still means the start of a recording", async () => {
 // A recording has no chunk offsets to check against, so nothing is resolved for
 // it — and in particular a timestamp must never be looked up as a position.
 test("a recording's bookmark does not go looking for a chunk", async () => {
-  const calls = capture();
+  const calls = capture({ media: VISIBLE_RECORDING });
   await post({ mediaId: 7, timestampSeconds: 754 });
   const anchorLookup = calls.find((c) => /FROM transcript_chunks\s+WHERE/i.test(c.text));
   assert.equal(anchorLookup, undefined);
@@ -379,4 +383,30 @@ test("the transcript endpoint ships char offsets so the reader can anchor", asyn
   assert.match(chunkSql, /char_end/);
   // The reason that list is explicit in the first place.
   assert.doesNotMatch(chunkSql, /embedding/, "the vector must never ship to the client");
+});
+
+// ── One anchor, and one that suits the item ─────────────────────────────────
+
+// "Never both" used to be a comment. A body with two anchors was stored with
+// both, and the client classified it by whichever test ran first.
+test("a bookmark with two anchors is refused", async () => {
+  const calls = capture({ media: VISIBLE_RECORDING });
+  const res = await post({ mediaId: 7, timestampSeconds: 10, charPosition: 30 });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, ERROR_CODES.BOOKMARK_ANCHOR_INVALID);
+  assert.equal(insertOf(calls), undefined, "nothing may be written for a refused anchor");
+});
+
+test("a timestamp on a book is refused", async () => {
+  capture();
+  const res = await post({ mediaId: 7, timestampSeconds: 10 });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, ERROR_CODES.BOOKMARK_ANCHOR_INVALID);
+});
+
+test("a place in a text is refused on a recording", async () => {
+  capture({ media: VISIBLE_RECORDING });
+  const res = await post({ mediaId: 7, charPosition: 30 });
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, ERROR_CODES.BOOKMARK_ANCHOR_INVALID);
 });

@@ -42,6 +42,6 @@ export { fixHebrewTranscript } from "./transcripts/hebrew.js";
 
 export { generateKeyPointHeadings } from "./transcripts/headings.js";
 
-export { triggerPipeline, reconcileMissingTranscripts } from "./transcripts/pipeline.js";
+export { triggerPipeline, reconcileMissingTranscripts, queueLlmForMedia } from "./transcripts/pipeline.js";
 
 export { searchTranscripts } from "./transcripts/search.js";

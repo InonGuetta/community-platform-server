@@ -3,6 +3,7 @@ import { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
+import { userRateLimit } from "../middleware/userRateLimit.js";
 import * as controllersCourses from "../controllers/controllersCourses.js";
 
 const router = Router();
@@ -10,6 +11,14 @@ const router = Router();
 router.use(verifyToken);
 
 const canManage = requireRole("lecturer", "admin");
+
+// The "add a student" type-ahead searches the membership. Per user, because
+// that is who could walk it; generous, because it fires as somebody types.
+const enrollSearchLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  message: "Too many searches, please try again in a minute",
+});
 
 // Before "/:id" — validateIntParam would otherwise reject the literal "my" as a
 // malformed id and this route would be unreachable.
@@ -45,6 +54,7 @@ router.post("/:id/students", canManage, validateIntParam("id"), controllersCours
 router.get(
   "/:id/enrollable-students",
   canManage,
+  enrollSearchLimiter,
   validateIntParam("id"),
   controllersCourses.getEnrollableStudents
 );

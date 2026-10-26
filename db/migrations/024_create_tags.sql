@@ -44,7 +44,27 @@ CREATE TABLE IF NOT EXISTS tags (
   UNIQUE (name)
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_lower ON tags (LOWER(name));
+-- ── Edited after the fact, deliberately (October 2026) ──────────────────────
+--
+-- This line used to create idx_tags_name_lower, a GLOBAL case-insensitive
+-- unique index on the name. 025_tag_taxonomy.sql drops it again, because in a
+-- tree one name legitimately lives in two places — the book "בראשית" under
+-- "תורה" and the parasha "בראשית" under it; "שופטים" in Devarim and in Neviim;
+-- "שבת חזון" in two calendars. Uniqueness became per parent
+-- (idx_tags_sibling_name, idx_tags_root_name).
+--
+-- But db/migrate.js re-runs every file on every invocation, so this file tried
+-- to build the global index again each time. Once the data held its first
+-- legitimate same-name pair, that failed with 23505 forever, and `npm run
+-- migrate` reported "1 migration(s) failed" on every run — making it useless
+-- as a deploy gate. The duplicates are not a data error to clean up: deleting
+-- one of each pair would destroy the taxonomy.
+--
+-- Removing the line changes no database's end state: on a fresh one the index
+-- would have been created here and dropped by 025 two files later; on every
+-- existing one 025 has already dropped it. It is the one edit to a past
+-- migration in this directory, and it is outcome-neutral, which is the only
+-- kind the "never edit a migration" rule can allow.
 
 CREATE TABLE IF NOT EXISTS media_tags (
   media_id INT NOT NULL REFERENCES media_items(id) ON DELETE CASCADE,

@@ -37,14 +37,17 @@ const VISIBLE_BOOK = {
   is_published: true, course_id: null, uploader_id: 1,
 };
 
-const capture = () => {
+// A moment belongs to a recording; the controller refuses one placed on a book.
+const VISIBLE_RECORDING = { ...VISIBLE_BOOK, title: "שיעור", media_type: "video" };
+
+const capture = ({ media = VISIBLE_BOOK } = {}) => {
   const calls = [];
   stubPoolQuery(pool, (text, params) => {
     calls.push({ text, params });
     if (/FROM users/i.test(text)) return { rows: [USER] };
     if (/INSERT INTO bookmarks/i.test(text)) return { rows: [{ id: 1, media_id: 7 }] };
     if (/FROM transcript_chunks\s+WHERE/i.test(text)) return { rows: [] };
-    if (/FROM media_items m/i.test(text)) return { rows: [VISIBLE_BOOK] };
+    if (/FROM media_items m/i.test(text)) return { rows: [media] };
     return { rows: [] };
   });
   return calls;
@@ -167,7 +170,7 @@ test("a rect that is not an object at all is refused", async () => {
 // ── The other two kinds are untouched ───────────────────────────────────────
 
 test("a recording's bookmark still works exactly as before", async () => {
-  const calls = capture();
+  const calls = capture({ media: VISIBLE_RECORDING });
   const res = await post({ mediaId: 7, timestampSeconds: 754, note: "כאן" });
   assert.equal(res.status, 201);
   assert.equal(param(calls, "timestampSeconds"), 754);
@@ -190,4 +193,11 @@ test("the listing orders page anchors by page", async () => {
   const res = await request(app).get("/api/bookmarks").set("Cookie", `token=${token}`);
   assert.equal(res.status, 200);
   assert.match(sql, /ORDER BY[\s\S]*page_number/i);
+});
+
+test("a page anchor and a timestamp together are refused", async () => {
+  const calls = capture();
+  const res = await post({ ...PLACE, timestampSeconds: 5 });
+  assert.equal(res.status, 400);
+  assert.equal(insertOf(calls), undefined);
 });

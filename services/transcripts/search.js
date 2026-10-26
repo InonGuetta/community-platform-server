@@ -14,11 +14,15 @@ import { visibleMediaSql } from "../../lib/permissions.js";
 import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { embedQuery, toVectorLiteral } from "../servicesEmbeddings.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+// The interactive client: a search is something a person is waiting on.
+import { interactiveOpenai as openai, GPT_MODEL } from "./gpt.js";
 
-const RRF_K = 60;
+// RRF_K and FUSE_DEPTH are exported for the search inside one lesson
+// (services/discussion/retrieval.js), which fuses the same two lists the same
+// way — one tuning for both, rather than two that drift apart.
+export const RRF_K = 60;
 const SEARCH_LIMIT = 30;
-const FUSE_DEPTH = 60; // how deep each list goes into the fusion
+export const FUSE_DEPTH = 60; // how deep each list goes into the fusion
 const SEMANTIC_SNIPPET_CHARS = 200;
 // hybrid fetches more candidates than it returns so the reranker has a pool to
 // reorder; the LLM then picks the best SEARCH_LIMIT.
@@ -43,7 +47,9 @@ const RERANK_PROMPT = `אתה מדרג רלוונטיות בחיפוש. תקבל
 לכל קטע תן ציון שלם בין 0 ל-100: עד כמה הקטע באמת רלוונטי *במשמעות* לשאילתה — 100 = בדיוק על הנושא שחיפשו, 0 = לא קשור כלל. אל תתגמל הופעה מקרית של מילה; דרג לפי התוכן.
 החזר JSON תקין בלבד במבנה: { "scores": [{ "index": <מספר הקטע>, "score": <0-100> }] } — ציון לכל הקטעים שקיבלת, בלי markdown ובלי הסברים.`;
 
-const rerankByRelevance = async (query, rows) => {
+// Exported for the search inside one lesson, which asks the same question of a
+// smaller pool. `limit` is how many survive; the library-wide search keeps 30.
+export const rerankByRelevance = async (query, rows, limit = SEARCH_LIMIT) => {
   if (rows.length === 0) return rows;
   const list = rows
     .map((r, i) => `${i + 1}. ${r.content.split(/\s+/).slice(0, RERANK_PREVIEW_WORDS).join(" ")}`)
@@ -79,7 +85,7 @@ const rerankByRelevance = async (query, rows) => {
   });
   scored.sort((a, b) => b.similarity - a.similarity);
   // Drop near-zero / irrelevant hits so the list isn't padded with 0% noise.
-  return scored.filter((r) => r.similarity >= RELEVANCE_FLOOR).slice(0, SEARCH_LIMIT);
+  return scored.filter((r) => r.similarity >= RELEVANCE_FLOOR).slice(0, limit);
 };
 
 // Pull { index → score } out of whatever shape GPT-4o returned. Tolerates the
@@ -150,16 +156,42 @@ const searchKeyword = async (query, scope) => {
   return result.rows;
 };
 
-// TODO(CR): the HNSW index (010) is searched first and the visibility WHERE is
-// applied to what it returns (pgvector post-filtering, ef_search=40 by default).
-// For a student whose visible set is a small part of the library, most of the
-// nearest neighbours are filtered out and semantic/hybrid return far fewer than
-// SEARCH_LIMIT rows — the "hidden rows consume candidate slots" problem the
-// comment on VISIBLE describes, just one level lower. Raise hnsw.ef_search for
-// these queries (SET LOCAL) or use iterative scans (pgvector ≥ 0.8).
+// ── Widening the vector index's candidate pool ──────────────────────────────
+//
+// The HNSW index (010) is walked first and the visibility WHERE is applied to
+// what it returns — pgvector filters AFTER the index scan, which yields at most
+// hnsw.ef_search rows (default 40). For a student whose visible set is a small
+// part of the library, most of those nearest neighbours are then filtered out,
+// and semantic/hybrid returned far fewer than SEARCH_LIMIT rows: the "hidden
+// rows consume candidate slots" problem the comment on VISIBLE describes, one
+// level lower.
+//
+// SET LOCAL needs a transaction, hence a client of its own rather than
+// pool.query. LOCAL so the setting dies with the transaction and never leaks to
+// the next user of the pooled connection. ef_search exists in every pgvector
+// with HNSW (0.5+); the iterative scans of 0.8 would be the fuller answer, but
+// naming that setting on an older server is an error, not a no-op.
+const VECTOR_EF_SEARCH = 400;
+
+const withWideVectorScan = async (run) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`SET LOCAL hnsw.ef_search = ${VECTOR_EF_SEARCH}`);
+    const result = await run(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
 const searchSemantic = async (query, scope) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
-  const result = await pool.query(
+  const result = await withWideVectorScan((client) => client.query(
     `SELECT
        ${SELECT_COLS},
        LEFT(c.content, ${SEMANTIC_SNIPPET_CHARS}) AS headline,
@@ -171,7 +203,7 @@ const searchSemantic = async (query, scope) => {
      ORDER BY c.embedding <=> $1::vector
      LIMIT ${SEARCH_LIMIT}`,
     [queryVector, scope.courses, scope.drafts]
-  );
+  ));
   return result.rows;
 };
 
@@ -182,7 +214,7 @@ const searchHybrid = async (query, scope) => {
   // sets and RRF sums the reciprocal ranks. ts_headline highlights the FTS terms
   // (semantic-only hits simply have no terms to highlight, which is fine).
   // Both CTEs join media_items solely to apply the visibility predicate.
-  const result = await pool.query(
+  const result = await withWideVectorScan((client) => client.query(
     `WITH kw AS (
        SELECT c.id,
          row_number() OVER (
@@ -223,7 +255,7 @@ const searchHybrid = async (query, scope) => {
      ORDER BY f.score DESC
      LIMIT ${CANDIDATE_LIMIT}`,
     [query, queryVector, scope.courses, scope.drafts]
-  );
+  ));
 
   // Rerank the candidates with GPT-4o for true relevance ordering + scoring.
   // Best-effort: if the LLM call/parse fails, return the RRF order untouched so

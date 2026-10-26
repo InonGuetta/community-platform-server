@@ -129,24 +129,32 @@ export const getJoinableRoomToken = async (id, _userId) => {
 // One statement does both the authorization and the state change: the WHERE
 // clause IS the "only the host may end this" check, so there is no window
 // between deciding and acting. Returns null when the caller isn't the host.
-// TODO(CR): neither end path (this one and endSession below) has
-// `AND is_active = TRUE`, so ending an ended session succeeds again: ended_at
-// is overwritten with a later time (wrong duration in any report) and the
-// socket path re-broadcasts SESSION_ENDED.
+//
+// `is_active = TRUE` in both end paths: ending an ended session used to succeed
+// again, overwriting ended_at with a later time (a wrong duration in any report)
+// and re-broadcasting SESSION_ENDED.
 export const endSessionByRoomToken = async (roomToken, hostId) => {
   const result = await pool.query(
     `UPDATE live_sessions SET is_active=FALSE, ended_at=NOW()
-     WHERE room_token=$1 AND host_id=$2 RETURNING *`,
+     WHERE room_token=$1 AND host_id=$2 AND is_active=TRUE RETURNING *`,
     [roomToken, hostId]
   );
   return result.rows[0] || null;
 };
 
+// Idempotent in the same direction as startSession: the host ending a session
+// that is already over gets the ended session back, with its original ended_at.
 export const endSession = async (id, hostId) => {
   const result = await pool.query(
-    "UPDATE live_sessions SET is_active=FALSE, ended_at=NOW() WHERE id=$1 AND host_id=$2 RETURNING *",
+    "UPDATE live_sessions SET is_active=FALSE, ended_at=NOW() WHERE id=$1 AND host_id=$2 AND is_active=TRUE RETURNING *",
     [id, hostId]
   );
-  if (result.rows.length === 0) throw forbidden("Session not found or not authorized", ERROR_CODES.SESSION_FORBIDDEN);
-  return result.rows[0];
+  if (result.rows.length > 0) return result.rows[0];
+
+  const existing = await pool.query("SELECT * FROM live_sessions WHERE id=$1", [id]);
+  const session = existing.rows[0];
+  if (!session || Number(session.host_id) !== Number(hostId)) {
+    throw forbidden("Session not found or not authorized", ERROR_CODES.SESSION_FORBIDDEN);
+  }
+  return session; // already ended — the state the caller wanted
 };

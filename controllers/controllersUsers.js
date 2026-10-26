@@ -1,6 +1,7 @@
 // @ts-check
 import * as servicesUsers from "../services/servicesUsers.js";
-import { sendRoleDecisionEmail } from "../lib/mailer.js";
+import { sendRoleDecisionEmail, sendVerificationEmail } from "../lib/mailer.js";
+import { issueVerificationToken } from "../services/servicesAuth.js";
 
 export const getAllUsers = async (req, res) => {
   const users = await servicesUsers.getAllUsers();
@@ -17,8 +18,16 @@ export const createUser = async (req, res) => {
   res.status(201).json(user);
 };
 
+// A changed address is left unverified by the service; the link goes out here,
+// after the change is committed and never awaited for its outcome — a mail
+// server being down must not turn a saved edit into an error.
 export const updateUser = async (req, res) => {
-  const user = await servicesUsers.updateUser(req.params.id, req.body);
+  const { emailChanged, ...user } = await servicesUsers.updateUser(req.params.id, req.body ?? {}, req.user.id);
+  if (emailChanged) {
+    issueVerificationToken(user.id)
+      .then((token) => sendVerificationEmail(user.email, token))
+      .catch(() => {});
+  }
   res.status(200).json(user);
 };
 

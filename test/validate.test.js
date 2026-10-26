@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   requireSeconds, optionalSeconds, optionalId, optionalBoolean, mediaTypeFilter,
   mediaSortFilter, MEDIA_SORTS, DEFAULT_MEDIA_SORT, durationRangeFilter,
+  optionalDateFilter, optionalQueryString,
 } from "../lib/validate.js";
 import { MEDIA_ORDER } from "../services/servicesMedia.js";
 
@@ -124,4 +125,28 @@ test("durationRangeFilter refuses anything that is not a whole number of seconds
 test("durationRangeFilter refuses a range with no room in it", () => {
   assert.ok(rejects(() => durationRangeFilter("1800", "900")));
   assert.ok(rejects(() => durationRangeFilter("900", "900")));
+});
+
+// ── The archive's date and text filters ─────────────────────────────────────
+//
+// These reached Postgres unchecked, so ?uploadedAfter=abc — or a parameter given
+// twice, which Express hands over as an array — was a 500 from the driver.
+
+test("a date filter accepts YYYY-MM-DD and treats empty as absent", () => {
+  assert.equal(optionalDateFilter("2024-03-05", "from"), "2024-03-05");
+  assert.equal(optionalDateFilter(undefined, "from"), undefined);
+  assert.equal(optionalDateFilter("", "from"), undefined);
+});
+
+test("a date filter refuses free text, impossible dates and arrays", () => {
+  for (const bad of ["abc", "2024-02-30", "2024-3-5", ["2024-03-05", "2024-03-06"], 20240305]) {
+    assert.throws(() => optionalDateFilter(bad, "from"), { statusCode: 400 }, JSON.stringify(bad));
+  }
+});
+
+test("a text filter must be one string of bounded length", () => {
+  assert.equal(optionalQueryString("הרב כהן", "creator"), "הרב כהן");
+  assert.equal(optionalQueryString(undefined, "creator"), undefined);
+  assert.throws(() => optionalQueryString(["a", "b"], "creator"), { statusCode: 400 });
+  assert.throws(() => optionalQueryString("x".repeat(301), "creator"), { statusCode: 400 });
 });

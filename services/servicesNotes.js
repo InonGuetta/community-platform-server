@@ -1,6 +1,7 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { notFound, ERROR_CODES } from "../lib/AppError.js";
+import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
+import { visibleMediaSql } from "../lib/permissions.js";
 
 // Notes are joined to media so the client can show which lecture a note came
 // from (title) without a second round-trip. media_title is null for free notes.
@@ -10,8 +11,15 @@ import { notFound, ERROR_CODES } from "../lib/AppError.js";
 // for every note — including notes taken on a filmed shiur and on a sefer. Both
 // columns are null together for a free note, so the client has one condition to
 // check rather than two.
+//
+// The title only while the caller may still see the lecture — the same rule
+// servicesBookmarks.getBookmarksByUser applies, for the same reason: the note
+// was attached while the lecture was visible, and an unenrolment or an
+// unpublish later must not keep handing its title back. The note itself stays.
 const SELECT_WITH_MEDIA = `
-  SELECT n.*, m.title AS media_title, m.media_type AS media_type
+  SELECT n.*,
+         CASE WHEN ${visibleMediaSql("$2", "m", "$3")} THEN m.title END AS media_title,
+         m.media_type AS media_type
   FROM notes n
   LEFT JOIN media_items m ON m.id = n.media_id
 `;
@@ -28,15 +36,40 @@ const SELECT_WITH_MEDIA = `
 // blame it on.
 const NOTE_ORDER = "ORDER BY n.sort_order ASC, n.id DESC";
 
-export const getNotesByUser = async (userId) => {
+// `scope` fails closed like every other read: absent means "may see nothing".
+export const getNotesByUser = async (userId, scope = { courses: [], drafts: [] }) => {
   const result = await pool.query(
     `${SELECT_WITH_MEDIA} WHERE n.user_id=$1 ${NOTE_ORDER}`,
-    [userId]
+    [userId, scope.courses, scope.drafts]
   );
   return result.rows;
 };
 
+// The column is VARCHAR(200) (011); the body is TEXT and holds pasted images as
+// base64 (RichNoteEditor caps each at 3MB). Without a cap, one note could fill
+// the whole 20MB request and then be returned in full on every notebook load.
+export const NOTE_TITLE_MAX = 200;
+export const NOTE_BODY_MAX = 15 * 1024 * 1024;
+
+// undefined/null pass through as null, which the UPDATE below reads as "leave
+// it alone" and the INSERT stores as empty.
+const cleanNoteField = (value, name, max) => {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw badRequest(`${name} must be text`);
+  if (value.length > max) throw badRequest(`${name} is too long`);
+  return value;
+};
+
+// The body is stored as the client sent it, deliberately not re-sanitised here.
+// It is HTML, but it is only ever rendered back to its OWNER, and the client
+// runs it through sanitizeNoteHtml on every load (noteBodyToHtml) — the one
+// allowlist, tested against the source chips it must preserve. A second,
+// server-side allowlist written in a different library would have to match it
+// attribute for attribute, and the first mismatch silently strips a chip out of
+// somebody's notes on save.
 export const createNote = async (userId, { title, body, mediaId, timestampSeconds }) => {
+  title = cleanNoteField(title, "title", NOTE_TITLE_MAX);
+  body = cleanNoteField(body, "body", NOTE_BODY_MAX);
   const result = await pool.query(
     // A new note goes to the TOP, which is where the client has always shown it
     // and where the user is about to start typing. One below the smallest the
@@ -82,18 +115,14 @@ export const reorderNotes = async (userId, ids) => {
   return { reordered: result.rows.length };
 };
 
-// TODO(CR): PUT with a missing field writes NULL — a client that sends only
-// {body} wipes the title (and vice versa). Use COALESCE like every other update
-// in this codebase, or require both. There is also no length cap on title/body:
-// with the global 20mb JSON limit a single note can be 20MB of base64 images,
-// returned in full on every getNotesByUser. And the server stores the HTML
-// unsanitized — the client's sanitizeNoteHtml is the only filter, so anything
-// that writes via the API directly bypasses it.
+// COALESCE, like every other update here: a field left out of the body is left
+// alone. It used to be written as NULL, so a client sending only {body} wiped the
+// title. Clearing a field is sending "" — which is not null and is stored.
 export const updateNote = async (id, userId, { title, body }) => {
   const result = await pool.query(
-    `UPDATE notes SET title=$1, body=$2, updated_at=NOW()
+    `UPDATE notes SET title=COALESCE($1, title), body=COALESCE($2, body), updated_at=NOW()
      WHERE id=$3 AND user_id=$4 RETURNING *`,
-    [title ?? null, body ?? null, id, userId]
+    [cleanNoteField(title, "title", NOTE_TITLE_MAX), cleanNoteField(body, "body", NOTE_BODY_MAX), id, userId]
   );
   if (result.rows.length === 0) throw notFound("Note not found", ERROR_CODES.NOTE_NOT_FOUND);
   return result.rows[0];

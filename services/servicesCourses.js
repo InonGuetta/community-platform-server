@@ -13,15 +13,14 @@ const LIST_COLUMNS = `
   (SELECT COUNT(*)::int FROM enrollments e WHERE e.course_id = c.id) AS student_count,
   (SELECT COUNT(*)::int FROM media_items m WHERE m.course_id = c.id) AS media_count`;
 
-// TODO(CR): this list (and getCourseById) is served to every signed-in user,
-// students included, and carries student_count — while getStudentCourses below
-// deliberately omits it because "a student has no business knowing who else is
-// enrolled". Also returns inactive courses to students. Pick one rule: strip
-// student_count (and is_active=FALSE rows) for non-privileged callers.
-export const getAllCourses = async () => {
+// The catalogue. `activeOnly` is for a reader who does not manage courses: a
+// closed course is an administrative state, not something to browse. The
+// controller also strips student_count for that reader — see publicCourse.
+export const getAllCourses = async ({ activeOnly = false } = {}) => {
   const result = await pool.query(
     `SELECT ${LIST_COLUMNS}
      FROM courses c LEFT JOIN users u ON c.lecturer_id = u.id
+     ${activeOnly ? "WHERE c.is_active = TRUE" : ""}
      ORDER BY c.created_at DESC`
   );
   return result.rows;
@@ -41,7 +40,7 @@ export const getCourseById = async (id) => {
 // A course's lecturer must actually be a lecturer or an admin. Without this the
 // field accepts any user id, including a student's, and the course then shows a
 // student's name as the person teaching it.
-const assertValidLecturer = async (lecturerId) => {
+export const assertValidLecturer = async (lecturerId) => {
   if (lecturerId === undefined || lecturerId === null) return;
   const { rows } = await pool.query(
     "SELECT role FROM users WHERE id=$1 AND is_active=TRUE",
@@ -72,7 +71,7 @@ export const createCourse = async (data) => {
 };
 
 export const updateCourse = async (id, data) => {
-  const { title, description, lecturerId, isActive } = data;
+  const { title, description, lecturerId, isActive, setLecturer = false } = data;
 
   // COALESCE means "leave it alone when the field wasn't sent", matching how
   // updateUser and updateMedia already behave.
@@ -82,17 +81,17 @@ export const updateCourse = async (id, data) => {
     throw badRequest("isActive must be a boolean");
   }
 
-  // TODO(CR): lecturer_id uses COALESCE, so an admin can reassign a course but
-  // can never detach it (lecturerId: null is read as "leave alone"). updateMedia
-  // solved the same problem with a setX boolean + CASE; do the same here.
+  // lecturer_id uses CASE rather than COALESCE, for the reason updateMedia
+  // gives: COALESCE reads null as "leave it alone", so a course could be
+  // reassigned but never detached. `setLecturer` says the caller named the field.
   const result = await pool.query(
     `UPDATE courses SET
        title       = COALESCE($1, title),
        description = COALESCE($2, description),
-       lecturer_id = COALESCE($3, lecturer_id),
+       lecturer_id = CASE WHEN $6::boolean THEN $3::int ELSE lecturer_id END,
        is_active   = COALESCE($4, is_active)
      WHERE id=$5 RETURNING id`,
-    [cleanedTitle, description ?? null, lecturerId ?? null, isActive ?? null, id]
+    [cleanedTitle, description ?? null, lecturerId ?? null, isActive ?? null, id, setLecturer]
   );
   if (result.rows.length === 0) throw notFound("Course not found", ERROR_CODES.COURSE_NOT_FOUND);
   return getCourseById(id);
@@ -254,11 +253,22 @@ const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${ch
  * only produce a confusing 409), the course's own lecturer (enrolling yourself
  * in your own course means nothing), and deactivated accounts.
  */
-// TODO(CR): the 2-char minimum and LIMIT 20 do not stop enumeration — a script
-// walking all two-letter pairs, or substrings like "@gmail", "@walla", collects
-// the membership 20 at a time, and every row carries the EMAIL. Nothing rate
-// limits the route either. Consider: match email only on an exact/prefix basis,
-// return the email masked, and put a per-user limiter on the route.
+// The minimum and the LIMIT alone did not stop enumeration: a script walking
+// two-letter pairs, or substrings like "@gmail", collected the membership 20 at
+// a time with every address attached. Three more limits close that:
+//
+//   * the email is matched only from its START, so "@gmail" matches nobody —
+//     the name is what is searched as a substring, which is how people look
+//     somebody up anyway;
+//   * the address comes back MASKED (see maskEmail), enough to tell two people
+//     with the same name apart and not enough to harvest;
+//   * the route is rate limited per user (routersCourses).
+export const maskEmail = (email) => {
+  const [local = "", domain = ""] = String(email ?? "").split("@");
+  if (!domain) return local ? `${local.slice(0, 1)}***` : "";
+  return `${local.slice(0, 2)}***@${domain}`;
+};
+
 export const searchEnrollableUsers = async (courseId, query) => {
   const term = typeof query === "string" ? query.trim() : "";
   // An empty answer, not an error: the caller is a search box that is still
@@ -271,7 +281,7 @@ export const searchEnrollableUsers = async (courseId, query) => {
     `SELECT u.id, u.email, u.display_name, u.role
      FROM users u
      WHERE u.is_active = TRUE
-       AND (u.display_name ILIKE $2 OR u.email ILIKE $2)
+       AND (u.display_name ILIKE $2 OR u.email ILIKE $4)
        AND NOT EXISTS (
          SELECT 1 FROM enrollments e
          WHERE e.course_id = $1 AND e.student_id = u.id
@@ -279,7 +289,7 @@ export const searchEnrollableUsers = async (courseId, query) => {
        AND u.id <> COALESCE((SELECT lecturer_id FROM courses WHERE id = $1), 0)
      ORDER BY u.display_name NULLS LAST, u.email
      LIMIT $3`,
-    [courseId, `%${escapeLike(term)}%`, SEARCH_LIMIT]
+    [courseId, `%${escapeLike(term)}%`, SEARCH_LIMIT, `${escapeLike(term)}%`]
   );
-  return result.rows;
+  return result.rows.map((row) => ({ ...row, email: maskEmail(row.email) }));
 };

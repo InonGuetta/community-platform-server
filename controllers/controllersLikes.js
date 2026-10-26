@@ -2,7 +2,7 @@
 import * as servicesLikes from "../services/servicesLikes.js";
 import { optionalId } from "../lib/validate.js";
 import { badRequest } from "../lib/AppError.js";
-import { viewerScopeFor } from "../services/servicesVisibility.js";
+import { viewerScopeFor, assertUserCanSeeMediaId } from "../services/servicesVisibility.js";
 
 // The likes page wants full media rows to render cards; the media page and the
 // archive only want to know which ids are liked, so they can light up a button
@@ -21,15 +21,11 @@ export const getLikes = async (req, res) => {
   res.status(200).json(media);
 };
 
-// TODO(CR): no canUserSeeMedia check before the INSERT. A student can like a
-// draft or another course's lesson (it then counts in like_count, which the
-// owner sees), and an id that does not exist fails the FK as a 500 while one that
-// exists answers 201 — an existence oracle. Same gap in controllersSaves
-// (createSave, addPlaylistItem, createPlaylist with mediaId). Load the item and
-// answer 404 when hidden, as controllersBookmarks.createBookmark does.
+// Only an item the caller may see — see assertUserCanSeeMediaId.
 export const createLike = async (req, res) => {
   const mediaId = optionalId(req.body?.mediaId, "mediaId");
   if (!mediaId) throw badRequest("mediaId is required");
+  await assertUserCanSeeMediaId(req.user, mediaId);
   const result = await servicesLikes.addLike(req.user.id, mediaId);
   res.status(201).json(result);
 };

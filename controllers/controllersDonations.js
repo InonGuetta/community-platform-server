@@ -94,7 +94,7 @@ export const handleWebhook = async (req, res) => {
       // succeed. Previously this threw and became a permanent retry storm.
       if (!updated) {
         logger.info(`[webhook] ${event.type} for ${event.data.object.id}: no update applied`);
-      } else if (status === "completed") {
+      } else if (status === "completed" && updated.donor_email) {
         // Sent only on the transition, which the `status <> 'completed'` in the
         // UPDATE guarantees: a redelivered success updates nothing and therefore
         // sends nothing, so a donor is not thanked three times for one gift.

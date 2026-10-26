@@ -2,25 +2,45 @@
 import { pool } from "../db/pool.js";
 import { stripe } from "../lib/stripeClient.js";
 
-// TODO(CR): the PaymentIntent is created at Stripe before the row exists, with
-// no idempotency key. If the INSERT fails (DB blip) the intent lives on at Stripe
-// with no donations row, and a later payment_intent.succeeded for it is logged as
-// "no update applied" — money received and not recorded. Insert the row first
-// (status 'pending', intent id NULL) and update it, or pass an idempotencyKey and
-// let the webhook insert a missing row from the intent's metadata.
-// Separately: updateDonationStatus joins users with an inner join, so a donation
-// whose donor_id is NULL can never leave 'pending'.
+// The row FIRST, then the PaymentIntent.
+//
+// The other order created the intent at Stripe and then inserted the row, so a
+// failed INSERT left a live intent with no donations row — and a later
+// payment_intent.succeeded for it was logged as "no update applied": money
+// received and not recorded. Now the row exists before Stripe hears of it, and
+// the intent's id is written back onto it.
+//
+// The idempotency key is the row's id, so a retried create (a network blip
+// between us and Stripe) returns the SAME intent rather than a second one. If
+// Stripe refuses outright, the row is marked failed rather than left pending
+// forever.
 export const createPaymentIntent = async (donorId, amountCents, currency, type) => {
-  const paymentIntent = await stripe.paymentIntents.create({
-    amount: amountCents,
-    currency: currency.toLowerCase(),
-    metadata: { donorId: String(donorId), type },
-  });
+  const inserted = await pool.query(
+    `INSERT INTO donations (donor_id, amount_cents, currency, type, status)
+     VALUES ($1, $2, $3, $4, 'pending') RETURNING id`,
+    [donorId, amountCents, currency, type]
+  );
+  const donationId = inserted.rows[0].id;
+
+  let paymentIntent;
+  try {
+    paymentIntent = await stripe.paymentIntents.create(
+      {
+        amount: amountCents,
+        currency: currency.toLowerCase(),
+        metadata: { donorId: String(donorId), type, donationId: String(donationId) },
+      },
+      { idempotencyKey: `donation-${donationId}` }
+    );
+  } catch (err) {
+    await pool.query("UPDATE donations SET status='failed' WHERE id=$1", [donationId])
+      .catch(() => {});
+    throw err;
+  }
 
   const result = await pool.query(
-    `INSERT INTO donations (donor_id, amount_cents, currency, type, stripe_payment_intent, status)
-     VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING *`,
-    [donorId, amountCents, currency, type, paymentIntent.id]
+    "UPDATE donations SET stripe_payment_intent=$1 WHERE id=$2 RETURNING *",
+    [paymentIntent.id, donationId]
   );
 
   return { donation: result.rows[0], clientSecret: paymentIntent.client_secret };
@@ -39,11 +59,15 @@ export const createPaymentIntent = async (donorId, amountCents, currency, type) 
 // just completed. Returning it here rather than looking it up in the controller
 // keeps the "only services touch pool" rule intact.
 export const updateDonationStatus = async (stripePaymentIntent, status) => {
+  // The donor is read with subqueries rather than joined in a FROM clause: an
+  // UPDATE ... FROM is an inner join, so a donation whose donor_id is NULL could
+  // never leave 'pending'. Now it is updated, and simply has no address to mail.
   const result = await pool.query(
     `UPDATE donations d SET status=$1
-     FROM users u
-     WHERE d.stripe_payment_intent=$2 AND d.status <> 'completed' AND u.id = d.donor_id
-     RETURNING d.*, u.email AS donor_email, u.display_name AS donor_name`,
+     WHERE d.stripe_payment_intent=$2 AND d.status <> 'completed'
+     RETURNING d.*,
+       (SELECT u.email FROM users u WHERE u.id = d.donor_id) AS donor_email,
+       (SELECT u.display_name FROM users u WHERE u.id = d.donor_id) AS donor_name`,
     [status, stripePaymentIntent]
   );
   return result.rows[0] || null;

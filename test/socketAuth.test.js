@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import jwt from "jsonwebtoken";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
-import { authenticateSocket, sharesRoomWith, exceedsCapacity } from "../sockets/socketManager.js";
+import { authenticateSocket, sharesRoomWith, exceedsCapacity, createChatBucket } from "../sockets/socketManager.js";
 
 // The socket side of authentication and addressing.
 //
@@ -54,12 +54,15 @@ test("a valid token for a deactivated user is refused", async () => {
 });
 
 test("an active user is admitted", async () => {
-  const stub = stubPoolQuery(pool, () => ({ rows: [{ id: 7, email: "u@example.com", role: "student" }] }));
+  const stub = stubPoolQuery(pool, () => ({
+    rows: [{ id: 7, email: "u@example.com", role: "student", display_name: "ראובן" }],
+  }));
   try {
     const socket = socketWithToken(tokenFor(7));
     const err = await handshake(socket);
     assert.equal(err, undefined);
-    assert.deepEqual(socket.user, { id: 7, role: "student" });
+    // The name rides along so chat messages can say who wrote them.
+    assert.deepEqual(socket.user, { id: 7, role: "student", displayName: "ראובן" });
   } finally {
     stub.restore();
   }
@@ -147,4 +150,31 @@ test("a session with no limit is never full", () => {
   for (const noLimit of [null, undefined, 0]) {
     assert.equal(exceedsCapacity(500, noLimit), false);
   }
+});
+
+// The REST rule, now on the socket side too: a token minted before the last
+// password change is spent. Without it a stolen cookie kept opening signalling
+// connections for its remaining days after the owner reset their password.
+test("a token older than the last password change is refused", async () => {
+  const changedLater = new Date(Date.now() + 60_000).toISOString();
+  const stub = stubPoolQuery(pool, () => ({
+    rows: [{ id: 7, email: "u@example.com", role: "student", password_changed_at: changedLater }],
+  }));
+  try {
+    const socket = socketWithToken(tokenFor(7));
+    const err = await handshake(socket);
+    assert.ok(err instanceof Error, "a token predating the password change was admitted");
+    assert.equal(socket.user, undefined);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("chat is limited to a burst, then refills over time", () => {
+  let now = 0;
+  const allow = createChatBucket({ burst: 3, refillMs: 1000, now: () => now });
+  assert.deepEqual([allow(), allow(), allow(), allow()], [true, true, true, false]);
+  now += 1000;
+  assert.equal(allow(), true, "one message's worth refilled after a second");
+  assert.equal(allow(), false);
 });

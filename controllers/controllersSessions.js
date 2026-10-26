@@ -1,6 +1,7 @@
 // @ts-check
 import * as servicesSessions from "../services/servicesSessions.js";
 import { badRequest } from "../lib/AppError.js";
+import { closeSessionRoom } from "../sockets/socketManager.js";
 
 // Mirrors the session_type enum from migration 003. Without this check an
 // unknown value reaches Postgres as "invalid input value for enum" and surfaces
@@ -99,12 +100,11 @@ export const startSession = async (req, res) => {
   res.status(200).json(publicSession(session));
 };
 
-// TODO(CR): ending a session over REST only updates the row. Nobody in the room
-// is told — SESSION_ENDED is emitted only by the socket END_SESSION path — so
-// participants stay connected, talking, in a session the list shows as ended.
-// Expose the io instance (or an emitter) to this layer and emit SESSION_ENDED +
-// socketsLeave for the session's room_token, the same as the socket path.
+// Ending over REST closes the live room too. It used to update the row and tell
+// nobody, so participants stayed connected, talking, in a session the list
+// showed as ended — the socket END_SESSION path was the only one that told them.
 export const endSession = async (req, res) => {
   const session = await servicesSessions.endSession(req.params.id, req.user.id);
+  closeSessionRoom(session.room_token);
   res.status(200).json(publicSession(session));
 };

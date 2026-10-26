@@ -57,6 +57,10 @@ const SURFACES = [
   { name: "the download", path: "/api/media/3/download" },
   { name: "the audio extract", path: "/api/media/3/download/audio" },
   { name: "the transcript", path: "/api/transcripts/3" },
+  // The "דיון עם AI" search reads chunk text of exactly one lesson — the same
+  // text the transcript route guards — so it has to refuse the same callers.
+  { name: "the in-lesson search", path: "/api/discussion/3/search?q=x" },
+  { name: "the AI conversation", path: "/api/discussion/3/conversation" },
 ];
 
 test("every route onto a course lesson refuses a student who is not enrolled", async (t) => {

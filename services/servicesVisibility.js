@@ -12,6 +12,8 @@
 // application asks rather than manage a thing it stores.
 import { canSeeMediaRow, UNRESTRICTED } from "../lib/permissions.js";
 import { getEnrolledCourseIds } from "./servicesCourses.js";
+import { getMediaById } from "./servicesMedia.js";
+import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // What this user may see, in the two forms every media query takes.
 //
@@ -56,4 +58,20 @@ export const canUserSeeMedia = async (user, item) => {
   if (user?.role === "lecturer") return true; // every published lesson, any course
   if (item.course_id === null || item.course_id === undefined) return true;
   return canSeeMediaRow(item, await getEnrolledCourseIds(user.id), []);
+};
+
+// The write-side form: "this caller is about to attach something of theirs to
+// this item id — may they see it?" Throws the same 404 the media read answers,
+// so a hidden item and a missing one are indistinguishable.
+//
+// Likes, saves and playlist items wrote against any id the caller named. That
+// let a student like a draft (counted in like_count, which its owner sees) and
+// turned the FK error on a missing id — a 500, against a 201 for one that
+// exists — into a way to enumerate the archive.
+export const assertUserCanSeeMediaId = async (user, mediaId) => {
+  const item = await getMediaById(mediaId);
+  if (!(await canUserSeeMedia(user, item))) {
+    throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
+  }
+  return item;
 };

@@ -17,6 +17,7 @@ import path from "path";
 import { readFile } from "fs/promises";
 import { extractDocumentText, countWords } from "../lib/textExtract.js";
 import { chunkTextByParagraph } from "../lib/textChunks.js";
+import { textQuality, LOW_TEXT_QUALITY } from "../lib/textQuality.js";
 
 const DEFAULT_PREVIEW_CHARS = 1500;
 
@@ -65,6 +66,16 @@ const main = async () => {
   // A rough cost/time signal before committing to a paid run: the analysis maps
   // over ~5,000-word batches, and that batch count is what drives both.
   console.log(`llm calls ~${Math.ceil(words / 5000) + 1} (map batches + 1 final)`);
+
+  // The same measure the LLM worker stores at extraction (migration 033), so
+  // the number here is the number the book's page will warn from. A text layer
+  // of broken OCR passes every check above and still reads as nonsense.
+  const quality = textQuality(text);
+  const verdict = quality === null ? "" :
+    quality >= LOW_TEXT_QUALITY
+      ? " — OK"
+      : ` — LOW: below ${LOW_TEXT_QUALITY}%, the page will warn that search and chat cover only part of it`;
+  console.log(`readable  ${quality ?? "?"}%${verdict}`);
 
   console.log(`\n${"─".repeat(60)}\nFIRST ${previewChars} CHARACTERS\n${"─".repeat(60)}`);
   console.log(text.slice(0, previewChars));

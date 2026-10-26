@@ -10,6 +10,7 @@ import {
 } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { extractDocumentText } from "../../lib/textExtract.js";
+import { textQuality } from "../../lib/textQuality.js";
 import { readMediaBuffer } from "../../lib/storage.js";
 import { AppError } from "../../lib/AppError.js";
 import { logger } from "../../lib/logger.js";
@@ -85,9 +86,14 @@ const prepareText = async (mediaId) => {
   const chunkCount = await saveTextChunks(mediaId, text, pageOffsets);
   if (chunkCount === 0) throw new AppError("לא נמצא טקסט קריא בקובץ.", 400);
 
+  // How much of the text reads (migration 033) — measured here, the one place
+  // the whole extracted text is in hand, and written with the status change so
+  // the page that sees 'analyzing' already sees the quality too.
+  const quality = textQuality(text);
+  logger.info(`[WORKER:llm] text mediaId=${mediaId} — ${quality ?? "?"}% of the text is readable`);
   await pool.query(
-    "UPDATE transcripts SET status='analyzing', updated_at=NOW() WHERE media_id=$1",
-    [mediaId]
+    "UPDATE transcripts SET status='analyzing', text_quality=$2, updated_at=NOW() WHERE media_id=$1",
+    [mediaId, quality]
   );
 
   // Best-effort, exactly as on the audio path: the chunks are already saved and
@@ -153,20 +159,28 @@ llmQueue.process(async (job) => {
       logger.warn(`[WORKER:llm]   permanent failure — not retrying: ${err.message}`);
     }
 
-    // TODO(CR): this runs on EVERY failed attempt, but llmQueue retries
-    // transient failures (LLM_ATTEMPTS defaults to 3, with backoff). After
-    // attempt 1 the row says 'error', the client stops polling and shows a
-    // failure, and when attempt 2 succeeds a minute later and writes 'done',
-    // nobody is watching — the summary appears only on a manual reload. Write
-    // 'error' only when no retry is left
-    // (permanent || job.attemptsMade + 1 >= (job.opts.attempts ?? 1)); otherwise
-    // leave the row at 'analyzing'.
-    // Make the failure visible instead of leaving the row stuck at 'analyzing'
-    // with no summary — that "silent success" is what hid the broken long-audio
-    // case. status='error' signals the AI step didn't finish, and also stops the
-    // client polling for a summary that will never arrive. error_message is what
-    // lets the UI say WHY, which for a document is usually something the user
-    // can fix.
+    // Only once no retry is left. This used to run on EVERY failed attempt,
+    // but transient failures are retried (LLM_ATTEMPTS, default 3, with
+    // backoff): after attempt one the row said 'error', the client stopped
+    // polling and showed a failure, and when attempt two succeeded a minute
+    // later and wrote 'done', nobody was watching. Between attempts the row is
+    // left where it is ('analyzing' or 'processing'), which keeps the page
+    // polling for the retry.
+    //
+    // On the final attempt: make the failure visible instead of leaving the row
+    // stuck at 'analyzing' with no summary — that "silent success" is what hid
+    // the broken long-audio case. status='error' signals the AI step didn't
+    // finish, and also stops the client polling for a summary that will never
+    // arrive. error_message is what lets the UI say WHY, which for a document is
+    // usually something the user can fix.
+    const attemptsAllowed = job.opts?.attempts ?? 1;
+    const finalAttempt = permanent || job.attemptsMade + 1 >= attemptsAllowed;
+    if (!finalAttempt) {
+      logger.warn(
+        `[WORKER:llm]   attempt ${job.attemptsMade + 1}/${attemptsAllowed} failed — Bull will retry; row left as is`
+      );
+      throw err;
+    }
     await pool.query(
       "UPDATE transcripts SET status='error', error_message=$1, updated_at=NOW() WHERE media_id=$2",
       [permanent ? err.message : null, mediaId]

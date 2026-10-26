@@ -11,6 +11,28 @@ import { logger } from "../../lib/logger.js";
 import { withExclusive } from "../../lib/inFlight.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
 
+// A fixed job id per media item, the same in both queues — see the comment in
+// triggerPipeline. Bull ignores an add() whose id already exists, which is what
+// stops a double-click paying for two transcriptions.
+export const mediaJobId = (mediaId) => `media:${mediaId}`;
+const LIVE_STATES = ["active", "waiting", "delayed"];
+
+// Queue the summary step for a media item under its fixed id. Used by the
+// transcription worker once the chunks are saved. Finished jobs are retained
+// (removeOnComplete keeps a window), so a previous run's job still holds the
+// id; it is removed first, or the add would be silently swallowed and the row
+// would sit at 'analyzing' forever.
+export const queueLlmForMedia = async (mediaId) => {
+  const jobId = mediaJobId(mediaId);
+  const existing = await llmQueue.getJob(jobId);
+  if (existing) {
+    const state = await existing.getState();
+    if (LIVE_STATES.includes(state)) return existing;
+    await existing.remove();
+  }
+  return llmQueue.add({ mediaId }, { jobId });
+};
+
 export const triggerPipeline = async (mediaId) => {
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} → look up media`);
   const media = await pool.query(
@@ -59,21 +81,26 @@ export const triggerPipeline = async (mediaId) => {
   // The id is scoped per queue, so a document's `media:7` and a lecture's
   // `media:7` never collide — they are different queues and cannot both apply
   // to the same media item anyway.
-  // TODO(CR): for audio/video only the TRANSCRIPTION queue is checked. Once
-  // transcription has finished, the follow-up LLM job (queued by the worker with
-  // a random id, not `media:<id>`) may still be running; a re-trigger then
-  // passes this check, re-runs transcription and rewrites the chunks under the
-  // LLM job that is reading them. Also refuse while transcripts.status is
-  // 'processing' or 'analyzing', or give the LLM job the same fixed id.
-  const jobId = `media:${mediaId}`;
-  const existing = await queue.getJob(jobId);
-  if (existing) {
+  const jobId = mediaJobId(mediaId);
+
+  // For a recording, the follow-up LLM job counts too. Once transcription has
+  // finished the summary job may still be running, and a re-trigger that looked
+  // only at the transcription queue passed, re-ran Whisper and rewrote the
+  // chunks underneath the job that was reading them. The worker now queues that
+  // job under the same fixed id (see queueLlmForMedia), which is what makes it
+  // findable here.
+  const queuesToCheck = isText ? [llmQueue] : [transcriptionQueue, llmQueue];
+  for (const q of queuesToCheck) {
+    const existing = await q.getJob(jobId);
+    if (!existing) continue;
     const state = await existing.getState();
-    if (["active", "waiting", "delayed"].includes(state)) {
+    if (LIVE_STATES.includes(state)) {
       logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ already ${state}`);
       throw conflict(`${label} is already running for this media`, ERROR_CODES.ALREADY_QUEUED);
     }
-    await existing.remove();
+    // Only the queue this run adds to needs its id freed; the other one's
+    // finished job is cleared by the worker when it queues the next step.
+    if (q === queue) await existing.remove();
   }
 
   // error_message is cleared alongside the status: a stale "this file is a scan"

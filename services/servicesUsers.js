@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { assertUsableEmail } from "../lib/validate.js";
+import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
 const normalizeEmail = (email) => email.trim().toLowerCase();
@@ -44,16 +45,23 @@ export const createUser = async (data) => {
   const existing = await pool.query("SELECT id FROM users WHERE email=$1", [normalizedEmail]);
   if (existing.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
 
-  // TODO(CR): no password floor here — servicesAuth.assertUsablePassword (min 8)
-  // is the rule for register/reset/change, and "enforced in ONE place" is its
-  // stated purpose, but an admin can create an account with password "1". Call
-  // it. Same 23505 race as register: catch it around the INSERT.
+  // The same floor register/reset/change enforce — the rule lives in ONE place
+  // so an admin cannot create an account with password "1".
+  assertUsablePassword(password);
+  const cleanName = cleanDisplayName(displayName, { required: false });
+
   const password_hash = await bcrypt.hash(password, 12);
-  const result = await pool.query(
-    "INSERT INTO users (email, password_hash, role, display_name) VALUES ($1, $2, $3, $4) RETURNING id, email, role, display_name, created_at",
-    [normalizedEmail, password_hash, role, displayName]
-  );
-  return result.rows[0];
+  try {
+    const result = await pool.query(
+      "INSERT INTO users (email, password_hash, role, display_name) VALUES ($1, $2, $3, $4) RETURNING id, email, role, display_name, created_at",
+      [normalizedEmail, password_hash, role, cleanName]
+    );
+    return result.rows[0];
+  } catch (err) {
+    // The SELECT above loses a race between two admins; the index does not.
+    if (err?.code === "23505") throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
+    throw err;
+  }
 };
 
 // Refuse an update that would leave the system with no active admin — a state
@@ -99,13 +107,18 @@ const assertAdminRemains = async (client, id, current, { role, isActive }) => {
  *   avatarUrl?: string|null,
  *   isActive?: boolean|null,
  * }} fields
+ * @param {number|string|null} [adminId]  who is making the change, stamped as
+ *   the decider when it settles a pending role request
  */
-const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive }) => {
+const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive }, adminId = null) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    const existing = await client.query("SELECT role, is_active FROM users WHERE id=$1", [id]);
+    const existing = await client.query(
+      "SELECT role, is_active, email, approval_status FROM users WHERE id=$1",
+      [id]
+    );
     if (existing.rows.length === 0) throw notFound("User not found");
 
     // createUser normalizes the email; without the same treatment here an admin
@@ -122,20 +135,36 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
 
     await assertAdminRemains(client, id, existing.rows[0], { role, isActive });
 
+    // A new address is an address nobody has proved, so it is unverified until
+    // its owner follows the link the controller mails to it. It used to keep
+    // email_verified = TRUE from the old one.
+    const emailChanged = Boolean(normalizedEmail) && normalizedEmail !== existing.rows[0].email;
+
+    // Setting a role here while a request is waiting DECIDES that request.
+    // Leaving it pending meant a later approveUser() overwrote the role just set
+    // with requested_role — an admin promoted directly could be demoted by
+    // somebody clearing the queue.
+    const settlesPending =
+      role !== undefined && role !== null && existing.rows[0].approval_status === "pending";
+
     const result = await client.query(
       `UPDATE users SET
         email = COALESCE($1, email),
         role = COALESCE($2, role),
         display_name = COALESCE($3, display_name),
         avatar_url = COALESCE($4, avatar_url),
-        is_active = COALESCE($5, is_active)
+        is_active = COALESCE($5, is_active),
+        email_verified = CASE WHEN $7::boolean THEN FALSE ELSE email_verified END,
+        approval_status = CASE WHEN $8::boolean THEN 'approved' ELSE approval_status END,
+        approved_by = CASE WHEN $8::boolean THEN $9::int ELSE approved_by END,
+        approved_at = CASE WHEN $8::boolean THEN NOW() ELSE approved_at END
       WHERE id=$6
       RETURNING id, email, role, display_name, avatar_url, is_active`,
-      [normalizedEmail, role, displayName, avatarUrl, isActive, id]
+      [normalizedEmail, role, displayName, avatarUrl, isActive, id, emailChanged, settlesPending, adminId]
     );
 
     await client.query("COMMIT");
-    return result.rows[0];
+    return { ...result.rows[0], emailChanged };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     // Backstop for a race the check above can't cover: two admins claiming the
@@ -147,21 +176,17 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
   }
 };
 
-// TODO(CR): two interactions with the approval flow and email verification.
-//  1. Setting `role` here does not touch approval_status. For a user with a
-//     pending request, an admin who promotes them directly leaves the request
-//     in the queue, and a later approveUser() overwrites the role with
-//     requested_role — possibly a demotion (admin → lecturer). Clear the
-//     pending request (or refuse) when role is changed here.
-//  2. Changing `email` keeps email_verified = TRUE for an address nobody has
-//     proved. Reset it to FALSE and send a verification mail.
-export const updateUser = async (id, data) => {
+// The returned row carries `emailChanged`, so the controller knows to mail a
+// verification link to the new address.
+export const updateUser = async (id, data, adminId = null) => {
   const { role, isActive } = data;
   if (role !== undefined && !ROLES.has(role)) throw badRequest(`Invalid role: ${role}`);
   if (isActive !== undefined && isActive !== null && typeof isActive !== "boolean") {
     throw badRequest("isActive must be a boolean");
   }
-  return updateUserRow(id, data);
+  // Same length rule as registration and the profile edit (VARCHAR(100)).
+  const displayName = cleanDisplayName(data.displayName, { required: true });
+  return updateUserRow(id, { ...data, displayName }, adminId);
 };
 
 // Soft delete — deactivation, so it goes through the same guard as any other

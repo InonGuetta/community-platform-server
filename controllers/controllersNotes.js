@@ -1,12 +1,12 @@
 // @ts-check
 import * as servicesNotes from "../services/servicesNotes.js";
 import * as servicesMedia from "../services/servicesMedia.js";
-import { canUserSeeMedia } from "../services/servicesVisibility.js";
+import { canUserSeeMedia, viewerScopeFor } from "../services/servicesVisibility.js";
 import { optionalId, optionalSeconds, requireIdList } from "../lib/validate.js";
 import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 export const getNotes = async (req, res) => {
-  const notes = await servicesNotes.getNotesByUser(req.user.id);
+  const notes = await servicesNotes.getNotesByUser(req.user.id, await viewerScopeFor(req.user));
   res.status(200).json(notes);
 };
 

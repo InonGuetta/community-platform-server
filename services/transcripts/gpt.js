@@ -16,4 +16,15 @@ import { makeOpenAI } from "../../lib/openaiClient.js";
 // its header — which is why the budget is a per-caller argument at all.)
 export const openai = makeOpenAI(5);
 
+// The same model for calls a PERSON is waiting on: the search reranker and the
+// "דיון עם AI" chat. The budget above is right for a worker that has all night
+// and wrong for someone watching a spinner — with the account out of credit,
+// every 429 was retried five times with backoff before the request gave up.
+// Each caller here already has a fallback (the search keeps its fused order;
+// the chat answers "try again"), so failing fast is the better outcome.
+//
+// 45 seconds still covers a full GPT-4o answer over ~25k tokens of lesson
+// text; one retry still absorbs a single transient 5xx or rate-limit blip.
+export const interactiveOpenai = makeOpenAI(1, 45 * 1000);
+
 export const GPT_MODEL = "gpt-4o";
