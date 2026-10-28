@@ -31,13 +31,17 @@ export const searchWithinMedia = async (req, res) => {
 
 // The caller's latest conversation on this lesson. Always the caller's own:
 // the service is handed req.user.id, never an id from the request.
+//
+// With what is left of today's question quota — null for a role it does not
+// apply to. Asked after the conversation, so a lesson the caller may not see
+// is a 404 before anything about them is counted.
 export const getConversation = async (req, res) => {
   const result = await servicesDiscussion.getLatestConversation(
     req.user.id,
     req.params.mediaId,
     await viewerScopeFor(req.user)
   );
-  res.status(200).json(result);
+  res.status(200).json({ ...result, quota: await servicesDiscussion.questionQuota(req.user) });
 };
 
 // "שיחה חדשה". 201 when a row was created; 200 when the latest conversation was
@@ -78,6 +82,18 @@ export const getConversationById = async (req, res) => {
 // "המשך את השיחה הזו" — makes it the conversation the next question goes into.
 export const resumeConversation = async (req, res) => {
   const result = await servicesDiscussion.resumeConversation(
+    req.user.id,
+    req.params.mediaId,
+    req.params.conversationId,
+    await viewerScopeFor(req.user)
+  );
+  res.status(200).json(result);
+};
+
+// Deleted from the history: the conversation and its words. See migration 034
+// for why its rows stay behind, emptied.
+export const deleteConversation = async (req, res) => {
+  const result = await servicesDiscussion.deleteConversation(
     req.user.id,
     req.params.mediaId,
     req.params.conversationId,

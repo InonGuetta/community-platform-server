@@ -59,6 +59,19 @@ export const HISTORY_MESSAGES = 6;
 export const DAILY_QUESTION_LIMIT = 50;
 const QUOTA_EXEMPT_ROLES = new Set(["lecturer", "admin"]);
 
+/**
+ * What is left of today's quota, for the line under the chat's question box —
+ * so a student sees the limit coming rather than meeting it as a refusal.
+ * null for the roles the quota does not apply to: there is nothing to show.
+ * @param {{ id: number, role?: string }} user
+ * @returns {Promise<{ limit: number, remaining: number } | null>}
+ */
+export const questionQuota = async (user) => {
+  if (QUOTA_EXEMPT_ROLES.has(user.role)) return null;
+  const used = await countQuestionsToday(user.id);
+  return { limit: DAILY_QUESTION_LIMIT, remaining: Math.max(0, DAILY_QUESTION_LIMIT - used) };
+};
+
 // The rewrite only turns a follow-up into a standalone sentence; a small model
 // does that as well as a large one, at a fraction of the cost and latency.
 const REWRITE_MODEL = "gpt-4o-mini";

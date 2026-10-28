@@ -26,6 +26,7 @@ export {
   listConversations,
   getConversationById,
   resumeConversation,
+  deleteConversation,
 } from "./discussion/conversations.js";
 
-export { askInLesson, prepareAsk, streamAsk } from "./discussion/chat.js";
+export { askInLesson, prepareAsk, streamAsk, questionQuota } from "./discussion/chat.js";
