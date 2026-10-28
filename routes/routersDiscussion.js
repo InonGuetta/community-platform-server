@@ -45,6 +45,10 @@ router.use(verifyToken);
 router.get("/:mediaId/search", validateIntParam("mediaId"), searchLimiter, controllersDiscussion.searchWithinMedia);
 router.get("/:mediaId/conversation", validateIntParam("mediaId"), controllersDiscussion.getConversation);
 router.post("/:mediaId/conversation", validateIntParam("mediaId"), conversationLimiter, controllersDiscussion.startConversation);
+// History: the caller's earlier conversations on this lesson.
+router.get("/:mediaId/conversations", validateIntParam("mediaId"), controllersDiscussion.listConversations);
+router.get("/:mediaId/conversations/:conversationId", validateIntParam("mediaId"), validateIntParam("conversationId"), controllersDiscussion.getConversationById);
+router.post("/:mediaId/conversations/:conversationId/resume", validateIntParam("mediaId"), validateIntParam("conversationId"), conversationLimiter, controllersDiscussion.resumeConversation);
 router.post("/:mediaId/messages", validateIntParam("mediaId"), chatLimiter, controllersDiscussion.postMessage);
 // The same, answered as it is written (Server-Sent Events) — same budget.
 router.post("/:mediaId/messages/stream", validateIntParam("mediaId"), chatLimiter, controllersDiscussion.postMessageStream);

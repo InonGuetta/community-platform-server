@@ -51,6 +51,41 @@ export const startConversation = async (req, res) => {
   res.status(created ? 201 : 200).json(result);
 };
 
+// ── History ──────────────────────────────────────────────────────────────────
+// The caller's earlier conversations on this lesson. The conversation id in
+// the path is only ever looked up together with req.user.id and the lesson
+// (services/discussion/conversations.js, rule 1) — another reader's is a 404.
+
+export const listConversations = async (req, res) => {
+  const conversations = await servicesDiscussion.listConversations(
+    req.user.id,
+    req.params.mediaId,
+    await viewerScopeFor(req.user)
+  );
+  res.status(200).json(conversations);
+};
+
+export const getConversationById = async (req, res) => {
+  const result = await servicesDiscussion.getConversationById(
+    req.user.id,
+    req.params.mediaId,
+    req.params.conversationId,
+    await viewerScopeFor(req.user)
+  );
+  res.status(200).json(result);
+};
+
+// "המשך את השיחה הזו" — makes it the conversation the next question goes into.
+export const resumeConversation = async (req, res) => {
+  const result = await servicesDiscussion.resumeConversation(
+    req.user.id,
+    req.params.mediaId,
+    req.params.conversationId,
+    await viewerScopeFor(req.user)
+  );
+  res.status(200).json(result);
+};
+
 // A question is a sentence or a paragraph. The ceiling is generous for that,
 // and it bounds what one request can add to a GPT-4o bill and to the stored
 // conversation.

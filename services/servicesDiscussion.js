@@ -23,6 +23,9 @@ export {
   startConversation,
   appendMessage,
   getRecentMessages,
+  listConversations,
+  getConversationById,
+  resumeConversation,
 } from "./discussion/conversations.js";
 
 export { askInLesson, prepareAsk, streamAsk } from "./discussion/chat.js";
