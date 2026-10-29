@@ -1,0 +1,25 @@
+-- Deleting a conversation from the "דיון עם AI" history.
+--
+-- ── Why the rows stay, and the words do not ─────────────────────────────────
+--
+-- The daily question quota (PRD ASK-5) is counted from ai_messages — a
+-- question is stored only together with its answer, so the table itself is the
+-- record of what was answered. Deleting a conversation's rows outright would
+-- therefore also refund its questions: ask fifty, delete, ask fifty more.
+--
+-- So a deleted conversation keeps its rows and loses its content. The service
+-- (services/discussion/conversations.js → deleteConversation) sets deleted_at
+-- on the conversation and, in the same statement, empties every message's
+-- content and citations. What remains is a count — who asked, when — which is
+-- exactly what the quota reads and nothing a person wrote.
+--
+-- Every read of a conversation filters `deleted_at IS NULL`; the quota count
+-- deliberately does not.
+--
+-- No index: every read already narrows by (user_id, media_id) through
+-- idx_ai_conversations_user_media, and a reader's conversations on one lesson
+-- are a handful of rows to filter.
+--
+-- Idempotent, like every migration here: db/migrate.js re-runs every file.
+
+ALTER TABLE ai_conversations ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP;

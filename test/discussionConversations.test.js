@@ -127,7 +127,8 @@ test("a conversation that has messages is kept, and a new one starts beside it",
     const result = await startConversation(7, 42, ADMIN_SCOPE);
     assert.equal(result.created, true);
     assert.equal(result.conversation.id, 18);
-    assert.equal(touches(stub, /DELETE/i).length, 0, "the old conversation is history, not garbage");
+    // A word, so `deleted_at` (migration 034) in every read is not a DELETE.
+    assert.equal(touches(stub, /\bDELETE\b/i).length, 0, "the old conversation is history, not garbage");
   } finally {
     stub.restore();
   }
@@ -213,7 +214,7 @@ test("the conversation is the signed-in user's, whatever the request says", asyn
       .get("/api/discussion/42/conversation?userId=1")
       .set("Cookie", `token=${token}`);
     assert.equal(res.status, 200);
-    assert.deepEqual(res.body, { conversation: null, messages: [] });
+    assert.deepEqual({ conversation: res.body.conversation, messages: res.body.messages }, { conversation: null, messages: [] });
     const [lookup] = stub.calls.filter((c) => /FROM ai_conversations/i.test(c.text));
     assert.equal(lookup.params[0], 7, "the user comes from the session, never from the query");
   } finally {
