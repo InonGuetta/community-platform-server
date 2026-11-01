@@ -2,7 +2,7 @@
 // ── Transcript search ────────────────────────────────────────────────────────
 // Three modes, all returning the SAME row shape so the client never needs to
 // branch on mode: { media_id, chunk_index, start_time, end_time, content,
-// media_title, headline }.
+// media_title, creator_name, media_type, headline }.
 //   keyword  — the original full-text search (FTS over to_tsvector('simple')).
 //   semantic — pure vector nearest-neighbour over the embeddings (meaning, not
 //              words). No FTS terms, so the snippet is the chunk's opening text.
@@ -121,9 +121,12 @@ const parseRerankScores = (parsed) => {
   return map;
 };
 
+// creator_name and media_type ride along so a result can say who said it — a
+// title alone does not tell "פרשת שופטים" by one rav from the same title by
+// another — and label the name מרצה or מחבר the way the archive card does.
 const SELECT_COLS = `
   c.media_id, c.chunk_index, c.start_time, c.end_time, c.content,
-  m.title AS media_title`;
+  m.title AS media_title, m.creator_name, m.media_type`;
 
 // Visibility predicate, shared by all three modes — and now with every other
 // read of media in the application, which is why it comes from lib/permissions.js

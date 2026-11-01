@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
 import { createMedia, updateMedia, DEFAULT_CREATOR } from "../services/servicesMedia.js";
+import { searchTranscripts } from "../services/transcripts/search.js";
 
 // Attribution: "who said this", stored as words rather than as an account.
 //
@@ -111,4 +112,18 @@ test("an over-long name is refused on update too", async () => {
     () => updateMedia(1, { creatorName: "x".repeat(121) }),
     (err) => err.statusCode === 400
   );
+});
+
+// ── Reading it back in the smart search ─────────────────────────────────────
+//
+// A search result used to carry the lesson's title and nothing else, so two
+// shiurim with the same title by two different rabbanim were indistinguishable
+// in the list. The name travels with every row, in every mode — keyword is the
+// one mode reachable here without an OpenAI request, and the other two share
+// the same column list.
+test("a smart-search result carries the creator name and the media type", async () => {
+  const calls = capture();
+  await searchTranscripts("תפילה", "keyword", { courses: [], drafts: [] });
+  assert.match(calls[0].text, /m\.creator_name/);
+  assert.match(calls[0].text, /m\.media_type/);
 });
