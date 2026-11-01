@@ -20,6 +20,7 @@ import { logger } from "../../lib/logger.js";
 import { env } from "../../lib/env.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 import { parseSegmentStarts, assumedSegmentStarts } from "./segmentOffsets.js";
+import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
 
 // Each audio segment is 10 minutes. At 16kHz mono 64kbps that's ~4.8MB —
 // comfortably under Whisper's 25MB limit, with margin for VBR jitter.
@@ -314,6 +315,9 @@ transcriptionQueue.process(async (job) => {
       ).catch((dbErr) =>
         logger.error(`[WORKER:transcription]   could not set status='error': ${dbErr.message} — the row stays at 'processing'`)
       );
+      // Final attempt only, like the row. No reason: what fails here is ffmpeg,
+      // Whisper or the network, none of it the lecturer's to fix.
+      await notifyProcessingOutcome(mediaId, { ok: false });
     }
     throw err;
   } finally {

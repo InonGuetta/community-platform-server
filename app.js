@@ -34,6 +34,7 @@ import routersLikes from "./routes/routersLikes.js";
 import routersSaves from "./routes/routersSaves.js";
 import routersDonations from "./routes/routersDonations.js";
 import routersAdmin from "./routes/routersAdmin.js";
+import routersNotifications from "./routes/routersNotifications.js";
 
 // Every resource, and the prefix it is mounted at. Exported because the route
 // tests walk it: a new resource added here is automatically included in the
@@ -58,6 +59,7 @@ export const API_ROUTERS = [
   ["/api/saves", routersSaves],
   ["/api/donations", routersDonations],
   ["/api/admin", routersAdmin],
+  ["/api/notifications", routersNotifications],
 ];
 
 export const createApp = () => {

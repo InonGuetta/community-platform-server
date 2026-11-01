@@ -19,6 +19,7 @@ import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
+import { listForUser, markRead, countPendingRoleRequests } from "../services/servicesNotifications.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -828,6 +829,21 @@ const checks = [
       return (result.conversation
         ? `conversation ${result.conversation.id}, ${result.messages.length} message(s)`
         : "tables present, no conversation yet") + `; ${today} question(s) today; ${history.length} in history; ${deletion}`;
+    },
+  },
+  {
+    // The bell's own queries, as the navbar runs them every minute (migration
+    // 035). markRead on id 0 matches no row — it exercises the statement and
+    // changes nothing.
+    name: "the notifications inbox (migration 035)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
+      if (rows.length === 0) return "skipped — no active user";
+      const inbox = await listForUser(rows[0].id);
+      const touched = await markRead(rows[0].id, 0);
+      if (touched) throw new Error("marking notification 0 matched a row");
+      const pending = await countPendingRoleRequests();
+      return `${inbox.items.length} shown, ${inbox.unread} unread; ${pending} role request(s) waiting`;
     },
   },
   {

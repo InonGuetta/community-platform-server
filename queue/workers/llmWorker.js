@@ -14,6 +14,7 @@ import { textQuality } from "../../lib/textQuality.js";
 import { readMediaBuffer } from "../../lib/storage.js";
 import { AppError } from "../../lib/AppError.js";
 import { logger } from "../../lib/logger.js";
+import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 // This worker now serves two sources that converge on the same job:
@@ -144,6 +145,10 @@ llmQueue.process(async (job) => {
       ]
     );
     logger.info(`[WORKER:llm] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms`);
+    // Inside the try, which is safe only because notifyProcessingOutcome never
+    // throws: a notification that fails must not reach the catch below, mark a
+    // finished lesson 'error' and send the job back to Bull.
+    await notifyProcessingOutcome(mediaId, { ok: true });
   } catch (err) {
     logger.error(`[WORKER:llm] ✗ FAILED mediaId=${mediaId} ${Date.now() - t0}ms — ${err.message}`);
     if (err.response?.data) logger.error(`[WORKER:llm]   openai response:`, err.response.data);
@@ -185,6 +190,9 @@ llmQueue.process(async (job) => {
       "UPDATE transcripts SET status='error', error_message=$1, updated_at=NOW() WHERE media_id=$2",
       [permanent ? err.message : null, mediaId]
     ).catch((dbErr) => logger.error(`[WORKER:llm]   could not set status='error':`, dbErr.message));
+    // The same reason the row now carries, and only for that kind: see
+    // notifyProcessingOutcome.
+    await notifyProcessingOutcome(mediaId, { ok: false, reason: permanent ? err.message : null });
     throw err;
   }
 });

@@ -168,6 +168,11 @@ const MATRIX = {
   "post /api/donations/create-intent": ANY,
   "get /api/donations/my-history": ANY,
 
+  // ── Notifications ── everybody's own inbox (PRD 6.15)
+  "get /api/notifications/": ANY,
+  "post /api/notifications/read-all": ANY,
+  "post /api/notifications/:id/read": ANY,
+
   // ── Admin ── "לוח בקרה, הצעות תגיות"
   "get /api/admin/stats": ADMIN,
   "get /api/admin/queue-status": ADMIN,
