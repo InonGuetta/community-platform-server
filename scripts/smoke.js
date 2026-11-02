@@ -67,6 +67,23 @@ const withDeadline = (promise, what) =>
   });
 
 const checks = [
+  {
+    // db/pool.js reads zoneless TIMESTAMP columns as UTC. Without that, on any
+    // machine set to Israel time, every created_at, scheduled_at and
+    // password_changed_at arrived two hours early — the sessions page showed the
+    // wrong hour, and a password change did not end recent sessions. The same
+    // instant, read once as TIMESTAMP and once as TIMESTAMPTZ, must agree.
+    name: "a zoneless TIMESTAMP reads as the same instant as a zoned one (db/pool.js)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT NOW()::timestamp AS naive, NOW() AS aware, current_setting('TimeZone') AS tz");
+      const drift = Math.abs(new Date(rows[0].naive).getTime() - new Date(rows[0].aware).getTime());
+      if (rows[0].tz !== "UTC") {
+        throw new Error(`the database's TimeZone is ${rows[0].tz}, not UTC — zoneless columns would no longer hold UTC`);
+      }
+      if (drift > 1000) throw new Error(`TIMESTAMP and TIMESTAMPTZ disagree by ${Math.round(drift / 60000)} minute(s)`);
+      return `agree to ${drift}ms; database TimeZone UTC; this process's offset ${-new Date().getTimezoneOffset()} min`;
+    },
+  },
   // Each step is a call shape the application actually makes, in the order that
   // matters. The transaction is third on purpose: it hands an instrumented
   // client back to the pool, and the step after it is where pg reuses that

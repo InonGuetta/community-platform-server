@@ -161,11 +161,11 @@ export const endSession = async (id, hostId) => {
 
 // A session as the notifications and the calendar file describe it.
 //
-// `scheduled_at AT TIME ZONE 'UTC'`, not s.scheduled_at: the column is a
-// zoneless TIMESTAMP holding UTC wall-clock time, and read raw in Node it is
-// taken as local time and arrives two hours early in Israel (PRD appendix B).
-// Converting in SQL hands back the real instant whatever the process's zone —
-// which the calendar file and the mail both state to the minute.
+// `scheduled_at AT TIME ZONE 'UTC'`: the column is a zoneless TIMESTAMP holding
+// UTC wall-clock time. db/pool.js now reads every such column as UTC, so s.*
+// would also be right — the conversion stays because the calendar file and the
+// mail state this time to the minute, and an instant computed in SQL does not
+// depend on the driver's settings at all.
 export const getSessionSchedule = async (sessionId) => {
   const { rows } = await pool.query(
     `SELECT s.id, s.host_id, s.title, u.display_name AS host_name,
