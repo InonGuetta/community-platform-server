@@ -24,6 +24,7 @@ import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.
 import {
   requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
   durationRangeFilter, optionalDateFilter, optionalQueryString,
+  mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor,
 } from "../lib/validate.js";
 import {
   setMediaTags, cleanTagSelection, getTagTree,
@@ -95,7 +96,7 @@ const downloadDisposition = (title, ext) => {
 export const getAllMedia = async (req, res) => {
   const {
     type, published, search, courseId, creator, tagIds, excludeTagIds, uploadedAfter, uploadedBefore, sort,
-    minDuration, maxDuration,
+    minDuration, maxDuration, cursor, limit,
   } = req.query;
 
   // One type or several — the archive's type toggle is a multi-select.
@@ -110,6 +111,9 @@ export const getAllMedia = async (req, res) => {
   const parsedBefore = optionalDateFilter(uploadedBefore, "uploadedBefore");
   const parsedSearch = optionalQueryString(search, "search");
   const parsedCreator = optionalQueryString(creator, "creator");
+  // Paging (ARCH-1). Checked with the filters, before anything is queried.
+  const offset = mediaCursorFilter(cursor);
+  const pageSize = mediaPageSizeFilter(limit);
   // Asking for a branch and asking for it to be left out is a contradiction, and
   // the query would honour the exclusion and answer with nothing. An empty
   // archive is exactly how somebody concludes the filter is broken, so it is
@@ -124,7 +128,7 @@ export const getAllMedia = async (req, res) => {
   // per field would double it on the busiest read in the application.
   const scope = await viewerScopeFor(req.user);
 
-  const items = await servicesMedia.getAllMedia({
+  const filters = {
     types: parsedTypes,
     // The access rule, applied by the service unconditionally. It used to be
     // expressed as `published: true` for a student — a filter in the same slot
@@ -166,8 +170,21 @@ export const getAllMedia = async (req, res) => {
     ...(duration.min !== null && { minDuration: duration.min }),
     ...(duration.max !== null && { maxDuration: duration.max }),
     ...(courseId !== undefined && { courseId: optionalId(courseId, "courseId") }),
+  };
+
+  // One page, and — on the first page only — how many there are in all. The
+  // count does not change as the reader scrolls, so asking for it again on
+  // every page would be paying for an answer the client already holds.
+  const [page, total] = await Promise.all([
+    servicesMedia.getMediaPage(filters, { limit: pageSize, offset }),
+    offset === 0 ? servicesMedia.countMedia(filters) : Promise.resolve(undefined),
+  ]);
+  res.status(200).json({
+    items: page.items.map(publicMedia),
+    // null at the end. The client stops asking when it sees it.
+    nextCursor: page.hasMore ? encodeMediaCursor(offset + page.items.length) : null,
+    ...(total !== undefined && { total }),
   });
-  res.status(200).json(items.map(publicMedia));
 };
 
 export const getMediaById = async (req, res) => {

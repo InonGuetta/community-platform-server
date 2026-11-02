@@ -342,7 +342,11 @@ const listingOrder = async (query) => {
   let orderBy = null;
   const { token, stub } = authed((text) => {
     const at = text.lastIndexOf("ORDER BY");
-    if (/FROM media_items m/.test(text) && at !== -1) orderBy = text.slice(at + "ORDER BY".length).trim();
+    // The page query ends "ORDER BY … LIMIT … OFFSET …" (ARCH-1); the order is
+    // what sits between. The count query beside it has no ORDER BY at all.
+    if (/FROM media_items m/.test(text) && at !== -1) {
+      orderBy = text.slice(at + "ORDER BY".length).split(/\sLIMIT\s/)[0].trim();
+    }
     return { rows: [] };
   });
   try {
@@ -376,7 +380,7 @@ test("each sort reaches the query as its own ORDER BY", async () => {
 test("a sort combines with the filters rather than replacing them", async () => {
   let sent;
   const { token, stub } = authed((text) => {
-    if (/FROM media_items m/.test(text)) sent = text;
+    if (/FROM media_items m/.test(text) && /ORDER BY/.test(text)) sent = text;
     return { rows: [] };
   });
   try {

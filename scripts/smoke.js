@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
-import { getAllMedia, getContinueWatching } from "../services/servicesMedia.js";
+import { getAllMedia, getContinueWatching, getMediaPage, countMedia } from "../services/servicesMedia.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
 import { getNotesByUser } from "../services/servicesNotes.js";
@@ -181,6 +181,34 @@ const checks = [
         throw new Error(`the sort changed how many rows came back: ${counts.join(", ")}`);
       }
       return `${MEDIA_SORTS.length} orders, ${counts[0]} rows each`;
+    },
+  },
+  {
+    // ARCH-1. Walk the archive a small page at a time, in every order, and
+    // require the pages to be the whole list in the same order, with no row
+    // twice and none missing — and the count to agree. LIMIT/OFFSET after an
+    // ORDER BY on an output column (like_count) is exactly what only a real
+    // planner can accept or refuse.
+    name: "the archive in pages, in every sort order (getMediaPage, countMedia)",
+    run: async () => {
+      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const size = 5;
+      let walked = 0;
+      for (const sort of MEDIA_SORTS) {
+        const all = (await getAllMedia({ ...scope, sort })).map((r) => r.id);
+        const total = await countMedia({ ...scope, sort });
+        if (total !== all.length) throw new Error(`${sort}: count ${total}, list ${all.length}`);
+        const paged = [];
+        for (let offset = 0, more = true; more; offset += size) {
+          const page = await getMediaPage({ ...scope, sort }, { limit: size, offset });
+          paged.push(...page.items.map((r) => r.id));
+          more = page.hasMore;
+          if (paged.length > all.length + size) throw new Error(`${sort}: paging did not stop`);
+        }
+        if (paged.join(",") !== all.join(",")) throw new Error(`${sort}: the pages differ from the list`);
+        walked += Math.ceil(all.length / size) || 1;
+      }
+      return `${MEDIA_SORTS.length} orders, ${walked} pages of ${size}, pages = list = count`;
     },
   },
   {

@@ -132,14 +132,17 @@ export const MEDIA_ORDER = {
   liked: `like_count DESC, ${TIE_BREAK}`,
 };
 
-// TODO(CR): no LIMIT / pagination — every archive load returns the whole
-// visible library, each row running the correlated subqueries in MEDIA_COLUMNS.
-// Left open deliberately: paging changes what the archive screen IS (infinite
-// scroll vs numbered pages, what "N results" means, how a filter change resets
-// position), which is a product decision and a client change, not a server one.
-// The per-row cost is already reduced by 030_media_reference_indexes.sql, and
-// the date/text filters are validated in the controller (lib/validate.js).
-export const getAllMedia = async (filters = {}) => {
+// ── The archive's WHERE clause, built once ──────────────────────────────────
+//
+// Three readers share it: the whole list (getAllMedia — the smoke checks and
+// any caller that genuinely wants everything), one page of it (getMediaPage —
+// the archive screen, PRD ARCH-1), and how many rows it matches (countMedia —
+// the "N תוצאות" above the grid). One builder rather than three copies, so the
+// count can never disagree with the pages it is counting.
+//
+// Returns the clause (starting at WHERE) and its parameters; callers append
+// their own ORDER BY / LIMIT after it.
+const mediaFilterSql = (filters = {}) => {
   // The visibility rule opens the WHERE clause rather than being one more
   // optional `if` below, and that is the point: it is not a filter the caller
   // may or may not supply, it is the condition under which any of these rows may
@@ -163,7 +166,7 @@ export const getAllMedia = async (filters = {}) => {
     // means nobody's drafts, never everybody's.
     filters.visibleDrafts === undefined ? [] : filters.visibleDrafts,
   ];
-  let query = `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE ${visibleMediaSql("$1", "m", "$2")}`;
+  let query = `WHERE ${visibleMediaSql("$1", "m", "$2")}`;
 
   // Any of the chosen types. An empty list is no filter, never "no types".
   if (filters.types?.length) {
@@ -349,9 +352,64 @@ export const getAllMedia = async (filters = {}) => {
     }
   }
 
-  query += ` ORDER BY ${MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT]}`;
-  const result = await pool.query(query, params);
+  return { where: query, params };
+};
+
+const orderFor = (filters) => MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT];
+
+export const getAllMedia = async (filters = {}) => {
+  const { where, params } = mediaFilterSql(filters);
+  const result = await pool.query(
+    `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} ${where} ORDER BY ${orderFor(filters)}`,
+    params
+  );
   return result.rows;
+};
+
+// ── One page (ARCH-1) ───────────────────────────────────────────────────────
+//
+// The archive used to load the whole visible library in one request, every row
+// running MEDIA_COLUMNS' correlated subqueries — fine at forty items, a
+// multi-second first paint at a few thousand.
+//
+// OFFSET rather than keyset, deliberately. Keyset paging needs a WHERE on the
+// sort key, and two of the five orders sort by something that is not a column:
+// LOWER(title) is expressible, like_count is a subquery in the SELECT list that
+// a WHERE cannot see. Offset handles all five identically, and every order ends
+// on the same unique tie-break (TIE_BREAK), so a page boundary is stable.
+// What it gives up: an upload while somebody is scrolling shifts later rows by
+// one, so the next page can repeat a card — the client drops a repeated id —
+// and a deletion can skip one. The cursor the API hands out is opaque
+// (lib/validate.js → encodeMediaCursor), so moving to keyset later changes
+// nothing a client can see.
+//
+// LIMIT one more than asked: the extra row is how "is there a next page" is
+// answered without a second query.
+/**
+ * @param {Record<string, any>} filters
+ * @param {{ limit: number, offset: number }} page
+ * @returns {Promise<{ items: any[], hasMore: boolean }>}
+ */
+export const getMediaPage = async (filters, { limit, offset }) => {
+  const { where, params } = mediaFilterSql(filters);
+  params.push(limit + 1, offset);
+  const result = await pool.query(
+    `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} ${where}
+     ORDER BY ${orderFor(filters)}
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params
+  );
+  return { items: result.rows.slice(0, limit), hasMore: result.rows.length > limit };
+};
+
+// How many rows the filter matches, for "N תוצאות". Cheap on purpose: the same
+// WHERE over media_items alone — none of MEDIA_COLUMNS' per-row subqueries and
+// none of its joins, which add nothing to a count — and asked only for the
+// first page, since scrolling does not change the answer.
+export const countMedia = async (filters) => {
+  const { where, params } = mediaFilterSql(filters);
+  const result = await pool.query(`SELECT COUNT(*)::int AS count FROM media_items m ${where}`, params);
+  return result.rows[0]?.count ?? 0;
 };
 
 // "Carry on where you left off" — the watch history, newest first.
