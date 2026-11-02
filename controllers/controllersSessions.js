@@ -3,6 +3,9 @@ import * as servicesSessions from "../services/servicesSessions.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 import { notifySessionAudience, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { calendarForSession } from "../lib/ics.js";
+import { optionalId } from "../lib/validate.js";
+import { assertCanManageCourse } from "../lib/permissions.js";
+import * as servicesCourses from "../services/servicesCourses.js";
 import { closeSessionRoom } from "../sockets/socketManager.js";
 
 // Mirrors the session_type enum from migration 003. Without this check an
@@ -28,7 +31,7 @@ const MAX_LEAD_MS = 365 * 24 * 60 * 60 * 1000;
 const publicSession = ({ room_token, recording_s3_key, ...rest }) => rest;
 
 export const createSession = async (req, res) => {
-  const { title, sessionType, maxParticipants, scheduledAt } = req.body ?? {};
+  const { title, sessionType, maxParticipants, scheduledAt, courseId } = req.body ?? {};
 
   // Title stays optional — the column is nullable and the sessions list already
   // renders "מפגש ללא כותרת" — so requiring it here would break a flow that
@@ -58,7 +61,17 @@ export const createSession = async (req, res) => {
     scheduled = when.toISOString();
   }
 
+  // D8: the course a session is held for decides who is told about it. The
+  // same rule as filing a lesson into a course: an admin any course, a lecturer
+  // only one they teach — otherwise a lecturer could announce a session to
+  // another lecturer's students. Absent or empty is a general session.
+  const course = optionalId(courseId === "" ? undefined : courseId, "courseId");
+  if (course !== undefined && course !== null) {
+    assertCanManageCourse(req.user, await servicesCourses.getCourseById(course));
+  }
+
   const session = await servicesSessions.createSession(req.user.id, {
+    courseId: course ?? null,
     title: trimmedTitle || null,
     sessionType,
     maxParticipants: participants,

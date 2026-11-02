@@ -256,21 +256,28 @@ export const notifyProcessingOutcome = async (mediaId, { ok, reason = null }) =>
 
 // ── Live sessions (NOTIF-2, NOTIF-3, LIVE-6) ────────────────────────────────
 //
-// WHO hears about a session. A session has no course and no invite list —
-// anyone signed in may join any session — so "its participants" is not
-// something the data records. Every user would be a mass mailing on each
-// session somebody creates. The audience is therefore the host's students:
-// everybody enrolled in a course the host teaches, the same people the host's
-// "התלמידים שלי" lists (servicesCourses.getStudentsOfLecturer). An admin or a
-// lecturer who teaches no course announces to nobody, which is honest: there
-// is nobody the platform knows to be theirs.
-const sessionAudience = async (hostId) => {
-  const { rows } = await pool.query(
-    `SELECT DISTINCT e.student_id AS id
-     FROM courses c JOIN enrollments e ON e.course_id = c.id
-     WHERE c.lecturer_id = $1 AND e.student_id <> $1`,
-    [hostId]
-  );
+// WHO hears about a session (PRD D8, decided 2026-11-02). Anyone signed in may
+// JOIN any session; who is TOLD is narrower, because "everyone" would be a mass
+// mailing on each session somebody creates:
+//   · a session held for a course (migration 037) — that course's students;
+//   · a general session — the host's students: everybody enrolled in a course
+//     the host teaches, the people the host's "התלמידים שלי" lists
+//     (servicesCourses.getStudentsOfLecturer).
+// The host is never told about their own session. An admin or a lecturer who
+// teaches no course announces a general session to nobody, which is honest:
+// there is nobody the platform knows to be theirs.
+const sessionAudience = async (session) => {
+  const { rows } = session.course_id
+    ? await pool.query(
+        "SELECT student_id AS id FROM enrollments WHERE course_id = $1 AND student_id <> $2",
+        [session.course_id, session.host_id]
+      )
+    : await pool.query(
+        `SELECT DISTINCT e.student_id AS id
+         FROM courses c JOIN enrollments e ON e.course_id = c.id
+         WHERE c.lecturer_id = $1 AND e.student_id <> $1`,
+        [session.host_id]
+      );
   return rows.map((row) => row.id);
 };
 
@@ -278,6 +285,7 @@ const sessionPayload = (session) => ({
   sessionId: Number(session.id),
   title: session.title,
   hostName: session.host_name,
+  ...(session.course_title ? { courseTitle: session.course_title } : {}),
   ...(session.starts_at ? { startsAt: new Date(session.starts_at).toISOString() } : {}),
 });
 
@@ -293,7 +301,7 @@ export const notifySessionAudience = async (sessionId, type, { calendar } = {}) 
   try {
     const session = await getSessionSchedule(sessionId);
     if (!session?.host_id) return 0;
-    const audience = await sessionAudience(session.host_id);
+    const audience = await sessionAudience(session);
     if (audience.length === 0) return 0;
     const attachments = calendar && session.starts_at
       ? [{ filename: "session.ics", content: calendar(session), contentType: "text/calendar; charset=utf-8; method=PUBLISH" }]

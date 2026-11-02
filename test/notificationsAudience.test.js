@@ -89,7 +89,7 @@ test("every type has a category and a mail wording", () => {
 
 const sessionStub = (students = [{ id: 11 }, { id: 12 }]) =>
   stubPoolQuery(pool, (text, params) => {
-    if (/FROM live_sessions s LEFT JOIN users/.test(text)) {
+    if (/FROM live_sessions s\s+LEFT JOIN users/.test(text)) {
       return { rows: [{ id: 4, host_id: 2, title: "שיעור ערב", host_name: "הרב לוי", starts_at: new Date("2026-11-03T17:30:00Z") }] };
     }
     if (/FROM courses c JOIN enrollments e/.test(text)) return { rows: students };
@@ -109,6 +109,47 @@ test("a session is announced to the host's students, with when it starts", async
     assert.deepEqual(JSON.parse(insert.params[2]), {
       sessionId: 4, title: "שיעור ערב", hostName: "הרב לוי", startsAt: "2026-11-03T17:30:00.000Z",
     });
+  } finally {
+    stub.restore();
+  }
+});
+
+// D8: a session held for a course is announced to THAT course, not to every
+// course its host teaches.
+test("a session held for a course is announced to that course's students", async () => {
+  const stub = stubPoolQuery(pool, (text, params) => {
+    if (/FROM live_sessions s\s+LEFT JOIN users/.test(text)) {
+      return { rows: [{ id: 4, host_id: 2, title: "שיעור ערב", host_name: "הרב לוי", starts_at: null, course_id: 9, course_title: "גמרא" }] };
+    }
+    if (/FROM enrollments WHERE course_id = \$1/.test(text)) return { rows: [{ id: 31 }] };
+    if (/FROM courses c JOIN enrollments e/.test(text)) throw new Error("asked for the host's students");
+    if (INSERT.test(text)) return inserted(params);
+    return { rows: [] };
+  });
+  try {
+    assert.equal(await notifySessionAudience(4, NOTIFICATION_TYPES.SESSION_STARTING), 1);
+    const enrolled = stub.calls.find((c) => /FROM enrollments WHERE course_id/.test(c.text));
+    assert.deepEqual(enrolled.params, [9, 2], "that course, minus the host");
+    const insert = stub.calls.find((c) => INSERT.test(c.text));
+    assert.equal(JSON.parse(insert.params[2]).courseTitle, "גמרא");
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a lecturer cannot hold a session for another lecturer's course", async () => {
+  const lecturer = { id: 7, email: "u@example.com", role: "lecturer" };
+  const lecturerCookie = `token=${jwt.sign(lecturer, process.env.JWT_SECRET, { expiresIn: "1h" })}`;
+  const stub = stubPoolQuery(pool, (text) => {
+    if (/FROM users/.test(text) && !/courses/.test(text)) return { rows: [lecturer] };
+    if (/FROM courses c/.test(text)) return { rows: [{ id: 9, lecturer_id: 99, title: "של אחר" }] };
+    if (/INSERT INTO live_sessions/.test(text)) throw new Error("the session was created");
+    return { rows: [] };
+  });
+  try {
+    const res = await request(app).post("/api/sessions/create").set("Cookie", lecturerCookie)
+      .send({ title: "מפגש", sessionType: "group", courseId: 9 });
+    assert.equal(res.status, 403);
   } finally {
     stub.restore();
   }
@@ -144,7 +185,7 @@ test("reminders claim their sessions in the same UPDATE that finds them", async 
 test("a scheduled session can be downloaded as a calendar file", async () => {
   const { row, cookie } = session("student");
   const stub = stubPoolQuery(pool, (text) => {
-    if (/FROM live_sessions s LEFT JOIN users/.test(text)) {
+    if (/FROM live_sessions s\s+LEFT JOIN users/.test(text)) {
       return { rows: [{ id: 4, host_id: 2, title: "שיעור ערב", host_name: "הרב לוי", starts_at: new Date("2026-11-03T17:30:00Z") }] };
     }
     if (/FROM users/.test(text)) return { rows: [row] };
@@ -164,7 +205,7 @@ test("a scheduled session can be downloaded as a calendar file", async () => {
 test("a session with no time has no calendar file", async () => {
   const { row, cookie } = session("student");
   const stub = stubPoolQuery(pool, (text) => {
-    if (/FROM live_sessions s LEFT JOIN users/.test(text)) return { rows: [{ id: 4, host_id: 2, starts_at: null }] };
+    if (/FROM live_sessions s\s+LEFT JOIN users/.test(text)) return { rows: [{ id: 4, host_id: 2, starts_at: null }] };
     if (/FROM users/.test(text)) return { rows: [row] };
     return { rows: [] };
   });

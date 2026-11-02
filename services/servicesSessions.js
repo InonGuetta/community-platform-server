@@ -10,6 +10,9 @@ import { notFound, forbidden, badRequest, ERROR_CODES } from "../lib/AppError.js
 const SESSION_COLUMNS = `
   s.*,
   u.display_name AS host_name,
+  -- The course the session is held for, when it has one (migration 037), so a
+  -- card can say so without a request per session.
+  c.title AS course_title,
   CASE
     WHEN NOT s.is_active            THEN 'ended'
     WHEN s.started_at IS NOT NULL   THEN 'live'
@@ -18,10 +21,11 @@ const SESSION_COLUMNS = `
 
 const SESSION_JOINS = `
   FROM live_sessions s
-  LEFT JOIN users u ON s.host_id = u.id`;
+  LEFT JOIN users u ON s.host_id = u.id
+  LEFT JOIN courses c ON s.course_id = c.id`;
 
 export const createSession = async (hostId, data) => {
-  const { title, sessionType, maxParticipants, scheduledAt } = data;
+  const { title, sessionType, maxParticipants, scheduledAt, courseId = null } = data;
   const roomToken = randomUUID();
   // A session with no scheduled time starts immediately, which is exactly what
   // this always did — so the existing "start a room now" flow is unchanged.
@@ -29,10 +33,10 @@ export const createSession = async (hostId, data) => {
   // opens it.
   const result = await pool.query(
     `INSERT INTO live_sessions
-       (host_id, title, session_type, room_token, max_participants, is_active, scheduled_at, started_at)
-     VALUES ($1, $2, $3, $4, $5, TRUE, $6, CASE WHEN $6::timestamp IS NULL THEN NOW() ELSE NULL END)
+       (host_id, title, session_type, room_token, max_participants, is_active, scheduled_at, started_at, course_id)
+     VALUES ($1, $2, $3, $4, $5, TRUE, $6, CASE WHEN $6::timestamp IS NULL THEN NOW() ELSE NULL END, $7)
      RETURNING *`,
-    [hostId, title, sessionType, roomToken, maxParticipants, scheduledAt]
+    [hostId, title, sessionType, roomToken, maxParticipants, scheduledAt, courseId]
   );
   return getSessionById(result.rows[0].id);
 };
@@ -169,8 +173,11 @@ export const endSession = async (id, hostId) => {
 export const getSessionSchedule = async (sessionId) => {
   const { rows } = await pool.query(
     `SELECT s.id, s.host_id, s.title, u.display_name AS host_name,
-            (s.scheduled_at AT TIME ZONE 'UTC') AS starts_at
-     FROM live_sessions s LEFT JOIN users u ON u.id = s.host_id
+            (s.scheduled_at AT TIME ZONE 'UTC') AS starts_at,
+            s.course_id, c.title AS course_title
+     FROM live_sessions s
+     LEFT JOIN users u ON u.id = s.host_id
+     LEFT JOIN courses c ON c.id = s.course_id
      WHERE s.id = $1`,
     [sessionId]
   );
