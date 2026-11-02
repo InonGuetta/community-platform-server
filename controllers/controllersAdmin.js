@@ -1,5 +1,6 @@
 // @ts-check
 import * as servicesAdmin from "../services/servicesAdmin.js";
+import { monthUsageReport } from "../services/servicesAiUsage.js";
 import * as servicesDonations from "../services/servicesDonations.js";
 import { reconcileMissingTranscripts } from "../services/servicesTranscripts.js";
 import * as servicesTags from "../services/servicesTags.js";
@@ -99,4 +100,11 @@ export const rejectTagProposal = async (req, res) => {
   const result = await servicesTags.rejectTagProposal(req.params.id, req.user.id, req.body?.reason);
   logger.info(`[BE:ctl] tag proposal ${req.params.id} rejected by ${req.user.id}`);
   res.status(200).json(result);
+};
+
+// The admin's cost screen (PRD ADM-1): this month's estimated OpenAI spend, by
+// purpose and by day, and the cap it is measured against (null when none is
+// set). See services/servicesAiUsage.js for what "estimated" means.
+export const getAiUsage = async (req, res) => {
+  res.status(200).json(await monthUsageReport());
 };

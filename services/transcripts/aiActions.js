@@ -10,6 +10,7 @@ import { pool } from "../../db/pool.js";
 import { llmQueue } from "../../queue/llmQueue.js";
 import { logger } from "../../lib/logger.js";
 import { AppError, notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
+import { assertWithinAiBudget } from "../servicesAiUsage.js";
 import { fixHebrewTranscript } from "./hebrew.js";
 import { generateKeyPointHeadings } from "./headings.js";
 
@@ -84,6 +85,9 @@ const withTimeout = (promise, ms) =>
 export const requestAiAction = async (mediaId, name) => {
   const action = AI_ACTIONS[name];
   await action.precheck(mediaId);
+  // The monthly cap (PRD NFR-3) — before the claim, so a refused action is not
+  // left looking "queued".
+  await assertWithinAiBudget();
 
   const c = action.column;
   const claimed = await pool.query(

@@ -1,6 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { makeOpenAI } from "../lib/openaiClient.js";
+import { makeOpenAI, meterOpenAI } from "../lib/openaiClient.js";
 import { logger } from "../lib/logger.js";
 
 // Same embedding model + dims as migration 010's vector(1536) column. Changing
@@ -19,7 +19,9 @@ const UPDATE_BATCH = 100;
 // 5 retries: embedding a long backfill shares the org's per-minute token budget
 // with the rest of the pipeline. A 429 returns Retry-After; the SDK waits and
 // retries so batches self-pace.
-const openai = makeOpenAI(5);
+// Metered: a document's chunks as "embeddings", a search query as "search" —
+// see lib/openaiClient.js → meterOpenAI.
+const openai = meterOpenAI(makeOpenAI(5), "embeddings");
 
 // pgvector accepts a vector literal as the text "[f1,f2,...]" cast with ::vector.
 export const toVectorLiteral = (arr) => `[${arr.join(",")}]`;
@@ -44,7 +46,7 @@ export const embedTexts = async (texts) => {
 // with backoff and the search sat spinning for ~15 seconds before the keyword
 // fallback answered. Both searches (library and in-lesson) fall back on their
 // own when this throws, so failing fast is the better outcome, not a lost one.
-const queryOpenai = makeOpenAI(1, 8 * 1000);
+const queryOpenai = meterOpenAI(makeOpenAI(1, 8 * 1000), "search");
 
 // Embed a single query string → float[] for the semantic/hybrid search.
 export const embedQuery = async (query) => {

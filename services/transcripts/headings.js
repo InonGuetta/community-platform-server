@@ -12,7 +12,12 @@ import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { notFound, badRequest, ERROR_CODES } from "../../lib/AppError.js";
 import { analyzeTranscript, keyPointRange } from "./analysis.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "headings" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(baseOpenai, "headings");
 
 const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" של שיעור בעברית, ו-(2) קטעי התמלול עם חותמת הזמן (start_time בשניות) של כל קטע.
 לכל נקודת מפתח, מצא את חותמת הזמן (start_time) של הקטע שבו הנושא הזה מתחיל להידון.

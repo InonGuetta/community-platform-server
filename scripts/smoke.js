@@ -21,6 +21,7 @@ import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieva
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
 import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
+import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -927,6 +928,28 @@ const checks = [
       const schedule = await getSessionSchedule(0);
       if (schedule !== null) throw new Error("session 0 exists?!");
       return `${inbox.items.length} shown, ${inbox.unread} unread; ${pending} role request(s) waiting; ${optOuts.length} mail opt-out(s); deliver once-only ok`;
+    },
+  },
+  {
+    // ADM-1 / NFR-3 (migration 040): a call recorded now must be in this
+    // month's spend and in the report's by-purpose and by-day lines — the
+    // Israel-month window and the NUMERIC sums are what only a real database
+    // can judge. The probe row is removed afterwards.
+    name: "the AI cost meter (migration 040)",
+    run: async () => {
+      const before = await monthSpendUsd();
+      await recordAiUsage({ purpose: "smoke_probe", model: "gpt-4o", inputTokens: 1_000_000, outputTokens: 0 });
+      try {
+        const after = await monthSpendUsd();
+        if (Math.abs(after - before - 2.5) > 0.0001) throw new Error(`spend moved by ${after - before}, expected 2.5`);
+        const report = await monthUsageReport();
+        if (!report.byPurpose.some((p) => p.purpose === "smoke_probe")) throw new Error("the probe is missing from the by-purpose report");
+        if (report.byDay.length === 0) throw new Error("the by-day report is empty");
+        const real = report.byPurpose.filter((p) => p.purpose !== "smoke_probe");
+        return `this month so far: $${(before).toFixed(4)} over ${real.reduce((n, p) => n + p.calls, 0)} call(s); cap ${report.capUsd ?? "none"}`;
+      } finally {
+        await pool.query("DELETE FROM ai_usage WHERE purpose = 'smoke_probe'");
+      }
     },
   },
   {

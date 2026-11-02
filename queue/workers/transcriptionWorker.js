@@ -14,7 +14,7 @@ import { saveChunks, reconcileMissingTranscripts, queueLlmForMedia } from "../..
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { setDurationIfMissing } from "../../services/servicesMedia.js";
 import { probeDurationSeconds } from "../../lib/mediaDuration.js";
-import { makeOpenAI } from "../../lib/openaiClient.js";
+import { makeOpenAI, meterOpenAI } from "../../lib/openaiClient.js";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
 import { env } from "../../lib/env.js";
@@ -40,7 +40,8 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 
 // Fewer retries on the audio path: ECONNRESET there is often a transient
 // middlebox issue (AV/firewall/ISP DPI); the SDK still waits and retries.
-const openai = makeOpenAI(3);
+// Metered as "transcription" — Whisper, billed by the minute (lib/openaiClient.js).
+const openai = meterOpenAI(makeOpenAI(3), "transcription");
 
 // Cleanup that must never itself become the reason a job fails. Declared here
 // rather than beside their other callers below because resolveSourcePath needs

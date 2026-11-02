@@ -15,7 +15,12 @@ import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { embedQuery, toVectorLiteral } from "../servicesEmbeddings.js";
 // The interactive client: a search is something a person is waiting on.
-import { interactiveOpenai as openai, GPT_MODEL } from "./gpt.js";
+import { interactiveOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "search" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(interactiveOpenai, "search");
 
 // RRF_K and FUSE_DEPTH are exported for the search inside one lesson
 // (services/discussion/retrieval.js), which fuses the same two lists the same

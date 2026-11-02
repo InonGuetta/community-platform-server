@@ -10,6 +10,7 @@ import { isExtractableText } from "../../lib/mediaFormats.js";
 import { logger } from "../../lib/logger.js";
 import { withExclusive } from "../../lib/inFlight.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
+import { assertWithinAiBudget } from "../servicesAiUsage.js";
 
 // A fixed job id per media item, the same in both queues — see the comment in
 // triggerPipeline. Bull ignores an add() whose id already exists, which is what
@@ -65,6 +66,11 @@ export const triggerPipeline = async (mediaId) => {
       ERROR_CODES.UNSUPPORTED_TEXT_FORMAT
     );
   }
+
+  // The monthly cap (PRD NFR-3): no NEW transcription or summary once this
+  // month's OpenAI spend has reached AI_MONTHLY_CAP_USD. After the checks that
+  // are the caller's mistake, before anything is written or queued.
+  await assertWithinAiBudget();
 
   const queue = isText ? llmQueue : transcriptionQueue;
   const label = isText ? "Summary" : "Transcription";

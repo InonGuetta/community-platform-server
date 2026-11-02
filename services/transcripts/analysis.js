@@ -8,7 +8,12 @@
 // TPM limit — which is what silently broke multi-hour lectures.
 import { logger } from "../../lib/logger.js";
 import { completionText, completionJson } from "../../lib/openaiClient.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "summary" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(baseOpenai, "summary");
 
 const ANALYSIS_BATCH_WORDS = 5000;
 

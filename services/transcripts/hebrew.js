@@ -7,7 +7,12 @@ import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
 import { completionText } from "../../lib/openaiClient.js";
 import { notFound, badRequest, ERROR_CODES } from "../../lib/AppError.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "hebrew_fix" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(baseOpenai, "hebrew_fix");
 
 // Yiddish-accented Hebrew confuses Whisper (e.g. "תורה"→"תוירו",
 // "בית יוסף"→"בסייסף"). This prompt asks GPT to restore standard Hebrew

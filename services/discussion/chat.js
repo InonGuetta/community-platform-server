@@ -39,7 +39,12 @@ import { completionText } from "../../lib/openaiClient.js";
 import { logger } from "../../lib/logger.js";
 import { pool } from "../../db/pool.js";
 // The interactive client — a question is something a person is waiting on.
-import { interactiveOpenai as openai, GPT_MODEL } from "../transcripts/gpt.js";
+import { interactiveOpenai, GPT_MODEL } from "../transcripts/gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "chat" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(interactiveOpenai, "chat");
 import { assertCanSeeLesson } from "./access.js";
 import { searchWithinMedia } from "./retrieval.js";
 import { getOrStartConversation, getRecentMessages, appendMessage, countQuestionsToday } from "./conversations.js";

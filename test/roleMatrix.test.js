@@ -185,6 +185,7 @@ const MATRIX = {
   "get /api/admin/pipeline-trouble": ADMIN,
   "post /api/admin/reconcile": ADMIN,
   "get /api/admin/donations": ADMIN,
+  "get /api/admin/ai-usage": ADMIN,
   "get /api/admin/tag-proposals": ADMIN,
   "post /api/admin/tag-proposals/:id/approve": ADMIN,
   "post /api/admin/tag-proposals/:id/reject": ADMIN,
