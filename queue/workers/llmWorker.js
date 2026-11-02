@@ -7,6 +7,8 @@ import {
   getTranscriptText,
   saveTextChunks,
   MAX_KEY_POINTS_TEXT,
+  runAiAction,
+  AI_ACTIONS,
 } from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { extractDocumentText } from "../../lib/textExtract.js";
@@ -196,6 +198,30 @@ llmQueue.process(async (job) => {
     throw err;
   }
 });
+
+// ── The on-demand AI actions (PRD PIPE-5) ───────────────────────────────────
+//
+// Named jobs on the same queue: "hebrew-fix" and "key-point-headings", queued
+// by servicesTranscripts.requestAiAction. A queue with named jobs needs a
+// processor for each name — Bull leaves a job with no matching processor
+// waiting for ever — so both are registered here, beside the summary job.
+//
+// runAiAction records 'running', then 'done' or 'error', on the transcript row
+// the page is polling. One attempt each (see requestAiAction for why).
+for (const [name, action] of Object.entries(AI_ACTIONS)) {
+  llmQueue.process(action.jobName, async (job) => {
+    const { mediaId } = job.data;
+    const t0 = Date.now();
+    logger.info(`[WORKER:llm] ── ${action.jobName} picked up jobId=${job.id} mediaId=${mediaId}`);
+    try {
+      await runAiAction(mediaId, /** @type {keyof typeof AI_ACTIONS} */ (name));
+      logger.info(`[WORKER:llm] ── ${action.jobName} DONE mediaId=${mediaId} total=${Date.now() - t0}ms`);
+    } catch (err) {
+      logger.error(`[WORKER:llm] ✗ ${action.jobName} FAILED mediaId=${mediaId} ${Date.now() - t0}ms — ${err.message}`);
+      throw err;
+    }
+  });
+}
 
 installQueueErrorLogging("llm", llmQueue);
 installWorkerLifecycle("llm", llmQueue);

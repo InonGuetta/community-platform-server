@@ -42,6 +42,10 @@ export { fixHebrewTranscript } from "./transcripts/hebrew.js";
 
 export { generateKeyPointHeadings } from "./transcripts/headings.js";
 
+// The two above, as queued work with a status (PIPE-5): the request claims and
+// queues, the LLM worker runs.
+export { requestAiAction, runAiAction, AI_ACTIONS, AI_ACTION_STALE_MINUTES } from "./transcripts/aiActions.js";
+
 export { triggerPipeline, reconcileMissingTranscripts, queueLlmForMedia } from "./transcripts/pipeline.js";
 
 export { searchTranscripts } from "./transcripts/search.js";

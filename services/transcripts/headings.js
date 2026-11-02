@@ -9,7 +9,6 @@
 // stored key points are missing or too few for the transcript's length.
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
-import { withExclusive } from "../../lib/inFlight.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { notFound, badRequest, ERROR_CODES } from "../../lib/AppError.js";
 import { analyzeTranscript, keyPointRange } from "./analysis.js";
@@ -22,14 +21,9 @@ const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" 
 
 const HEADING_PREVIEW_WORDS = 120;
 
-export const generateKeyPointHeadings = (mediaId) =>
-  withExclusive(
-    `key-point-headings:${mediaId}`,
-    () => runGenerateKeyPointHeadings(mediaId),
-    "Heading generation is already running for this media"
-  );
-
-const runGenerateKeyPointHeadings = async (mediaId) => {
+// Run by the LLM worker (PRD PIPE-5) — see fixHebrewTranscript in hebrew.js for
+// why, and aiActions.js for the claim that stops it running twice.
+export const generateKeyPointHeadings = async (mediaId) => {
   logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId}`);
   const transcript = await pool.query(
     "SELECT ai_key_points FROM transcripts WHERE media_id=$1",
