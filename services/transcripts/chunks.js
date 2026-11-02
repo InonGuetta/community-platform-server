@@ -65,6 +65,36 @@ const splitSegmentsToChunks = (segments) => {
   return chunks;
 };
 
+// When each word of a recording was said, compactly (PRD MOB-5, MOB-6,
+// migration 041): one [wordIndex, seconds] pair per Whisper segment that has
+// words, and a closing pair at the end of the last one. "The Nth word of the
+// transcript starts at second T" — the client interpolates between pairs.
+//
+// Counted with the SAME wordsOf the chunks are built with, so the word positions
+// here are positions in exactly the text the chunks hold. Times to a tenth of a
+// second: Whisper's own precision is not finer, and it halves the stored size.
+export const timingAnchors = (segments) => {
+  const anchors = [];
+  let words = 0;
+  let end = null;
+  for (const seg of segments) {
+    const count = wordsOf(seg.text).length;
+    if (count === 0) continue;
+    const start = Math.round(Number(seg.start) * 10) / 10;
+    // Out-of-order or overlapping times would make the client's interpolation
+    // run backwards; such a segment keeps its words but adds no anchor.
+    if (Number.isFinite(start) && (anchors.length === 0 || start >= anchors[anchors.length - 1][1])) {
+      anchors.push([words, start]);
+    }
+    words += count;
+    end = Math.round(Number(seg.end) * 10) / 10;
+  }
+  if (anchors.length > 0 && Number.isFinite(end) && end >= anchors[anchors.length - 1][1]) {
+    anchors.push([words, end]);
+  }
+  return anchors;
+};
+
 // Replace a media item's chunks atomically.
 //
 // DELETE + INSERT must be atomic: a failure mid-write previously left a media
@@ -82,7 +112,10 @@ const splitSegmentsToChunks = (segments) => {
 // audio path never came close and so never needed this.
 const INSERT_BATCH = 500;
 
-const writeChunks = async (mediaId, chunks) => {
+// `anchors` — a recording's timings (timingAnchors) — are replaced in the same
+// transaction, so the chunks and the timings always describe the same words.
+// Omitted for a document, which has none.
+const writeChunks = async (mediaId, chunks, anchors = null) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -116,6 +149,14 @@ const writeChunks = async (mediaId, chunks) => {
       );
     }
 
+    if (anchors) {
+      await client.query(
+        `INSERT INTO transcript_timings (media_id, anchors) VALUES ($1, $2::jsonb)
+         ON CONFLICT (media_id) DO UPDATE SET anchors = EXCLUDED.anchors, created_at = NOW()`,
+        [mediaId, JSON.stringify(anchors)]
+      );
+    }
+
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -129,7 +170,7 @@ const writeChunks = async (mediaId, chunks) => {
 export const saveChunks = async (mediaId, segments) => {
   const chunks = splitSegmentsToChunks(segments);
   logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} — ${segments.length} segments → ${chunks.length} chunks`);
-  await writeChunks(mediaId, chunks);
+  await writeChunks(mediaId, chunks, timingAnchors(segments));
   logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} ✓ ${chunks.length} chunks written`);
   return chunks.length;
 };
@@ -226,7 +267,7 @@ export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], dra
     throw notFound("Transcript not found", ERROR_CODES.TRANSCRIPT_NOT_FOUND);
   }
 
-  const [transcript, chunks] = await Promise.all([
+  const [transcript, chunks, timing] = await Promise.all([
     pool.query("SELECT * FROM transcripts WHERE media_id=$1", [mediaId]),
     // Explicit columns (not SELECT *) so the embedding vector(1536) — added in
     // migration 010 — never ships to the client on every transcript load.
@@ -238,6 +279,13 @@ export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], dra
       `SELECT id, media_id, chunk_index, start_time, end_time, char_start, char_end, page_number${content ? ", content" : ""} FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index`,
       [mediaId]
     ),
+    // When each word was said (migration 041) — for captions and the scrolling
+    // transcript. Only with the text, which is what it positions; a book has no
+    // row. A recording transcribed before 041 has none either, and the client
+    // estimates from the chunks' own times instead.
+    content
+      ? pool.query("SELECT anchors FROM transcript_timings WHERE media_id=$1", [mediaId])
+      : Promise.resolve({ rows: [] }),
   ]);
 
   if (transcript.rows.length === 0) {
@@ -249,6 +297,7 @@ export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], dra
   return {
     ...transcript.rows[0],
     chunks: chunks.rows,
+    timing: timing.rows[0]?.anchors ?? null,
   };
 };
 

@@ -22,6 +22,7 @@ import { getLatestConversation, countQuestionsToday, listConversations, deleteCo
 import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
+import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -950,6 +951,39 @@ const checks = [
       } finally {
         await pool.query("DELETE FROM ai_usage WHERE purpose = 'smoke_probe'");
       }
+    },
+  },
+  {
+    // MOB-5 / MOB-6 (migration 041): the transcript read now joins a third
+    // query, and the worker upserts the timings with a ::jsonb cast inside the
+    // chunks' transaction. The read runs for real on a recording; the upsert
+    // runs inside a transaction that is rolled back, so nothing is kept.
+    name: "a recording's word timings (migration 041)",
+    run: async () => {
+      const { rows } = await pool.query(
+        `SELECT m.id FROM media_items m JOIN transcripts t ON t.media_id = m.id
+          WHERE m.media_type <> 'text' AND t.status = 'done' ORDER BY m.id LIMIT 1`
+      );
+      if (rows.length === 0) return "skipped — no finished recording to read";
+      const mediaId = rows[0].id;
+      const transcript = await getTranscriptByMediaId(mediaId, { courses: UNRESTRICTED, drafts: UNRESTRICTED });
+      const stored = Array.isArray(transcript.timing) ? `${transcript.timing.length} anchors` : "none stored (estimated from chunks)";
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO transcript_timings (media_id, anchors) VALUES ($1, $2::jsonb)
+           ON CONFLICT (media_id) DO UPDATE SET anchors = EXCLUDED.anchors, created_at = NOW()`,
+          [mediaId, JSON.stringify([[0, 0], [1, 1.5]])]
+        );
+        const back = await client.query("SELECT anchors FROM transcript_timings WHERE media_id=$1", [mediaId]);
+        if (back.rows[0]?.anchors?.[1]?.[1] !== 1.5) throw new Error("the upserted anchors did not read back as JSON numbers");
+      } finally {
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+      return `media ${mediaId}: ${stored}; upsert ok (rolled back)`;
     },
   },
   {
