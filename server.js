@@ -10,6 +10,7 @@ import { transcriptionQueue } from "./queue/transcriptionQueue.js";
 import { llmQueue } from "./queue/llmQueue.js";
 import { initSockets } from "./sockets/socketManager.js";
 import { logger } from "./lib/logger.js";
+import { startSessionReminders } from "./lib/sessionReminders.js";
 
 // The application itself lives in app.js, so the tests can exercise the real
 // middleware chain without any of the process lifecycle below.
@@ -47,6 +48,7 @@ const shutdown = async (reason, exitCode) => {
     httpServer.closeIdleConnections?.();
     await closed;
 
+    stopReminders();
     io.close();
     // This process only ever *adds* jobs (it runs no processor), so there is
     // nothing in flight to drain — these are just the Redis connections the
@@ -125,3 +127,7 @@ httpServer.keepAliveTimeout = 65000;
 httpServer.headersTimeout = 66000;
 
 httpServer.listen(PORT, () => logger.info(`Server on port ${PORT}`));
+
+// LIVE-6 — here, not in createApp(), so the test suite (which builds the app
+// without listening) never starts a timer.
+const stopReminders = startSessionReminders();

@@ -8,7 +8,14 @@ import * as controllersNotifications from "../controllers/controllersNotificatio
 // by role. No requireRole, and test/roleMatrix.test.js says so.
 const router = Router();
 
+// Before verifyToken: the unsubscribe link is opened from an inbox, often with
+// no session. The signed token in the body is its credential.
+router.post("/unsubscribe", controllersNotifications.unsubscribe);
+
 router.use(verifyToken);
+
+router.get("/preferences", controllersNotifications.getPreferences);
+router.put("/preferences", controllersNotifications.setPreference);
 
 router.get("/", controllersNotifications.getNotifications);
 // Before "/:id/read", so "read-all" is never taken for an id — validateIntParam

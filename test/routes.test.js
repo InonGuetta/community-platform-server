@@ -74,6 +74,10 @@ const PUBLIC = new Set([
   // Stripe calls this server-to-server with no cookie. It authenticates by
   // signature instead, which the controller verifies itself.
   "post /api/donations/webhook",
+  // The link at the foot of every notification mail, followed from an inbox. A
+  // signed token in the body is the credential, and all it can do is turn mail
+  // off (lib/unsubscribe.js).
+  "post /api/notifications/unsubscribe",
 ]);
 
 const key = (r) => `${r.method} ${r.path}`;

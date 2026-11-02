@@ -158,3 +158,21 @@ export const endSession = async (id, hostId) => {
   }
   return session; // already ended — the state the caller wanted
 };
+
+// A session as the notifications and the calendar file describe it.
+//
+// `scheduled_at AT TIME ZONE 'UTC'`, not s.scheduled_at: the column is a
+// zoneless TIMESTAMP holding UTC wall-clock time, and read raw in Node it is
+// taken as local time and arrives two hours early in Israel (PRD appendix B).
+// Converting in SQL hands back the real instant whatever the process's zone —
+// which the calendar file and the mail both state to the minute.
+export const getSessionSchedule = async (sessionId) => {
+  const { rows } = await pool.query(
+    `SELECT s.id, s.host_id, s.title, u.display_name AS host_name,
+            (s.scheduled_at AT TIME ZONE 'UTC') AS starts_at
+     FROM live_sessions s LEFT JOIN users u ON u.id = s.host_id
+     WHERE s.id = $1`,
+    [sessionId]
+  );
+  return rows[0] ?? null;
+};

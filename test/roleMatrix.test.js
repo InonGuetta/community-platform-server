@@ -126,6 +126,7 @@ const MATRIX = {
   "get /api/sessions/upcoming": ANY,
   "get /api/sessions/:id": ANY,
   "post /api/sessions/:id/join": ANY,
+  "get /api/sessions/:id/calendar.ics": ANY,
   "post /api/sessions/create": LECTURER,
   "post /api/sessions/:id/start": LECTURER,
   "delete /api/sessions/:id/end": LECTURER,
@@ -172,6 +173,10 @@ const MATRIX = {
   "get /api/notifications/": ANY,
   "post /api/notifications/read-all": ANY,
   "post /api/notifications/:id/read": ANY,
+  "get /api/notifications/preferences": ANY,
+  "put /api/notifications/preferences": ANY,
+  // Opened from an inbox with no session; the signed token is the credential.
+  "post /api/notifications/unsubscribe": PUBLIC,
 
   // ── Admin ── "לוח בקרה, הצעות תגיות"
   "get /api/admin/stats": ADMIN,

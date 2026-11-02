@@ -24,6 +24,7 @@ router.get("/:id", validateIntParam("id"), controllersSessions.getSessionById);
 // only after the server has decided this caller may enter — see joinSession.
 // Open to every signed-in user, which is the rule that was already in force when
 // the token travelled on the public list; it is now enforced rather than implied.
+router.get("/:id/calendar.ics", validateIntParam("id"), controllersSessions.getSessionCalendar);
 router.post("/:id/join", validateIntParam("id"), controllersSessions.joinSession);
 
 // Opening a scheduled session. Host-only in the WHERE clause; canHost is the

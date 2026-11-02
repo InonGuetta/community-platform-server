@@ -1,5 +1,6 @@
 // @ts-check
 import * as servicesMedia from "../services/servicesMedia.js";
+import { notifyNewLesson } from "../services/servicesNotifications.js";
 import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import mammoth from "mammoth";
@@ -338,7 +339,8 @@ export const updateMedia = async (req, res) => {
   // Ownership is checked here rather than in the route because requireRole runs
   // before the item exists. This body carries isPublished, so without the check a
   // lecturer could unpublish another lecturer's material.
-  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
+  const before = await servicesMedia.getMediaById(req.params.id);
+  assertCanManageMedia(req.user, before);
 
   // Presence in the body — not the value — is what says "change this". Sending
   // courseId: null detaches the lesson from its course; omitting the key
@@ -379,7 +381,21 @@ export const updateMedia = async (req, res) => {
     // the save worked and the screen said it had not.
     item = await servicesMedia.getMediaById(req.params.id);
   }
+
+  // NOTIF-8. The edit that makes a lesson reach a course's students — published
+  // while in it, or moved into it while published — tells them. Not awaited, and
+  // never throws (see servicesNotifications); once per student per lesson there.
+  if (becameVisibleToCourse(before, item)) void notifyNewLesson(item.id);
+
   res.status(200).json(publicMedia(item));
+};
+
+// Whether an edit moved a lesson from "not in front of this course's students"
+// to "in front of them". Exported for its test.
+export const becameVisibleToCourse = (before, after) => {
+  if (!after?.is_published || !after.course_id) return false;
+  const wasVisibleHere = Boolean(before?.is_published) && Number(before?.course_id) === Number(after.course_id);
+  return !wasVisibleHere;
 };
 
 export const deleteMedia = async (req, res) => {

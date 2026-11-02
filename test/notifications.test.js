@@ -35,16 +35,22 @@ const app = createApp();
 
 const INSERT = /INSERT INTO notifications/i;
 
+// What the real INSERT … RETURNING answers: one row per recipient it wrote.
+const inserted = (params, { mail = false, email = null } = {}) => ({
+  rows: params[0].map((id) => ({ user_id: id, email, mail })),
+});
+
 // ── notify ──────────────────────────────────────────────────────────────────
 
 test("notify stores the type and the payload for that user, only if active", async () => {
-  const stub = stubPoolQuery(pool, (text) => (INSERT.test(text) ? { rows: [{ id: 1, email: null }] } : { rows: [] }));
+  const stub = stubPoolQuery(pool, (text, params) => (INSERT.test(text) ? inserted(params) : { rows: [] }));
   try {
     assert.equal(await notify(5, NOTIFICATION_TYPES.PROCESSING_DONE, { mediaId: 9, title: "שיעור" }), true);
     const [call] = stub.calls;
     assert.match(call.text, INSERT);
     assert.match(call.text, /is_active = TRUE/, "a deactivated account is told nothing");
-    assert.deepEqual(call.params, [5, "processing_done", JSON.stringify({ mediaId: 9, title: "שיעור" })]);
+    // One statement for any audience: the recipients travel as an array.
+    assert.deepEqual(call.params.slice(0, 4), [[5], "processing_done", JSON.stringify({ mediaId: 9, title: "שיעור" }), "processing"]);
   } finally {
     stub.restore();
   }
@@ -75,15 +81,16 @@ test("notify never throws, even when the database does", async () => {
 });
 
 test("notifyAdmins writes one row per active admin", async () => {
-  const stub = stubPoolQuery(pool, (text) => {
+  const stub = stubPoolQuery(pool, (text, params) => {
     if (/role = 'admin'/.test(text)) return { rows: [{ id: 1 }, { id: 2 }] };
-    if (INSERT.test(text)) return { rows: [{ id: 99, email: null }] };
+    if (INSERT.test(text)) return inserted(params);
     return { rows: [] };
   });
   try {
     assert.equal(await notifyAdmins(NOTIFICATION_TYPES.ROLE_REQUEST, { requestedRole: "lecturer" }), 2);
     const inserts = stub.calls.filter((c) => INSERT.test(c.text));
-    assert.deepEqual(inserts.map((c) => c.params[0]).sort(), [1, 2]);
+    assert.equal(inserts.length, 1, "one INSERT for every admin, not one per admin");
+    assert.deepEqual([...inserts[0].params[0]].sort(), [1, 2]);
   } finally {
     stub.restore();
   }
@@ -92,9 +99,9 @@ test("notifyAdmins writes one row per active admin", async () => {
 // ── The pipeline's outcome ──────────────────────────────────────────────────
 
 const pipelineStub = () =>
-  stubPoolQuery(pool, (text) => {
+  stubPoolQuery(pool, (text, params) => {
     if (/FROM media_items/.test(text)) return { rows: [{ uploader_id: 4, title: "פרשת השבוע", media_type: "audio" }] };
-    if (INSERT.test(text)) return { rows: [{ id: 1, email: null }] };
+    if (INSERT.test(text)) return inserted(params);
     return { rows: [] };
   });
 
@@ -103,7 +110,7 @@ test("a finished pipeline notifies the uploader", async () => {
   try {
     assert.equal(await notifyProcessingOutcome(9, { ok: true }), true);
     const insert = stub.calls.find((c) => INSERT.test(c.text));
-    assert.equal(insert.params[0], 4);
+    assert.deepEqual(insert.params[0], [4]);
     assert.equal(insert.params[1], "processing_done");
     assert.deepEqual(JSON.parse(insert.params[2]), { mediaId: 9, title: "פרשת השבוע", mediaType: "audio" });
   } finally {
@@ -251,9 +258,9 @@ test("read-all is not mistaken for an id", async () => {
 
 test("asking for a role from the profile notifies every admin", async () => {
   const { row, cookie } = session("student");
-  const stub = stubPoolQuery(pool, (text) => {
+  const stub = stubPoolQuery(pool, (text, params) => {
     if (/role = 'admin'/.test(text)) return { rows: [{ id: 1 }] };
-    if (INSERT.test(text)) return { rows: [{ id: 1, email: null }] };
+    if (INSERT.test(text)) return inserted(params);
     if (/UPDATE users SET/.test(text)) {
       return { rows: [{ id: 7, email: "u@example.com", role: "student", display_name: "דוד", requested_role: "lecturer", approval_status: "pending" }] };
     }
@@ -268,7 +275,7 @@ test("asking for a role from the profile notifies every admin", async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     const insert = stub.calls.find((c) => INSERT.test(c.text));
     assert.ok(insert, "no notification was written");
-    assert.equal(insert.params[0], 1);
+    assert.deepEqual(insert.params[0], [1]);
     assert.equal(insert.params[1], "role_request");
     assert.equal(JSON.parse(insert.params[2]).requestedRole, "lecturer");
   } finally {

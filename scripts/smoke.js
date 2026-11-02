@@ -19,7 +19,8 @@ import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
-import { listForUser, markRead, countPendingRoleRequests } from "../services/servicesNotifications.js";
+import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
+import { getSessionSchedule } from "../services/servicesSessions.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -835,7 +836,7 @@ const checks = [
     // The bell's own queries, as the navbar runs them every minute (migration
     // 035). markRead on id 0 matches no row — it exercises the statement and
     // changes nothing.
-    name: "the notifications inbox (migration 035)",
+    name: "the notifications inbox and preferences (migrations 035, 036)",
     run: async () => {
       const { rows } = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
       if (rows.length === 0) return "skipped — no active user";
@@ -843,7 +844,29 @@ const checks = [
       const touched = await markRead(rows[0].id, 0);
       if (touched) throw new Error("marking notification 0 matched a row");
       const pending = await countPendingRoleRequests();
-      return `${inbox.items.length} shown, ${inbox.unread} unread; ${pending} role request(s) waiting`;
+      // 036: the opt-outs the preferences screen reads, and the reminder column.
+      // Existence only for the column — the reminder query CLAIMS sessions, and
+      // a smoke run must not send anybody a reminder.
+      const optOuts = await getEmailOptOuts(rows[0].id);
+      const column = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_name='live_sessions' AND column_name='reminder_sent_at'"
+      );
+      if (column.rows.length === 0) throw new Error("live_sessions.reminder_sent_at is missing — migration 036 has not been applied");
+      // The one writer, for real: its INSERT is the statement every notification
+      // goes through, and its parameter typing is something only Postgres can
+      // judge — the stubbed suite passed a version Postgres refused outright.
+      // A type with no mail wording and no category, so this can never send
+      // mail even where SMTP is configured. Written twice with `onceBy`, which
+      // must write once; then removed.
+      const probe = { smokeProbe: String(Date.now()) };
+      const first = await deliver([rows[0].id], "smoke_probe", probe, { onceBy: "smokeProbe" });
+      const second = await deliver([rows[0].id], "smoke_probe", probe, { onceBy: "smokeProbe" });
+      await pool.query("DELETE FROM notifications WHERE type = 'smoke_probe'");
+      if (first !== 1 || second !== 0) throw new Error(`deliver wrote ${first} then ${second}; expected 1 then 0`);
+      // The SQL-side time conversion the notices and the calendar file rely on.
+      const schedule = await getSessionSchedule(0);
+      if (schedule !== null) throw new Error("session 0 exists?!");
+      return `${inbox.items.length} shown, ${inbox.unread} unread; ${pending} role request(s) waiting; ${optOuts.length} mail opt-out(s); deliver once-only ok`;
     },
   },
   {

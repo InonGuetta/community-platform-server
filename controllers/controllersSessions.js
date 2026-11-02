@@ -1,6 +1,8 @@
 // @ts-check
 import * as servicesSessions from "../services/servicesSessions.js";
-import { badRequest } from "../lib/AppError.js";
+import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
+import { notifySessionAudience, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
+import { calendarForSession } from "../lib/ics.js";
 import { closeSessionRoom } from "../sockets/socketManager.js";
 
 // Mirrors the session_type enum from migration 003. Without this check an
@@ -62,6 +64,15 @@ export const createSession = async (req, res) => {
     maxParticipants: participants,
     scheduledAt: scheduled,
   });
+  // NOTIF-2. Scheduled → "נקבע מפגש" with the calendar file attached; started
+  // at once → "המפגש התחיל". Not awaited: the host is waiting for the room, and
+  // a large audience's mail must not hold the response (the service never
+  // throws). Who the audience is: notifySessionAudience.
+  void notifySessionAudience(
+    session.id,
+    scheduled ? NOTIFICATION_TYPES.SESSION_SCHEDULED : NOTIFICATION_TYPES.SESSION_STARTING,
+    scheduled ? { calendar: calendarForSession } : {}
+  );
   res.status(201).json(publicSession(session));
 };
 
@@ -96,8 +107,29 @@ export const joinSession = async (req, res) => {
 };
 
 export const startSession = async (req, res) => {
+  // Read first, to know whether THIS call is the one that opens the room:
+  // startSession answers the same for "started now" and "already live", and a
+  // host pressing twice must not announce the session twice.
+  const before = await servicesSessions.getSessionById(req.params.id);
   const session = await servicesSessions.startSession(req.params.id, req.user.id);
+  if (!before.started_at && session.started_at) {
+    void notifySessionAudience(session.id, NOTIFICATION_TYPES.SESSION_STARTING);
+  }
   res.status(200).json(publicSession(session));
+};
+
+// NOTIF-3: the session as a calendar file, for the "הוספה ליומן" button. Any
+// signed-in user, like the session itself. Only a session with a time — one
+// started on the spot has nothing to put in a calendar.
+export const getSessionCalendar = async (req, res) => {
+  const session = await servicesSessions.getSessionSchedule(req.params.id);
+  if (!session) throw notFound("Session not found", ERROR_CODES.SESSION_NOT_FOUND);
+  if (!session.starts_at) throw badRequest("This session has no scheduled time");
+  res
+    .status(200)
+    .type("text/calendar; charset=utf-8")
+    .set("Content-Disposition", `attachment; filename="session-${session.id}.ics"`)
+    .send(calendarForSession(session));
 };
 
 // Ending over REST closes the live room too. It used to update the row and tell
