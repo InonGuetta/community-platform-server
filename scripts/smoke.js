@@ -5,7 +5,7 @@ import { getActiveUserById } from "../services/servicesAuth.js";
 import { getAllMedia, getContinueWatching, getMediaPage, countMedia } from "../services/servicesMedia.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
-import { getNotesByUser } from "../services/servicesNotes.js";
+import { getNotesByUser, getNotesWithBodies, getNotesAboutMedia } from "../services/servicesNotes.js";
 import { getPendingApprovals } from "../services/servicesUsers.js";
 import { getStudentsOfLecturer, searchEnrollableUsers } from "../services/servicesCourses.js";
 import {
@@ -319,10 +319,25 @@ const checks = [
       // script exists: the notebook is the one screen that is ENTIRELY one
       // query, so a column the code selects and the schema does not have takes
       // the page from "a feature is missing" to "the page is a 500".
-      const { rows } = await pool.query("SELECT id FROM users LIMIT 1");
-      if (rows.length === 0) return "no users to read a notebook for";
-      const notes = await getNotesByUser(rows[0].id);
-      return `${notes.length} note(s)`;
+      // NOTE-17 (migration 038): the list must come back WITHOUT bodies, a
+      // word from a note's middle must find it, its body must come back by id,
+      // and a lesson's notes must be found by position() over the body.
+      const { rows } = await pool.query(
+        "SELECT user_id AS id, id AS note_id, media_id, split_part(body_text, ' ', 3) AS word FROM notes WHERE body_text <> '' ORDER BY id LIMIT 1"
+      );
+      const owner = rows[0] ?? (await pool.query("SELECT id FROM users LIMIT 1")).rows[0];
+      if (!owner) return "no users to read a notebook for";
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+      const notes = await getNotesByUser(owner.id, scope);
+      if (notes.some((n) => "body" in n)) throw new Error("the list returned bodies");
+      if (!rows[0]) return `${notes.length} note(s), none with text to search`;
+      const found = rows[0].word ? await getNotesByUser(owner.id, scope, { search: rows[0].word }) : notes;
+      if (!found.some((n) => n.id === rows[0].note_id)) throw new Error(`searching "${rows[0].word}" did not find note ${rows[0].note_id}`);
+      const [whole] = await getNotesWithBodies(owner.id, scope, [rows[0].note_id]);
+      if (typeof whole?.body !== "string") throw new Error("a note by id came back without its body");
+      const about = rows[0].media_id ? await getNotesAboutMedia(owner.id, scope, rows[0].media_id) : [];
+      if (rows[0].media_id && !about.some((n) => n.id === rows[0].note_id)) throw new Error("a note attached to a lesson was not among its notes");
+      return `${notes.length} note(s), light; search, by-id and by-lesson reads ok`;
     },
   },
   // ── The three most recent migrations ──────────────────────────────────────

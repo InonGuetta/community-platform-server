@@ -2,13 +2,37 @@
 import * as servicesNotes from "../services/servicesNotes.js";
 import * as servicesMedia from "../services/servicesMedia.js";
 import { canUserSeeMedia, viewerScopeFor } from "../services/servicesVisibility.js";
-import { optionalId, optionalSeconds, requireIdList } from "../lib/validate.js";
-import { notFound, ERROR_CODES } from "../lib/AppError.js";
+import { optionalId, optionalSeconds, requireIdList, optionalQueryString } from "../lib/validate.js";
+import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 
+// One route, three answers (PRD NOTE-17) — see servicesNotes:
+//   GET /notes                  the list, light: a preview and no body
+//   GET /notes?q=…              the same list, searched over the whole text
+//   GET /notes?ids=1,2,3        those notes whole (the cards on screen, an export)
+//   GET /notes?aboutMediaId=7   one lesson's notes whole (the lesson page)
+// Asking for two at once is a 400: each answers a different question, and
+// silently preferring one would hide the mistake.
 export const getNotes = async (req, res) => {
-  const notes = await servicesNotes.getNotesByUser(req.user.id, await viewerScopeFor(req.user));
-  res.status(200).json(notes);
+  const { q, ids, aboutMediaId } = req.query;
+  const modes = [ids !== undefined, aboutMediaId !== undefined, q !== undefined].filter(Boolean).length;
+  if (modes > 1) throw badRequest("Ask for one of ids, aboutMediaId or q");
+
+  const scope = await viewerScopeFor(req.user);
+  let notes;
+  if (ids !== undefined) {
+    notes = await servicesNotes.getNotesWithBodies(req.user.id, scope, requireIdList(String(ids).split(","), "ids"));
+  } else if (aboutMediaId !== undefined) {
+    notes = await servicesNotes.getNotesAboutMedia(req.user.id, scope, optionalId(aboutMediaId, "aboutMediaId"));
+  } else {
+    notes = await servicesNotes.getNotesByUser(req.user.id, scope, { search: optionalQueryString(q, "q") });
+  }
+  res.status(200).json(notes.map(withoutBodyText));
 };
+
+// body_text (migration 038) is for the server's own preview and search. A whole
+// note already carries its body; sending the same words twice would only make
+// the response bigger.
+const withoutBodyText = ({ body_text, ...note }) => note;
 
 // A note may be attached to a lecture, and getNotesByUser joins that lecture back
 // in to show its title. Nothing checked that the caller was entitled to the
