@@ -11,7 +11,9 @@ const LIST_COLUMNS = `
   c.*,
   u.display_name AS lecturer_name,
   (SELECT COUNT(*)::int FROM enrollments e WHERE e.course_id = c.id) AS student_count,
-  (SELECT COUNT(*)::int FROM media_items m WHERE m.course_id = c.id) AS media_count`;
+  (SELECT COUNT(*)::int FROM media_items m WHERE m.course_id = c.id) AS media_count,
+  (SELECT COUNT(*)::int FROM course_join_requests r
+    WHERE r.course_id = c.id AND r.status = 'pending') AS pending_join_count`;
 
 // The catalogue. `activeOnly` is for a reader who does not manage courses: a
 // closed course is an administrative state, not something to browse. The

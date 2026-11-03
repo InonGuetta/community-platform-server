@@ -324,6 +324,8 @@ test("the preferences offer a student only the mail a student can get", async ()
     assert.deepEqual(res.body.categories, [
       { key: "sessions", email: false },
       { key: "new_lessons", email: true },
+      // The answer to a request to join a course by its code (PRD ROST-9).
+      { key: "enrolments", email: true },
     ]);
     assert.equal(res.body.allOff, false);
   } finally {

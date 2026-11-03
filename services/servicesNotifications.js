@@ -37,6 +37,12 @@ export const NOTIFICATION_TYPES = Object.freeze({
   SESSION_STARTING: "session_starting",
   // To a course's students: a lesson in it was published (NOTIF-8).
   NEW_LESSON: "new_lesson",
+  // Joining a course by its code (PRD ROST-9): to the course's lecturer — or the
+  // admins, for a course with none — somebody asked to join; and to that person,
+  // the answer.
+  COURSE_JOIN_REQUEST: "course_join_request",
+  COURSE_JOIN_APPROVED: "course_join_approved",
+  COURSE_JOIN_REJECTED: "course_join_rejected",
 });
 
 // What a person decides about (NOTIF-6) — the mail for a CATEGORY, not for each
@@ -50,6 +56,9 @@ export const EMAIL_CATEGORIES = Object.freeze({
   new_lessons: { types: ["new_lesson"], roles: ["student", "lecturer", "admin"] },
   processing: { types: ["processing_done", "processing_error"], roles: ["lecturer", "admin"] },
   role_requests: { types: ["role_request"], roles: ["admin"] },
+  join_requests: { types: ["course_join_request"], roles: ["lecturer", "admin"] },
+  // Every role: a lecturer may join a colleague's course too (PRD D6).
+  enrolments: { types: ["course_join_approved", "course_join_rejected"], roles: ["student", "lecturer", "admin"] },
 });
 
 // "Stop all of it", from the unsubscribe page. One row, so it also covers any

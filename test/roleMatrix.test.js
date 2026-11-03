@@ -120,6 +120,16 @@ const MATRIX = {
   "post /api/courses/:id/students": LECTURER,
   "get /api/courses/:id/enrollable-students": LECTURER,
   "delete /api/courses/:id/students/:studentId": LECTURER,
+  // Joining by code (PRD ROST-9): anybody signed in may ask, and withdraw their
+  // own request; the code and the queue are the course's lecturer's.
+  "post /api/courses/join": ANY,
+  "get /api/courses/join-requests/mine": ANY,
+  "delete /api/courses/join-requests/:requestId": ANY,
+  "post /api/courses/:id/join-code": LECTURER,
+  "delete /api/courses/:id/join-code": LECTURER,
+  "get /api/courses/:id/join-requests": LECTURER,
+  "post /api/courses/:id/join-requests/:requestId/approve": LECTURER,
+  "post /api/courses/:id/join-requests/:requestId/reject": LECTURER,
 
   // ── Live sessions ── join: anyone; create and start: lecturer; end: the host
   "get /api/sessions/active": ANY,

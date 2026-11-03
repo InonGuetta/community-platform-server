@@ -7,7 +7,7 @@ import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
 import { getNotesByUser, getNotesWithBodies, getNotesAboutMedia } from "../services/servicesNotes.js";
 import { getPendingApprovals } from "../services/servicesUsers.js";
-import { getStudentsOfLecturer, searchEnrollableUsers } from "../services/servicesCourses.js";
+import { getStudentsOfLecturer, searchEnrollableUsers, getAllCourses } from "../services/servicesCourses.js";
 import {
   getBookmarksByUser, createBookmark, deleteBookmark,
 } from "../services/servicesBookmarks.js";
@@ -23,6 +23,7 @@ import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliv
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
+import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -984,6 +985,78 @@ const checks = [
         client.release();
       }
       return `media ${mediaId}: ${stored}; upsert ok (rolled back)`;
+    },
+  },
+  {
+    // ROST-9 (migration 042): a code made, typed (in lower case, with a dash),
+    // asked again, listed on both sides, approved into the roster — through the
+    // real SQL, on one client inside a transaction that is always rolled back
+    // (the same savepoint routing as the tag-proposal check above). The
+    // ON CONFLICT … WHERE upsert and the decide transaction are what only a real
+    // database can judge.
+    name: "joining a course by its code (migration 042)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_join");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_join");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_join");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        // A course of its own, made inside the transaction, so the check runs on
+        // a database with no courses yet and never touches a real one.
+        const { rows: [lecturer] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND role IN ('lecturer', 'admin') ORDER BY id LIMIT 1"
+        );
+        if (!lecturer) return "skipped — no lecturer or admin to own a course";
+        const { rows: [course] } = await client.query(
+          "INSERT INTO courses (title, lecturer_id) VALUES ('__smoke join', $1) RETURNING id, lecturer_id",
+          [lecturer.id]
+        );
+        const { rows: [joiner] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND id <> $1 ORDER BY id LIMIT 1",
+          [lecturer.id]
+        );
+        if (!joiner) return "skipped — nobody but the lecturer to join";
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const code = await setJoinCode(course.id);
+        const typed = `${code.slice(0, 3).toLowerCase()}-${code.slice(3)}`;
+        const first = await requestToJoin(joiner.id, typed);
+        if (!first.created || first.course.id !== course.id) throw new Error("the code did not file a request on its course");
+        const again = await requestToJoin(joiner.id, code);
+        if (again.created) throw new Error("asking twice filed two requests — the ON CONFLICT … WHERE is not matching");
+
+        const queue = await getPendingJoinRequests(course.id);
+        const waiting = queue.find((r) => Number(r.user_id) === Number(joiner.id));
+        if (!waiting) throw new Error("the lecturer's queue is missing the request");
+        if (!(await getMyJoinRequests(joiner.id)).some((r) => r.id === waiting.id)) throw new Error("the requester's list is missing it");
+
+        const listed = (await getAllCourses()).find((c) => c.id === course.id);
+        if (!(listed?.pending_join_count >= 1)) throw new Error("the course list does not count the waiting request");
+
+        await decideJoinRequest(course.id, waiting.id, true, lecturer.id);
+        const { rows: enrolled } = await client.query(
+          "SELECT 1 FROM enrollments WHERE course_id = $1 AND student_id = $2", [course.id, joiner.id]
+        );
+        if (enrolled.length !== 1) throw new Error("approving did not enrol");
+        return `code ${code.length} chars, request filed once, listed, approved into the roster (rolled back)`;
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
     },
   },
   {
