@@ -24,13 +24,15 @@ import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.
 import {
   requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
   durationRangeFilter, optionalDateFilter, optionalQueryString,
-  mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor,
+  mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor, requireIdList,
 } from "../lib/validate.js";
 import {
   setMediaTags, cleanTagSelection, getTagTree,
   proposeTag, getPendingProposalsForMedia, withdrawProposal,
 } from "../services/servicesTags.js";
 import { suggestTags } from "../lib/tagSuggestions.js";
+import * as tagging from "../services/transcripts/tagging.js";
+import { assertWithinAiBudget } from "../services/servicesAiUsage.js";
 import { AppError, badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // Same bundled binary the transcription worker uses, so the API and the worker
@@ -975,4 +977,43 @@ export const withdrawMediaTagProposal = async (req, res) => {
   assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
   await withdrawProposal(req.params.id, req.params.proposalId);
   res.status(204).end();
+};
+
+// ── Tags the LLM proposed (PRD ARCH-4) ──────────────────────────────────────
+//
+// Whoever may change this lesson's tags may see, ask for, accept and dismiss
+// its proposals — the same ownership question as tagging it by hand.
+
+const managedItem = async (req) => {
+  const item = await servicesMedia.getMediaById(req.params.id);
+  assertCanManageMedia(req.user, item);
+  return item;
+};
+
+export const getAiTagSuggestions = async (req, res) => {
+  await managedItem(req);
+  res.status(200).json(await tagging.getAiTagSuggestions(req.params.id));
+};
+
+// Asking now, for a lesson processed before proposals existed or one whose
+// tree has grown since. A person is waiting, and it is spend, so the monthly
+// cap applies (PRD NFR-3).
+export const requestAiTagSuggestions = async (req, res) => {
+  await managedItem(req);
+  await assertWithinAiBudget();
+  res.status(200).json(await tagging.suggestTagsForMedia(req.params.id, { interactive: true }));
+};
+
+export const approveAiTagSuggestions = async (req, res) => {
+  await managedItem(req);
+  const tagIds = requireIdList(req.body?.tagIds, "tagIds");
+  res.status(200).json(await tagging.approveAiTags(req.params.id, tagIds));
+};
+
+// Some (?tagId=…, repeatable) or all of them.
+export const dismissAiTagSuggestions = async (req, res) => {
+  await managedItem(req);
+  const raw = req.query.tagId;
+  const tagIds = raw === undefined ? null : requireIdList([].concat(raw), "tagId");
+  res.status(200).json(await tagging.dismissAiTags(req.params.id, tagIds));
 };

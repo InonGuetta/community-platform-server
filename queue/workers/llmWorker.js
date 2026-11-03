@@ -17,6 +17,7 @@ import { readMediaBuffer } from "../../lib/storage.js";
 import { AppError } from "../../lib/AppError.js";
 import { logger } from "../../lib/logger.js";
 import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
+import { suggestTagsForMedia } from "../../services/transcripts/tagging.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 // This worker now serves two sources that converge on the same job:
@@ -147,6 +148,14 @@ llmQueue.process(async (job) => {
       ]
     );
     logger.info(`[WORKER:llm] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms`);
+    // Proposed tags (PRD ARCH-4), from the summary just written. After `done`,
+    // and never fatal: the lesson is finished either way, and a lecturer can
+    // ask again from its page. Awaited so a retry of this job cannot race it.
+    try {
+      await suggestTagsForMedia(mediaId);
+    } catch (tagErr) {
+      logger.warn(`[WORKER:llm] tag proposals failed (non-fatal) mediaId=${mediaId} — ${tagErr.message}`);
+    }
     // Inside the try, which is safe only because notifyProcessingOutcome never
     // throws: a notification that fails must not reach the catch below, mark a
     // finished lesson 'error' and send the job back to Bull.

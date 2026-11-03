@@ -85,6 +85,12 @@ const MATRIX = {
   "get /api/media/:id/stream": ANY,
   // A lecturer's page (PRD ATTR-10): counted over what the caller may see.
   "get /api/media/creators/:name": ANY,
+  // Tags the LLM proposed (PRD ARCH-4): the lesson's manager, checked again in
+  // the controller.
+  "get /api/media/:id/ai-tag-suggestions": LECTURER,
+  "post /api/media/:id/ai-tag-suggestions": LECTURER,
+  "post /api/media/:id/ai-tag-suggestions/approve": LECTURER,
+  "delete /api/media/:id/ai-tag-suggestions": LECTURER,
   "get /api/media/:id/download": ANY,
   "get /api/media/:id/download/audio": ANY,
   "get /api/media/:id/progress": ANY,

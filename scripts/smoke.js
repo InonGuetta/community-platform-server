@@ -24,6 +24,7 @@ import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliv
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
+import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
 
 // The check the test suite structurally cannot make: a real query, through the
@@ -1126,6 +1127,62 @@ const checks = [
         }
         if (report.lessons.find((l) => l.id === second.id)?.completedBy !== 1) throw new Error("the per-lesson count is wrong");
         return "arranged, read in order, finished at 90% and kept, next lesson found, reported (rolled back)";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // ARCH-4 (migration 044): proposals read with their paths (a recursive
+    // CTE), approved into the lesson's tags through setMediaTags, and the rest
+    // dismissed — all real SQL, no model call, on one client in a transaction
+    // that is always rolled back.
+    name: "tags the LLM proposed (migration 044)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_tags");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_tags");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_tags");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        const { rows: [item] } = await client.query("SELECT id FROM media_items ORDER BY id LIMIT 1");
+        const { rows: deep } = await client.query(
+          `SELECT t.id FROM tags t WHERE t.parent_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.tag_id = t.id AND mt.media_id = $1)
+           ORDER BY t.id LIMIT 2`,
+          [item?.id ?? 0]
+        );
+        if (!item || deep.length < 2) return "skipped — needs a lesson and two nested tags";
+        await client.query(
+          `INSERT INTO media_ai_tag_suggestions (media_id, tag_id, reason)
+           SELECT $1, c.id, c.reason FROM unnest($2::int[], $3::text[]) AS c(id, reason)`,
+          [item.id, deep.map((t) => t.id), ["smoke", "smoke"]]
+        );
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const open = await getAiTagSuggestions(item.id);
+        if (open.length !== 2 || !open.every((s) => typeof s.path === "string" && s.path.includes(" > "))) {
+          throw new Error(`proposals did not come back with their paths: ${JSON.stringify(open)}`);
+        }
+        const afterApprove = await approveAiTags(item.id, [deep[0].id]);
+        const { rows: tagged } = await client.query("SELECT 1 FROM media_tags WHERE media_id = $1 AND tag_id = $2", [item.id, deep[0].id]);
+        if (tagged.length !== 1 || afterApprove.length !== 1) throw new Error("approving did not tag the lesson and close the proposal");
+        if ((await dismissAiTags(item.id)).length !== 0) throw new Error("dismissing all left proposals open");
+        return "proposals read with paths, one approved into the tags, the rest dismissed (rolled back)";
       } finally {
         pool.query = original.query;
         pool.connect = original.connect;

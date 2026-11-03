@@ -111,7 +111,7 @@ test("every module that calls OpenAI calls it through the meter", async () => {
   const files = [
     "services/transcripts/analysis.js", "services/transcripts/hebrew.js", "services/transcripts/headings.js",
     "services/transcripts/search.js", "services/discussion/chat.js", "services/servicesEmbeddings.js",
-    "queue/workers/transcriptionWorker.js",
+    "queue/workers/transcriptionWorker.js", "services/transcripts/tagging.js",
   ];
   for (const file of files) {
     const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");

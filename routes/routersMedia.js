@@ -62,6 +62,14 @@ router.use(verifyToken);
 // is_published visibility on reads (students never see unpublished items).
 const canManage = requireRole("lecturer", "admin");
 
+// Asking the model for tag proposals (PRD ARCH-4) spends money on every press;
+// a handful a minute is more than a person tagging lessons by hand needs.
+const aiTagLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  message: "Too many tag suggestion requests, please wait a minute",
+});
+
 router.get("/get-all", controllersMedia.getAllMedia);
 
 // Before "/:id" — validateIntParam would reject the literal "tags" as a
@@ -100,6 +108,11 @@ router.get(
 // A tag that does not exist yet, proposed from this item's tagging dialog. It
 // waits for an admin (routersAdmin) and is attached to the item on approval.
 router.get("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.getMediaTagProposals);
+// Tags the LLM proposed (PRD ARCH-4). Asking spends, so it is limited per user.
+router.get("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMedia.getAiTagSuggestions);
+router.post("/:id/ai-tag-suggestions", canManage, aiTagLimiter, validateIntParam("id"), controllersMedia.requestAiTagSuggestions);
+router.post("/:id/ai-tag-suggestions/approve", canManage, validateIntParam("id"), controllersMedia.approveAiTagSuggestions);
+router.delete("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMedia.dismissAiTagSuggestions);
 router.post("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.proposeTagForMedia);
 router.delete(
   "/:id/tag-proposals/:proposalId",
