@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
-import { getAllMedia, getContinueWatching, getMediaPage, countMedia } from "../services/servicesMedia.js";
+import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile } from "../services/servicesMedia.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
 import { getNotesByUser, getNotesWithBodies, getNotesAboutMedia } from "../services/servicesNotes.js";
@@ -1057,6 +1057,23 @@ const checks = [
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }
+    },
+  },
+  {
+    // ATTR-10 (a lecturer's page): the header's one-row summary — FILTERed
+    // counts, the SUM of lengths and json_agg(DISTINCT jsonb …) of courses — on
+    // the most-used real name. Read-only.
+    name: "a lecturer's page summary (getCreatorProfile)",
+    run: async () => {
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+      const named = (await getCreators(scope)).filter((c) => c.name !== "כללי").sort((a, b) => b.media_count - a.media_count);
+      if (named.length === 0) return "skipped — every lesson is unattributed";
+      const profile = await getCreatorProfile(named[0].name, scope);
+      if (!profile || profile.media_count !== named[0].media_count) {
+        throw new Error(`the summary counts ${profile?.media_count} where the creator list says ${named[0].media_count}`);
+      }
+      if (!Array.isArray(profile.courses)) throw new Error("courses did not come back as a list");
+      return `${profile.media_count} item(s), ${Math.round(profile.total_seconds / 60)} min, ${profile.courses.length} course(s)`;
     },
   },
   {

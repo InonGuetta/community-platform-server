@@ -561,6 +561,35 @@ export const getWatchProgress = async (userId, mediaId) => {
  * Scoped by the same visibility rule as the listing. A student must not learn
  * from a filter menu that a lecturer they cannot see exists.
  */
+// One lecturer's page (PRD ATTR-10): what the archive holds under this name,
+// in one row — how many of each kind, how many hours of recordings, when the
+// latest arrived, and the courses they appear in. Counted over what THIS caller
+// may see, through the same predicate as the listing below it on the page, so
+// the header can never promise lessons the grid will not show.
+//
+// Null when the caller can see nothing under the name — the controller answers
+// that with a 404, the same as a name that was never used.
+export const getCreatorProfile = async (name, scope) => {
+  const { rows } = await pool.query(
+    `SELECT m.creator_name AS name,
+            COUNT(*)::int AS media_count,
+            COUNT(*) FILTER (WHERE m.media_type = 'video')::int AS video_count,
+            COUNT(*) FILTER (WHERE m.media_type = 'audio')::int AS audio_count,
+            COUNT(*) FILTER (WHERE m.media_type = 'text')::int AS text_count,
+            COALESCE(SUM(m.duration_seconds) FILTER (WHERE m.media_type <> 'text'), 0)::int AS total_seconds,
+            MAX(m.created_at) AS latest_at,
+            COALESCE(
+              json_agg(DISTINCT jsonb_build_object('id', c.id, 'title', c.title)) FILTER (WHERE c.id IS NOT NULL),
+              '[]'
+            ) AS courses
+     ${MEDIA_JOINS}
+     WHERE ${visibleMediaSql("$1", "m", "$2")} AND m.creator_name = $3
+     GROUP BY m.creator_name`,
+    [scope.courses, scope.drafts, name]
+  );
+  return rows[0] ?? null;
+};
+
 export const getCreators = async (scope) => {
   const { rows } = await pool.query(
     `SELECT m.creator_name AS name, COUNT(*)::int AS media_count

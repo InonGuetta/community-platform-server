@@ -69,6 +69,8 @@ router.get("/get-all", controllersMedia.getAllMedia);
 // routersCourses and "/pending" in routersUsers.
 router.get("/tags", controllersMedia.getTags);
 router.get("/creators", controllersMedia.getCreators);
+// One lecturer's page (PRD ATTR-10). Two segments, so "/:id" cannot take it.
+router.get("/creators/:name", controllersMedia.getCreatorProfile);
 // Before "/:id" — validateIntParam would otherwise reject the literal
 // "continue-watching" as a malformed id and this route would be unreachable.
 router.get("/continue-watching", controllersMedia.getContinueWatching);

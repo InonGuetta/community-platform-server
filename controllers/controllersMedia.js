@@ -914,6 +914,18 @@ export const getCreators = async (req, res) => {
   res.status(200).json(await servicesMedia.getCreators(await viewerScopeFor(req.user)));
 };
 
+// A lecturer's page (PRD ATTR-10, ARCH-5): the header above their lessons.
+// "כללי" is the archive's word for "nobody was named", not a person, so it has
+// no page. A name with nothing the caller may see is the same 404 as one never
+// used — a draft must not reveal that somebody is about to teach here.
+export const getCreatorProfile = async (req, res) => {
+  const name = optionalQueryString(req.params.name, "name", 255)?.trim();
+  if (!name || name === servicesMedia.DEFAULT_CREATOR) throw notFound("No such lecturer");
+  const profile = await servicesMedia.getCreatorProfile(name, await viewerScopeFor(req.user));
+  if (!profile) throw notFound("No such lecturer");
+  res.status(200).json(profile);
+};
+
 // What this item looks like it is about, offered to whoever may tag it.
 //
 // A first guess from the title, never applied on its own — see
