@@ -529,12 +529,22 @@ export const deleteMedia = async (id) => {
   return { deleted: true, id };
 };
 
+// completed_at (migration 043, PRD CRS-2): stamped the first time the position
+// reaches nine tenths of the lesson's length (COMPLETE_SHARE in
+// servicesCourseTrack.js — the same number is written here as SQL), and never
+// cleared — listening again from the start must not un-finish a lesson. A
+// lesson with no measured length cannot be judged and is never stamped.
 export const saveWatchProgress = async (userId, mediaId, positionSeconds) => {
   const result = await pool.query(
-    `INSERT INTO watch_progress (user_id, media_id, last_position_seconds, last_watched_at)
-     VALUES ($1, $2, $3, NOW())
+    `WITH reached AS (
+       SELECT CASE WHEN m.duration_seconds > 0 AND $3::int >= m.duration_seconds * 0.9 THEN NOW() END AS at
+         FROM media_items m WHERE m.id = $2
+     )
+     INSERT INTO watch_progress (user_id, media_id, last_position_seconds, last_watched_at, completed_at)
+     VALUES ($1, $2, $3, NOW(), (SELECT at FROM reached))
      ON CONFLICT (user_id, media_id)
-     DO UPDATE SET last_position_seconds=$3, last_watched_at=NOW()
+     DO UPDATE SET last_position_seconds = $3, last_watched_at = NOW(),
+                   completed_at = COALESCE(watch_progress.completed_at, (SELECT at FROM reached))
      RETURNING *`,
     [userId, mediaId, positionSeconds]
   );

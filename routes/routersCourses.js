@@ -100,6 +100,11 @@ router.post(
   controllersCourses.rejectJoinRequest
 );
 
+// The course as a track (PRD CRS-1..3): its lessons in order with the caller's
+// progress — for anybody following it; arranging them — for its lecturer.
+router.get("/:id/lessons", validateIntParam("id"), controllersCourses.getCourseLessons);
+router.put("/:id/lessons/order", canManage, validateIntParam("id"), controllersCourses.reorderCourseLessons);
+
 // A student's own enrollments. The controller allows self or admin.
 router.get(
   "/students/:studentId/enrollments",

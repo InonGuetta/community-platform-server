@@ -2,7 +2,8 @@
 import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
-import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile } from "../services/servicesMedia.js";
+import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress } from "../services/servicesMedia.js";
+import { getCourseLessons, reorderCourseLessons, trackSummary } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
 import { getNotesByUser, getNotesWithBodies, getNotesAboutMedia } from "../services/servicesNotes.js";
@@ -1074,6 +1075,54 @@ const checks = [
       }
       if (!Array.isArray(profile.courses)) throw new Error("courses did not come back as a list");
       return `${profile.media_count} item(s), ${Math.round(profile.total_seconds / 60)} min, ${profile.courses.length} course(s)`;
+    },
+  },
+  {
+    // CRS-1..3 (migration 043): arranging a course, reading it as a track with
+    // one reader's progress, and completion stamped at nine tenths and kept on
+    // listening again — the CTE upsert and the unnest … WITH ORDINALITY update
+    // are what only a real database judges. Everything runs on one client in
+    // a transaction that is always rolled back: a course of its own, two real
+    // recordings moved into it for the duration.
+    name: "a course as a track (migration 043)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      try {
+        await client.query("BEGIN");
+        const { rows: recordings } = await client.query(
+          "SELECT id, duration_seconds FROM media_items WHERE media_type <> 'text' AND duration_seconds > 0 ORDER BY id LIMIT 2"
+        );
+        const { rows: [user] } = await client.query("SELECT id FROM users WHERE is_active ORDER BY id LIMIT 1");
+        if (recordings.length < 2 || !user) return "skipped — needs two measured recordings and a user";
+        const { rows: [course] } = await client.query("INSERT INTO courses (title) VALUES ('__smoke track') RETURNING id");
+        await client.query("UPDATE media_items SET course_id = $1, is_published = TRUE WHERE id = ANY($2::int[])", [course.id, recordings.map((r) => r.id)]);
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+
+        const [first, second] = recordings;
+        await reorderCourseLessons(course.id, [second.id, first.id]);
+        const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+        const ordered = await getCourseLessons(course.id, user.id, scope);
+        if (ordered.map((l) => l.id).join() !== [second.id, first.id].join()) throw new Error("the track is not in the arranged order");
+
+        const near = await saveWatchProgress(user.id, second.id, Math.ceil(second.duration_seconds * 0.95));
+        if (!near.completed_at) throw new Error("reaching 95% did not stamp completion");
+        const again = await saveWatchProgress(user.id, second.id, 0);
+        if (!again.completed_at) throw new Error("listening again from the start un-finished the lesson");
+        const early = await saveWatchProgress(user.id, first.id, 1);
+        if (early.completed_at) throw new Error("one second in already counted as finished");
+
+        const summary = trackSummary(await getCourseLessons(course.id, user.id, scope));
+        if (summary.completed !== 1 || summary.nextId !== first.id) throw new Error(`summary was ${JSON.stringify(summary)}`);
+        return "arranged, read in order, finished at 90% and kept, next lesson found (rolled back)";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
     },
   },
   {

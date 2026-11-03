@@ -1,6 +1,9 @@
 // @ts-check
 import * as servicesCourses from "../services/servicesCourses.js";
 import * as servicesCourseJoin from "../services/servicesCourseJoin.js";
+import * as servicesCourseTrack from "../services/servicesCourseTrack.js";
+import { viewerScopeFor } from "../services/servicesVisibility.js";
+import { requireIdList } from "../lib/validate.js";
 import { notify, notifyAdmins, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { optionalId } from "../lib/validate.js";
 import { forbidden, badRequest } from "../lib/AppError.js";
@@ -229,4 +232,36 @@ export const getMyJoinRequests = async (req, res) => {
 
 export const cancelMyJoinRequest = async (req, res) => {
   res.status(200).json(await servicesCourseJoin.cancelMyJoinRequest(req.user.id, req.params.requestId));
+};
+
+// ── The course as a track (PRD CRS-1, CRS-2, CRS-3) ─────────────────────────
+
+// Its lessons in order, with the caller's own progress through them. For whoever
+// may follow the course: a student enrolled in it, a lecturer or an admin. A
+// student who is not enrolled is told so (403) rather than shown an empty track
+// that would read as a course with no lessons — the catalogue already names it,
+// so there is nothing to hide by answering 404.
+export const getCourseLessons = async (req, res) => {
+  const course = await servicesCourses.getCourseById(req.params.id);
+  const scope = await viewerScopeFor(req.user);
+  const follows = isPrivileged(req.user) || (scope.courses ?? []).includes(Number(course.id));
+  if (!follows) throw forbidden("Join this course to follow its lessons");
+
+  const lessons = await servicesCourseTrack.getCourseLessons(course.id, req.user.id, scope);
+  res.status(200).json({
+    course: {
+      id: course.id, title: course.title, description: course.description,
+      lecturer_id: course.lecturer_id, lecturer_name: course.lecturer_name,
+    },
+    lessons,
+    summary: servicesCourseTrack.trackSummary(lessons),
+    canArrange: canManageCourse(req.user, course),
+  });
+};
+
+// The lecturer arranging the track. Ownership-gated like every course write.
+export const reorderCourseLessons = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
+  const mediaIds = requireIdList(req.body?.mediaIds, "mediaIds");
+  res.status(200).json(await servicesCourseTrack.reorderCourseLessons(req.params.id, mediaIds));
 };
