@@ -265,3 +265,12 @@ export const reorderCourseLessons = async (req, res) => {
   const mediaIds = requireIdList(req.body?.mediaIds, "mediaIds");
   res.status(200).json(await servicesCourseTrack.reorderCourseLessons(req.params.id, mediaIds));
 };
+
+// The lecturer's report (PRD CRS-4): who of this course's students heard what.
+// The course's manager only — the same people who may read its roster, since
+// the report is the roster with listening attached.
+export const getCourseReport = async (req, res) => {
+  const course = await servicesCourses.getCourseById(req.params.id);
+  assertCanManageCourse(req.user, course);
+  res.status(200).json(await servicesCourseTrack.getCourseReport(course.id));
+};

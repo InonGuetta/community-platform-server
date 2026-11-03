@@ -129,6 +129,7 @@ const MATRIX = {
   // controller (enrolled, or a lecturer/admin); arranging it is the lecturer's.
   "get /api/courses/:id/lessons": ANY,
   "put /api/courses/:id/lessons/order": LECTURER,
+  "get /api/courses/:id/report": LECTURER,
   "get /api/courses/join-requests/mine": ANY,
   "delete /api/courses/join-requests/:requestId": ANY,
   "post /api/courses/:id/join-code": LECTURER,

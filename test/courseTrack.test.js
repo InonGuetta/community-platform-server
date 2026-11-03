@@ -8,7 +8,7 @@ import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { llmQueue } from "../queue/llmQueue.js";
-import { trackSummary } from "../services/servicesCourseTrack.js";
+import { trackSummary, buildCourseReport } from "../services/servicesCourseTrack.js";
 import { saveWatchProgress } from "../services/servicesMedia.js";
 
 // A course as a track (PRD CRS-1, CRS-2, CRS-3, migration 043).
@@ -138,5 +138,55 @@ test("saving a position stamps completion at nine tenths, and keeps an earlier s
     assert.match(text, /completed_at = COALESCE\(watch_progress\.completed_at/);
   } finally {
     stub.restore();
+  }
+});
+
+// ── The lecturer's report (PRD CRS-4) ───────────────────────────────────────
+
+
+test("the report crosses every student with every recording, and totals both ways", () => {
+  const report = buildCourseReport(
+    [{ id: 1, title: "א" }, { id: 3, title: "ג" }],
+    [{ id: 13, display_name: "דנה" }, { id: 14, display_name: "יוסי" }],
+    [
+      { user_id: 13, media_id: 1, completed_at: "2026-11-01T10:00:00Z", last_position_seconds: 600, last_watched_at: "2026-11-01T10:00:00Z" },
+      { user_id: 13, media_id: 3, completed_at: null, last_position_seconds: 90, last_watched_at: "2026-11-02T09:00:00Z" },
+      // Played once and left at zero: not "started".
+      { user_id: 14, media_id: 1, completed_at: null, last_position_seconds: 0, last_watched_at: "2026-11-01T08:00:00Z" },
+    ]
+  );
+  const [dana, yossi] = report.students;
+  assert.deepEqual(dana.cells, { 1: { status: "done", position: 600 }, 3: { status: "started", position: 90 } });
+  assert.deepEqual([dana.completed, dana.started, dana.lastActivity], [1, 1, "2026-11-02T09:00:00.000Z"]);
+  assert.deepEqual(yossi.cells[1], { status: "none", position: 0 });
+  assert.deepEqual(yossi.cells[3], { status: "none", position: 0 });
+  assert.deepEqual(report.lessons.map((l) => l.completedBy), [1, 0]);
+});
+
+test("the report is the course's lecturer's alone, and counts only its enrolled students", async () => {
+  const other = db(OTHER);
+  try {
+    const res = await request(app).get("/api/courses/4/report").set("Cookie", cookieFor(OTHER));
+    assert.equal(res.status, 403);
+  } finally {
+    other.restore();
+  }
+  const student = db(STUDENT, { enrolled: [4] });
+  try {
+    const res = await request(app).get("/api/courses/4/report").set("Cookie", cookieFor(STUDENT));
+    assert.equal(res.status, 403);
+  } finally {
+    student.restore();
+  }
+  const owner = db(OWNER);
+  try {
+    const res = await request(app).get("/api/courses/4/report").set("Cookie", cookieFor(OWNER));
+    assert.equal(res.status, 200);
+    const progress = owner.calls.find((c) => /FROM watch_progress wp/.test(c.text));
+    // A student who left the course takes their listening with them.
+    assert.match(progress.text, /JOIN enrollments e ON e\.student_id = wp\.user_id AND e\.course_id = m\.course_id/);
+    assert.match(progress.text, /media_type <> 'text'/);
+  } finally {
+    owner.restore();
   }
 });

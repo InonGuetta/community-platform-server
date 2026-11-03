@@ -76,3 +76,92 @@ export const reorderCourseLessons = async (courseId, mediaIds) => {
   );
   return { courseId: Number(courseId), order: mediaIds };
 };
+
+// ── The lecturer's report (PRD CRS-4) ───────────────────────────────────────
+//
+// Who of the course's students has heard what: every enrolled student against
+// every recording in the course, in track order. Books are left out for the
+// reason they are left out of a student's own count — there is no end of a
+// book to have reached.
+//
+// Drafts included: the report is the course's lecturer's, and a student who
+// heard a lesson before it was taken down did hear it.
+//
+// Three reads rather than one cross join: the grid is students × lessons, and
+// the progress rows that exist are usually far fewer — a cross join would ship
+// every empty cell from the database just to throw it away here.
+export const getCourseReport = async (courseId) => {
+  const [lessons, students, progress] = await Promise.all([
+    pool.query(
+      `SELECT id, title, duration_seconds, is_published
+         FROM media_items
+        WHERE course_id = $1 AND media_type <> 'text'
+        ORDER BY course_position NULLS LAST, created_at, id`,
+      [courseId]
+    ),
+    pool.query(
+      `SELECT u.id, u.display_name, u.email, u.is_active, e.enrolled_at
+         FROM enrollments e JOIN users u ON u.id = e.student_id
+        WHERE e.course_id = $1
+        ORDER BY u.display_name NULLS LAST, u.email`,
+      [courseId]
+    ),
+    pool.query(
+      `SELECT wp.user_id, wp.media_id, wp.last_position_seconds, wp.completed_at, wp.last_watched_at
+         FROM watch_progress wp
+         JOIN media_items m ON m.id = wp.media_id
+         JOIN enrollments e ON e.student_id = wp.user_id AND e.course_id = m.course_id
+        WHERE m.course_id = $1 AND m.media_type <> 'text'`,
+      [courseId]
+    ),
+  ]);
+  return buildCourseReport(lessons.rows, students.rows, progress.rows);
+};
+
+const statusOf = (row) => {
+  if (!row) return "none";
+  if (row.completed_at) return "done";
+  return row.last_position_seconds > 0 ? "started" : "none";
+};
+
+/**
+ * The grid, assembled: each student with a cell per lesson ({ status, position })
+ * and their totals, and each lesson with how many finished it. Pure, so the
+ * arithmetic is tested without a database.
+ */
+export const buildCourseReport = (lessons, students, progress) => {
+  const byStudent = new Map();
+  for (const row of progress) {
+    const key = Number(row.user_id);
+    if (!byStudent.has(key)) byStudent.set(key, new Map());
+    byStudent.get(key).set(Number(row.media_id), row);
+  }
+
+  const reportStudents = students.map((s) => {
+    const rows = byStudent.get(Number(s.id)) ?? new Map();
+    const cells = {};
+    let completed = 0;
+    let started = 0;
+    let lastActivity = null;
+    for (const lesson of lessons) {
+      const row = rows.get(Number(lesson.id));
+      const status = statusOf(row);
+      if (status === "done") completed += 1;
+      if (status === "started") started += 1;
+      cells[lesson.id] = { status, position: row?.last_position_seconds ?? 0 };
+      const at = row?.last_watched_at ? new Date(row.last_watched_at) : null;
+      if (at && (!lastActivity || at > lastActivity)) lastActivity = at;
+    }
+    return {
+      id: s.id, display_name: s.display_name, email: s.email, is_active: s.is_active, enrolled_at: s.enrolled_at,
+      completed, started, lastActivity: lastActivity ? lastActivity.toISOString() : null, cells,
+    };
+  });
+
+  const reportLessons = lessons.map((l) => ({
+    id: l.id, title: l.title, duration_seconds: l.duration_seconds, is_published: l.is_published,
+    completedBy: reportStudents.filter((s) => s.cells[l.id].status === "done").length,
+  }));
+
+  return { lessons: reportLessons, students: reportStudents };
+};

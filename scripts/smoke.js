@@ -3,7 +3,7 @@ import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
 import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress } from "../services/servicesMedia.js";
-import { getCourseLessons, reorderCourseLessons, trackSummary } from "../services/servicesCourseTrack.js";
+import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
 import { getNotesByUser, getNotesWithBodies, getNotesAboutMedia } from "../services/servicesNotes.js";
@@ -1116,7 +1116,16 @@ const checks = [
 
         const summary = trackSummary(await getCourseLessons(course.id, user.id, scope));
         if (summary.completed !== 1 || summary.nextId !== first.id) throw new Error(`summary was ${JSON.stringify(summary)}`);
-        return "arranged, read in order, finished at 90% and kept, next lesson found (rolled back)";
+
+        // CRS-4: the lecturer's report, once the listener is enrolled.
+        await client.query("INSERT INTO enrollments (student_id, course_id) VALUES ($1, $2)", [user.id, course.id]);
+        const report = await getCourseReport(course.id);
+        const row = report.students.find((s) => Number(s.id) === Number(user.id));
+        if (!row || row.cells[second.id]?.status !== "done" || row.cells[first.id]?.status !== "started") {
+          throw new Error(`the report did not show the listening: ${JSON.stringify(row?.cells)}`);
+        }
+        if (report.lessons.find((l) => l.id === second.id)?.completedBy !== 1) throw new Error("the per-lesson count is wrong");
+        return "arranged, read in order, finished at 90% and kept, next lesson found, reported (rolled back)";
       } finally {
         pool.query = original.query;
         pool.connect = original.connect;

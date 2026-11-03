@@ -104,6 +104,8 @@ router.post(
 // progress — for anybody following it; arranging them — for its lecturer.
 router.get("/:id/lessons", validateIntParam("id"), controllersCourses.getCourseLessons);
 router.put("/:id/lessons/order", canManage, validateIntParam("id"), controllersCourses.reorderCourseLessons);
+// Who of the course's students heard what (PRD CRS-4) — its lecturer's only.
+router.get("/:id/report", canManage, validateIntParam("id"), controllersCourses.getCourseReport);
 
 // A student's own enrollments. The controller allows self or admin.
 router.get(
