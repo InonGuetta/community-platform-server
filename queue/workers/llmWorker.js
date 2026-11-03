@@ -18,6 +18,7 @@ import { AppError } from "../../lib/AppError.js";
 import { logger } from "../../lib/logger.js";
 import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
 import { suggestTagsForMedia } from "../../services/transcripts/tagging.js";
+import { generateSuggestedQuestions } from "../../services/transcripts/questions.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 
 // This worker now serves two sources that converge on the same job:
@@ -155,6 +156,13 @@ llmQueue.process(async (job) => {
       await suggestTagsForMedia(mediaId);
     } catch (tagErr) {
       logger.warn(`[WORKER:llm] tag proposals failed (non-fatal) mediaId=${mediaId} — ${tagErr.message}`);
+    }
+    // Questions to start the chat with (PRD ASK-7), from the same summary —
+    // also after `done`, also never fatal: the chat has its fixed ones.
+    try {
+      await generateSuggestedQuestions(mediaId);
+    } catch (qErr) {
+      logger.warn(`[WORKER:llm] suggested questions failed (non-fatal) mediaId=${mediaId} — ${qErr.message}`);
     }
     // Inside the try, which is safe only because notifyProcessingOutcome never
     // throws: a notification that fails must not reach the catch below, mark a

@@ -20,6 +20,7 @@
     "backfill:durations": "node db/backfillDurations.js",
     "backfill:pages": "node db/backfillPageNumbers.js",
     "backfill:text-quality": "node db/backfillTextQuality.js",
+    "backfill:questions": "node db/backfillSuggestedQuestions.js",
     "extract:preview": "node scripts/extractPreview.js",
     "fix:stale-sessions": "node db/closeStaleSessions.js",
     "fix:publish-existing": "node db/publishExistingMedia.js",

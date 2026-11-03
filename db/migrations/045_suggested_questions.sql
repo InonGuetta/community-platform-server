@@ -1,0 +1,12 @@
+-- Three questions to ask about THIS lesson (PRD ASK-7), offered in the "דיון עם
+-- AI" chat when a conversation is empty — in place of three fixed questions
+-- that were the same on every lesson ("מה הנקודה המרכזית?").
+--
+-- Written by the LLM worker from the lesson's summary, after the summary
+-- (services/transcripts/questions.js); a JSON array of strings. NULL until
+-- then, and for a lesson processed before this — the chat falls back to the
+-- fixed questions, and `npm run backfill:questions` fills it in.
+--
+-- On the transcripts row beside the summary it is drawn from: three short
+-- strings, written once per processing, read with the transcript.
+ALTER TABLE transcripts ADD COLUMN IF NOT EXISTS suggested_questions JSONB;
