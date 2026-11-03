@@ -7,6 +7,7 @@
     "lint": "eslint .",
     "typecheck": "tsc -p jsconfig.json --noEmit",
     "smoke": "node scripts/smoke.js",
+    "e2e:fixtures": "node scripts/e2eFixtures.js",
     "verify": "npm run lint && npm run typecheck && npm test && npm run smoke",
     "start": "node server.js",
     "dev": "node --watch server.js",
