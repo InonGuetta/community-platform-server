@@ -443,6 +443,26 @@ export const getContinueWatching = async (userId, scope, limit = 12) => {
   return result.rows;
 };
 
+// A lesson as a guest may see it (PRD COM-3b, migration 046): only while it is
+// both public and published, and only what a guest page shows — the summary
+// and key points with it, never the transcript or anything about readers.
+// s3_key rides along for the stream and is stripped before anything is sent.
+// Null for every other lesson, so the caller answers a hidden lesson exactly
+// like a missing one.
+export const getPublicMedia = async (id) => {
+  const { rows } = await pool.query(
+    `SELECT m.id, m.title, m.description, m.media_type, m.duration_seconds, m.creator_name,
+            m.thumbnail_url, m.created_at, m.s3_key, c.title AS course_title,
+            t.ai_summary, t.ai_key_points
+       FROM media_items m
+       LEFT JOIN courses c ON c.id = m.course_id
+       LEFT JOIN transcripts t ON t.media_id = m.id
+      WHERE m.id = $1 AND m.is_public AND m.is_published`,
+    [id]
+  );
+  return rows[0] ?? null;
+};
+
 export const getMediaById = async (id) => {
   const result = await pool.query(
     `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE m.id=$1`,
@@ -476,7 +496,7 @@ export const createMedia = async (data) => {
 export const updateMedia = async (id, data) => {
   const {
     title, description, isPublished, thumbnailUrl, durationSeconds,
-    courseId, lecturerId, setCourse = false, setLecturer = false, creatorName,
+    courseId, lecturerId, setCourse = false, setLecturer = false, creatorName, isPublic,
   } = data;
   // COALESCE, like title above it, and NOT the CASE treatment the two
   // associations get. The distinction those need — "set this to NULL" versus
@@ -494,10 +514,11 @@ export const updateMedia = async (id, data) => {
       duration_seconds = COALESCE($5, duration_seconds),
       course_id = CASE WHEN $6::boolean THEN $7::int ELSE course_id END,
       lecturer_id = CASE WHEN $8::boolean THEN $9::int ELSE lecturer_id END,
-      creator_name = COALESCE($11, creator_name)
+      creator_name = COALESCE($11, creator_name),
+      is_public = COALESCE($12, is_public)
     WHERE id=$10 RETURNING *`,
     [title, description, isPublished, thumbnailUrl, durationSeconds,
-      setCourse, courseId ?? null, setLecturer, lecturerId ?? null, id, nextCreator]
+      setCourse, courseId ?? null, setLecturer, lecturerId ?? null, id, nextCreator, isPublic ?? null]
   );
   if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return getMediaById(id);

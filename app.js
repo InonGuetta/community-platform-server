@@ -35,6 +35,7 @@ import routersSaves from "./routes/routersSaves.js";
 import routersDonations from "./routes/routersDonations.js";
 import routersAdmin from "./routes/routersAdmin.js";
 import routersNotifications from "./routes/routersNotifications.js";
+import routersPublic from "./routes/routersPublic.js";
 
 // Every resource, and the prefix it is mounted at. Exported because the route
 // tests walk it: a new resource added here is automatically included in the
@@ -60,6 +61,8 @@ export const API_ROUTERS = [
   ["/api/donations", routersDonations],
   ["/api/admin", routersAdmin],
   ["/api/notifications", routersNotifications],
+  // A lesson made public by its manager, for anyone with the link (PRD COM-3b).
+  ["/api/public", routersPublic],
 ];
 
 export const createApp = () => {

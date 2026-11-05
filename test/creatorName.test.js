@@ -95,7 +95,9 @@ test("an update that omits the name leaves it alone", async () => {
 test("an update can change the name", async () => {
   const calls = capture();
   await updateMedia(1, { creatorName: "הרב לוי" });
-  assert.equal(calls[0].params.at(-1), "הרב לוי");
+  // $11 in the UPDATE — read by its place, not as "the last one", which moved
+  // when is_public ($12) was added.
+  assert.equal(calls[0].params[10], "הרב לוי");
 });
 
 // Clearing the field is a real thing an editor does, and the column is NOT NULL,
@@ -103,7 +105,7 @@ test("an update can change the name", async () => {
 test("clearing the name in an edit falls back to the default", async () => {
   const calls = capture();
   await updateMedia(1, { creatorName: "   " });
-  assert.equal(calls[0].params.at(-1), DEFAULT_CREATOR);
+  assert.equal(calls[0].params[10], DEFAULT_CREATOR);
 });
 
 test("an over-long name is refused on update too", async () => {

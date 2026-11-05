@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
-import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress } from "../services/servicesMedia.js";
+import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
 import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
@@ -1189,6 +1189,17 @@ const checks = [
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }
+    },
+  },
+  {
+    // COM-3b (migration 046): the guest read, through its real SQL — and that no
+    // lesson is public that should not be. Read-only.
+    name: "public lessons (migration 046)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT id FROM media_items WHERE is_public ORDER BY id");
+      const { rows: [anyLesson] } = await pool.query("SELECT id FROM media_items ORDER BY id LIMIT 1");
+      if (anyLesson) await getPublicMedia(anyLesson.id);
+      return `${rows.length} public lesson(s)${rows.length ? `: ${rows.map((r) => r.id).join(", ")}` : ""}; guest read ok`;
     },
   },
   {

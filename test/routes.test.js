@@ -78,6 +78,12 @@ const PUBLIC = new Set([
   // signed token in the body is the credential, and all it can do is turn mail
   // off (lib/unsubscribe.js).
   "post /api/notifications/unsubscribe",
+  // A lesson its manager made public (PRD COM-3b), opened from a shared link by
+  // someone with no account. Each answers only for a public, published lesson —
+  // the row decides, and every other id is a 404 (test/publicLessons.test.js).
+  "get /api/public/media/:id",
+  "get /api/public/media/:id/stream",
+  "get /api/public/share/:id",
 ]);
 
 const key = (r) => `${r.method} ${r.path}`;
