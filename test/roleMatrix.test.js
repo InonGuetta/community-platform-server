@@ -189,6 +189,8 @@ const MATRIX = {
 
   // ── Donations ──
   "post /api/donations/webhook": PUBLIC, // Stripe, authenticated by signature
+  // The donor's own donation checked against Stripe; ownership in the controller.
+  "post /api/donations/:id/sync": ANY,
   // A lesson its manager made public (PRD COM-3b): the row decides, not the caller.
   "get /api/public/media/:id": PUBLIC,
   "get /api/public/media/:id/stream": PUBLIC,
