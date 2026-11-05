@@ -42,6 +42,12 @@ const chatLimiter = userRateLimit({
 
 router.use(verifyToken);
 
+// The whole archive (PRD ASK-2) — before the /:mediaId routes, whose id check
+// would answer "archive" with a 400. Same budgets as a lesson's chat.
+router.get("/archive/conversation", controllersDiscussion.getArchiveConversation);
+router.post("/archive/conversation", conversationLimiter, controllersDiscussion.startArchiveConversation);
+router.post("/archive/messages/stream", chatLimiter, controllersDiscussion.postArchiveMessageStream);
+
 router.get("/:mediaId/search", validateIntParam("mediaId"), searchLimiter, controllersDiscussion.searchWithinMedia);
 router.get("/:mediaId/conversation", validateIntParam("mediaId"), controllersDiscussion.getConversation);
 router.post("/:mediaId/conversation", validateIntParam("mediaId"), conversationLimiter, controllersDiscussion.startConversation);

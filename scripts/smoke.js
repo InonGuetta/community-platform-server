@@ -19,6 +19,7 @@ import {
 import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
+import { searchArchive, getArchiveConversation, ARCHIVE_PASSAGES, PER_LESSON_MAX } from "../services/discussion/archive.js";
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
 import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
@@ -858,6 +859,39 @@ const checks = [
         throw new Error(`lesson ${mediaId} has ${n} embedded chunks but the search returned ${hits.length}, expected ${expected}`);
       }
       return `${hits.length} hit(s) from ${n} chunks in lesson ${mediaId}`;
+    },
+  },
+  {
+    // The archive chat's retrieval (PRD ASK-2), through its real SQL: the
+    // visibility predicate inside both ranking CTEs, the widened HNSW scan and
+    // the fusion. OpenAI is replaced. Read-only. Run twice: unrestricted, and
+    // as a student enrolled in nothing — who must get no lesson that belongs
+    // to a course, and no draft.
+    name: "the archive chat's search across lessons (migration 047)",
+    run: async () => {
+      const nullable = await pool.query(
+        `SELECT is_nullable FROM information_schema.columns
+         WHERE table_name = 'ai_conversations' AND column_name = 'media_id'`
+      );
+      if (nullable.rows[0]?.is_nullable !== "YES") throw new Error("ai_conversations.media_id is NOT NULL — migration 047 has not been applied");
+      const deps = { embed: async () => Array(1536).fill(0.01), rerank: async (_q, r, limit) => r.slice(0, limit) };
+      const all = await searchArchive("תורה", { courses: UNRESTRICTED, drafts: UNRESTRICTED }, deps);
+      if (all.length > ARCHIVE_PASSAGES) throw new Error(`${all.length} passages, more than ${ARCHIVE_PASSAGES}`);
+      const perLesson = new Map();
+      for (const p of all) perLesson.set(p.media_id, (perLesson.get(p.media_id) ?? 0) + 1);
+      if ([...perLesson.values()].some((n) => n > PER_LESSON_MAX)) throw new Error("one lesson has more than its share of passages");
+      const outsider = await searchArchive("תורה", { courses: [], drafts: [] }, deps);
+      if (outsider.length > 0) {
+        const ids = [...new Set(outsider.map((p) => p.media_id))];
+        const leaked = await pool.query(
+          "SELECT id FROM media_items WHERE id = ANY($1::int[]) AND (course_id IS NOT NULL OR NOT is_published)",
+          [ids]
+        );
+        if (leaked.rows.length > 0) throw new Error(`a student in no course was shown lesson(s) ${leaked.rows.map((r) => r.id).join(", ")}`);
+      }
+      const user = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
+      if (user.rows.length > 0) await getArchiveConversation(user.rows[0].id);
+      return `${all.length} passage(s) from ${perLesson.size} lesson(s); ${outsider.length} for a student in no course`;
     },
   },
   {

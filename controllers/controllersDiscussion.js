@@ -151,7 +151,12 @@ export const postMessageStream = async (req, res) => {
     question: questionFrom(req),
     scope: await viewerScopeFor(req.user),
   });
+  await streamPrepared(res, prepared);
+};
 
+// The event stream itself, for a question already prepared — a lesson's
+// (postMessageStream) or the archive's (postArchiveMessageStream).
+const streamPrepared = async (res, prepared) => {
   res.status(200).set({
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -186,4 +191,29 @@ export const postMessageStream = async (req, res) => {
     });
   }
   res.end();
+};
+
+// ── The whole archive (PRD ASK-2) ───────────────────────────────────────────
+// The same chat over every lesson the caller may see. No lesson in the path:
+// visibility is applied inside the retrieval, to every passage, from the same
+// scope every read of a lesson uses.
+
+export const getArchiveConversation = async (req, res) => {
+  const result = await servicesDiscussion.getArchiveConversation(req.user.id);
+  res.status(200).json({ ...result, quota: await servicesDiscussion.questionQuota(req.user) });
+};
+
+export const startArchiveConversation = async (req, res) => {
+  const { created, ...result } = await servicesDiscussion.startArchiveConversation(req.user.id);
+  res.status(created ? 201 : 200).json(result);
+};
+
+// Same events as postMessageStream; the citations also name their lesson.
+export const postArchiveMessageStream = async (req, res) => {
+  const prepared = await servicesDiscussion.prepareArchiveAsk({
+    user: req.user,
+    question: questionFrom(req),
+    scope: await viewerScopeFor(req.user),
+  });
+  await streamPrepared(res, prepared);
 };

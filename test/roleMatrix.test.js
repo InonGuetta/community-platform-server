@@ -155,6 +155,9 @@ const MATRIX = {
   "delete /api/sessions/:id/end": LECTURER,
 
   // ── Personal ── private to the caller, whatever their role
+  "get /api/discussion/archive/conversation": ANY,
+  "post /api/discussion/archive/conversation": ANY,
+  "post /api/discussion/archive/messages/stream": ANY,
   "get /api/discussion/:mediaId/search": ANY,
   "get /api/discussion/:mediaId/conversation": ANY,
   "post /api/discussion/:mediaId/conversation": ANY,

@@ -181,7 +181,7 @@ const searchKeyword = async (query, scope) => {
 // naming that setting on an older server is an error, not a no-op.
 const VECTOR_EF_SEARCH = 400;
 
-const withWideVectorScan = async (run) => {
+export const withWideVectorScan = async (run) => {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");

@@ -15,6 +15,8 @@
 //                                passages when it does not
 //   discussion/chat.js           the grounded answer, its checked citations,
 //                                and storing the exchange
+//   discussion/archive.js        the same chat over every lesson the caller
+//                                may see (PRD ASK-2)
 
 export { searchWithinMedia } from "./discussion/retrieval.js";
 
@@ -30,3 +32,8 @@ export {
 } from "./discussion/conversations.js";
 
 export { askInLesson, prepareAsk, streamAsk, questionQuota } from "./discussion/chat.js";
+
+// The same chat over the whole archive (PRD ASK-2): its retrieval, citations
+// and conversation; the answer itself is streamAsk above.
+//   discussion/archive.js
+export { getArchiveConversation, startArchiveConversation, prepareArchiveAsk } from "./discussion/archive.js";

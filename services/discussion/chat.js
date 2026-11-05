@@ -131,7 +131,7 @@ const REWRITE_PROMPT = `תקבל היסטוריית שיחה על שיעור ו�
 // model sees what was said, not numbers that no longer mean anything.
 const stripMarkers = (text) => String(text).replace(/\s*\[\d+\]/g, "");
 
-const historyMessages = (history) =>
+export const historyMessages = (history) =>
   history.map((m) => ({
     role: m.role === "assistant" ? "assistant" : "user",
     content: m.role === "assistant" ? stripMarkers(m.content) : String(m.content),
@@ -158,8 +158,12 @@ const historyMessages = (history) =>
 // The end of a buffer that could still grow into "[12]" or "[[NOT_DISCUSSED]]".
 const PARTIAL_TAIL = /\[(?:\[[A-Z_]*\]?|\d*)$/;
 
-/** @param {number} passageCount */
-export const createCitationGate = (passageCount) => {
+/**
+ * @param {number} passageCount
+ * @param {string} [ungrounded]  what replaces an uncited answer — the archive
+ *   chat words it for the whole archive rather than "this lesson"
+ */
+export const createCitationGate = (passageCount, ungrounded = UNGROUNDED_ANSWER) => {
   const valid = (n) => Number.isInteger(n) && n >= 1 && n <= passageCount;
   const cited = new Set();
   let raw = "";          // received, not yet judged
@@ -213,7 +217,7 @@ export const createCitationGate = (passageCount) => {
       raw = "";
       const answer = clean.replace(/[ \t]{2,}/g, " ").trim();
       if (!open() || !answer) {
-        return { tail: "", answer: UNGROUNDED_ANSWER, cited: [], grounded: false, notDiscussed: false };
+        return { tail: "", answer: ungrounded, cited: [], grounded: false, notDiscussed: false };
       }
       return {
         tail: emit(),
@@ -252,7 +256,7 @@ export const validateAnswer = (text, passageCount) => {
 const ANSWER_PARAMS = { model: GPT_MODEL, temperature: 0.2, max_tokens: 1200 };
 
 /** @type {ChatDeps} */
-const DEFAULT_DEPS = {
+export const DEFAULT_DEPS = {
   answer: async (messages) =>
     completionText(
       await openai.chat.completions.create({ ...ANSWER_PARAMS, messages }),
@@ -301,6 +305,17 @@ const loadLesson = async (mediaId) => {
 };
 
 /**
+ * The daily quota (PRD ASK-5), shared by the lesson chat and the archive chat
+ * (./archive.js) — one count across both, because both are the same bill.
+ * @param {{ id: number, role?: string }} user
+ */
+export const assertQuestionQuota = async (user) => {
+  if (!QUOTA_EXEMPT_ROLES.has(user.role) && (await countQuestionsToday(user.id)) >= DAILY_QUESTION_LIMIT) {
+    throw new AppError("Daily question limit reached", 429, ERROR_CODES.AI_DAILY_LIMIT);
+  }
+};
+
+/**
  * The checks before a question is taken: every refusal (404, 409) happens
  * here, so the streaming route can still answer it as an ordinary JSON error
  * before it commits to an event stream. Deliberately quick — the slow part,
@@ -318,9 +333,7 @@ export const prepareAsk = async ({ user, mediaId, question, scope, deps = DEFAUL
 
   // Before anything is paid for — and before the stream opens, so the refusal
   // is an ordinary 429 the client can say something precise about.
-  if (!QUOTA_EXEMPT_ROLES.has(user.role) && (await countQuestionsToday(user.id)) >= DAILY_QUESTION_LIMIT) {
-    throw new AppError("Daily question limit reached", 429, ERROR_CODES.AI_DAILY_LIMIT);
-  }
+  await assertQuestionQuota(user);
 
   // Before a conversation is opened: a lesson with no text yet must not leave
   // an empty conversation behind for every student who tried too early.
@@ -354,13 +367,17 @@ export const gatherContext = async (prepared) => {
 };
 
 // Store the exchange — only once the answer exists (property 4).
+//
+// A prepared question may bring its own `snapshot` — the archive chat's
+// citations also name the lesson each passage is from (./archive.js).
 const storeExchange = async (prepared, context, { answer, cited }) => {
   const { conversation, question, mediaId } = prepared;
+  const snapshot = prepared.snapshot ?? citationSnapshot;
   const { passages, mode } = context;
-  const citations = cited.map((n) => citationSnapshot(passages[n - 1], n));
+  const citations = cited.map((n) => snapshot(passages[n - 1], n));
   const asked = await appendMessage(conversation.id, { role: "user", content: question });
   const answered = await appendMessage(conversation.id, { role: "assistant", content: answer, citations });
-  logger.debug(`[BE:svc] discussion answer mediaId=${mediaId} conversation=${conversation.id} mode=${mode} passages=${passages.length} cited=${citations.length} qLen=${question.length}`);
+  logger.debug(`[BE:svc] discussion answer mediaId=${mediaId ?? "archive"} conversation=${conversation.id} mode=${mode} passages=${passages.length} cited=${citations.length} qLen=${question.length}`);
   return { conversation, messages: [asked, answered] };
 };
 
@@ -409,24 +426,28 @@ export const STAGES = { searching: "searching", writing: "writing" };
  * askInLesson returns it — the client replaces the streamed draft with it, so
  * the answer on screen is always the one in the database. Resolves to null,
  * storing nothing, when `signal` aborts (the reader left).
- * @param {Awaited<ReturnType<typeof prepareAsk>>} prepared
+ * @param {any} prepared  from prepareAsk, or prepareArchiveAsk in ./archive.js
  * @param {{ onDelta: (text: string) => void, onStage?: (stage: string) => void, signal?: AbortSignal }} io
  */
 export const streamAsk = async (prepared, { onDelta, onStage, signal }) => {
   onStage?.(STAGES.searching);
   let context;
   try {
-    context = await gatherContext(prepared);
+    // The archive chat (./archive.js) brings its own way of finding passages;
+    // everything after that — the gate, the storing — is this one.
+    context = await (prepared.gather ?? gatherContext)(prepared);
   } catch (err) {
     // The stream is already open, so a failure here can no longer be a JSON
     // error: it becomes the same "try again" the answer's own failure is.
     throw answerFailed(prepared.mediaId, err);
   }
   if (signal?.aborted) return null;
-  if (!context.messages) return storeExchange(prepared, context, { answer: NOTHING_FOUND_ANSWER, cited: [] });
+  if (!context.messages) {
+    return storeExchange(prepared, context, { answer: prepared.nothingFound ?? NOTHING_FOUND_ANSWER, cited: [] });
+  }
 
   onStage?.(STAGES.writing);
-  const gate = createCitationGate(context.passages.length);
+  const gate = createCitationGate(context.passages.length, prepared.ungrounded);
   let result;
   try {
     for await (const piece of prepared.deps.answerStream(context.messages, signal)) {
