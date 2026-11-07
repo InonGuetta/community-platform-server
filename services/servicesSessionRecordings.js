@@ -18,6 +18,12 @@
 //                    ends: a host whose tab closed mid-session still leaves a
 //                    recording of everything that reached the server
 //   recordConsent    who agreed, kept with the recording (the evidence)
+//   saveChatMessage  a chat line written while recording, by someone whose
+//                    voice is in it (migration 049)
+//   lessonFromRecording
+//                    the finished recording as a DRAFT lesson in the session's
+//                    course, the host as its lecturer, the chat copied on as
+//                    an appendix, and the pipeline started (PRD REC-2, REC-3)
 //
 // Parts of a MediaRecorder recording are pieces of ONE stream: only the first
 // carries the container's header, and the parts joined in order are a valid
@@ -35,6 +41,8 @@ import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 import { LOCAL_UPLOAD_DIR, s3, s3Configured } from "../lib/storage.js";
 import { AppError, notFound, forbidden, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { probeDurationSeconds } from "../lib/mediaDuration.js";
+import { createMedia } from "./servicesMedia.js";
 
 // Where the parts wait until the recording is finished. Under the uploads
 // directory, so it is on the same volume as the final file.
@@ -87,7 +95,7 @@ const remuxInPlace = async (file) => {
   }
 };
 
-const RECORDING_COLS = "id, session_id, host_id, status, mime_type, parts, bytes, s3_key, started_at, finished_at";
+const RECORDING_COLS = "id, session_id, host_id, status, mime_type, parts, bytes, s3_key, started_at, finished_at, media_id";
 
 const partsDirOf = (recordingId) => path.join(PARTS_DIR, String(recordingId));
 const partPath = (recordingId, n) => path.join(partsDirOf(recordingId), `${String(n).padStart(5, "0")}.part`);
@@ -229,6 +237,9 @@ const assemble = async (recording) => {
   await new Promise((resolve, reject) => out.end((/** @type {any} */ err) => (err ? reject(err) : resolve(undefined))));
   await remuxInPlace(joined);
   const size = (await fsp.stat(joined)).size;
+  // Measured here, while the file is still on this disk: once it has gone to
+  // S3, reading its header means fetching it back. null when unreadable.
+  const durationSeconds = await probeDurationSeconds(joined);
 
   let s3Key = `local/${name}`;
   if (s3Configured()) {
@@ -239,7 +250,7 @@ const assemble = async (recording) => {
     }).done();
     await fsp.rm(joined, { force: true });
   }
-  return { s3Key, parts: files.length, bytes: size || bytes };
+  return { s3Key, parts: files.length, bytes: size || bytes, durationSeconds };
 };
 
 /**
@@ -247,7 +258,7 @@ const assemble = async (recording) => {
  * UPDATE first, so two callers (the host's "stop" and the end of the session
  * arriving together) cannot both join and store it.
  */
-const closeRecording = async (recording) => {
+const closeRecording = async (recording, lessonDeps = undefined) => {
   const claim = await pool.query(
     `UPDATE session_recordings SET status='failed', finished_at=NOW()
      WHERE id=$1 AND status='recording'
@@ -289,7 +300,151 @@ const closeRecording = async (recording) => {
   );
   await fsp.rm(partsDirOf(recording.id), { recursive: true, force: true });
   logger.info(`[BE:svc] recording=${recording.id} ✓ finished, ${stored.parts} part(s), ${stored.bytes} bytes`);
-  return rows[0];
+  const mediaId = await lessonFromRecording(rows[0], stored.durationSeconds, lessonDeps);
+  return { ...rows[0], media_id: mediaId ?? rows[0].media_id };
+};
+
+// ── The recording as a lesson (PRD REC-2, REC-3) ───────────────────────────
+
+// "dd.mm.yyyy", in Israel — the date people will remember the session by.
+const dateInIsrael = (when) =>
+  new Intl.DateTimeFormat("he-IL", { timeZone: "Asia/Jerusalem", day: "2-digit", month: "2-digit", year: "numeric" })
+    .format(new Date(when ?? Date.now()));
+
+const TITLE_MAX = 255;
+
+/**
+ * The lesson's title: the session's, marked as a recording, and numbered when
+ * the session was recorded in more than one part.
+ * Exported for the tests.
+ * @param {string} sessionTitle
+ * @param {number} part  1-based
+ * @param {number} parts
+ */
+export const lessonTitle = (sessionTitle, part, parts) => {
+  const base = `${String(sessionTitle ?? "").trim() || "מפגש"} — הקלטת מפגש`;
+  const suffix = parts > 1 ? ` (חלק ${part})` : "";
+  return `${base.slice(0, TITLE_MAX - suffix.length)}${suffix}`;
+};
+
+// Loaded when used, not at import: the pipeline opens the Bull queues (Redis
+// connections) the moment it is imported, and this module is imported by the
+// socket manager and the media controller — every process and test that loads
+// them would otherwise hold Redis connections open for nothing.
+const triggerPipelineLazily = async (mediaId) =>
+  (await import("./transcripts/pipeline.js")).triggerPipeline(mediaId);
+
+/**
+ * Make the finished recording a lesson. Never throws — the recording is
+ * already saved, and a failure here leaves it saved (and logged) rather than
+ * reporting the whole stop as failed. Returns the lesson's id, or null.
+ *
+ * A DRAFT: participants agreed to be recorded, and the host decides whether
+ * the result is shown — publishing it (the lesson's edit dialog) is what tells
+ * the course's students, through the existing new-lesson notice. The pipeline
+ * starts at once, so the lesson is transcribed and summarised by the time the
+ * host looks at it.
+ * @param {any} recording  a finished row
+ * @param {number|null} durationSeconds
+ * @param {{ trigger: (mediaId: number) => Promise<any> }} [deps]  the tests' stand-in for the queue
+ */
+export const lessonFromRecording = async (recording, durationSeconds, deps = { trigger: triggerPipelineLazily }) => {
+  try {
+    const { rows: [session] } = await pool.query(
+      `SELECT s.id, s.title, s.course_id, s.started_at, u.display_name AS host_name,
+              (SELECT COUNT(*)::int FROM session_recordings r
+                WHERE r.session_id = s.id AND r.status = 'finished') AS finished,
+              (SELECT COUNT(*)::int FROM session_recordings r
+                WHERE r.session_id = s.id AND r.status = 'finished' AND r.id <= $2) AS part
+         FROM live_sessions s JOIN users u ON u.id = s.host_id
+        WHERE s.id = $1`,
+      [recording.session_id, recording.id]
+    );
+    if (!session) return null;
+
+    const media = await createMedia({
+      uploaderId: recording.host_id,
+      title: lessonTitle(session.title, session.part, Math.max(session.finished, session.part)),
+      description: `הקלטה של המפגש "${String(session.title ?? "").trim()}" מתאריך ${dateInIsrael(session.started_at ?? recording.started_at)}.`,
+      mediaType: "audio",
+      s3Key: recording.s3_key,
+      durationSeconds: durationSeconds ?? null,
+      courseId: session.course_id ?? null,
+      lecturerId: recording.host_id,
+      creatorName: session.host_name,
+    });
+
+    // The session, the link back from the recording, and the chat copied on —
+    // the chat as it stands now, never a reference to rows that may go.
+    await pool.query(
+      `WITH linked AS (
+         UPDATE media_items SET session_id = $2 WHERE id = $1
+       ), rec AS (
+         UPDATE session_recordings SET media_id = $1 WHERE id = $3
+       )
+       INSERT INTO media_session_chat (media_id, messages)
+       SELECT $1, COALESCE(jsonb_agg(jsonb_build_object(
+                'name', c.display_name, 'text', c.body, 'at', c.sent_at,
+                -- Where in the recording it was written, so the lesson page
+                -- can play the moment a message was about.
+                'offset', GREATEST(0, FLOOR(EXTRACT(EPOCH FROM c.sent_at - r.started_at)))::int
+              ) ORDER BY c.id), '[]'::jsonb)
+         FROM session_recording_chat c
+         JOIN session_recordings r ON r.id = c.recording_id
+        WHERE c.recording_id = $3
+       ON CONFLICT (media_id) DO NOTHING`,
+      [media.id, session.id, recording.id]
+    );
+    logger.info(`[BE:svc] recording=${recording.id} ✓ lesson media=${media.id} (draft)`);
+
+    // Transcription and summary. Its own failure (Redis down, the monthly AI
+    // cap reached) leaves the lesson without a transcript and the host can
+    // press "תמלל" on it later — the lesson itself stands.
+    try {
+      await deps.trigger(media.id);
+    } catch (err) {
+      logger.warn(`[BE:svc] recording lesson media=${media.id} not queued for processing — ${err.message}`);
+    }
+    return media.id;
+  } catch (err) {
+    logger.error(`[BE:svc] recording=${recording.id} saved, but no lesson was made — ${err.message}`);
+    return null;
+  }
+};
+
+// Long enough for a source reference or a question — the same ceiling the
+// socket already puts on a chat message.
+const CHAT_BODY_MAX = 2000;
+
+/**
+ * Keep one chat line for the lesson's appendix. The socket has already
+ * established that the room is being recorded and that the writer's voice is
+ * in it. Never throws: a chat message must reach the room whether or not it
+ * could be kept.
+ * @param {number} recordingId
+ * @param {{ id: number, displayName?: string|null }} user
+ * @param {string} text
+ */
+export const saveChatMessage = async (recordingId, user, text) => {
+  try {
+    await pool.query(
+      `INSERT INTO session_recording_chat (recording_id, user_id, display_name, body)
+       VALUES ($1, $2, $3, $4)`,
+      [recordingId, user.id, user.displayName ?? null, String(text).slice(0, CHAT_BODY_MAX)]
+    );
+  } catch (err) {
+    logger.warn(`[BE:svc] recording=${recordingId} chat line not kept — ${err.message}`);
+  }
+};
+
+/**
+ * A lesson's chat appendix: [{ name, text, at, offset }], or [] when it has none.
+ * Visibility is the caller's to check first — the lesson's own rule.
+ * @param {number|string} mediaId
+ */
+export const getLessonChat = async (mediaId) => {
+  const { rows } = await pool.query("SELECT messages FROM media_session_chat WHERE media_id=$1", [mediaId]);
+  return rows[0]?.messages ?? [];
 };
 
 /**
@@ -298,11 +453,12 @@ const closeRecording = async (recording) => {
  * @param {number|string} sessionId
  * @param {number|string} recordingId
  * @param {number} hostId
+ * @param {{ trigger: (mediaId: number) => Promise<any> }} [lessonDeps]  the smoke check's stand-in for the queue
  */
-export const finishRecording = async (sessionId, recordingId, hostId) => {
+export const finishRecording = async (sessionId, recordingId, hostId, lessonDeps = undefined) => {
   const recording = await recordingOfHost(recordingId, sessionId, hostId);
   if (recording.status !== "recording") return recording;
-  return closeRecording(recording);
+  return closeRecording(recording, lessonDeps);
 };
 
 /**

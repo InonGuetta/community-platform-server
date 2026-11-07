@@ -27,7 +27,7 @@ import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/serv
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
-import { startRecording, savePart, finishRecording, recordConsent, consentsFor, openRecordingInRoom, PARTS_DIR } from "../services/servicesSessionRecordings.js";
+import { startRecording, savePart, finishRecording, recordConsent, consentsFor, openRecordingInRoom, saveChatMessage, getLessonChat, PARTS_DIR } from "../services/servicesSessionRecordings.js";
 import { LOCAL_UPLOAD_DIR as SMOKE_UPLOAD_DIR } from "../lib/storage.js";
 import fsSmoke from "fs/promises";
 import pathSmoke from "path";
@@ -1105,7 +1105,12 @@ const checks = [
     // and changed (the ON CONFLICT upsert), the room lookup, and the finish
     // whose CTE also writes live_sessions.recording_s3_key. On one client in a
     // transaction that is always rolled back; the files it wrote are removed.
-    name: "recording a live session (migration 048)",
+    //
+    // REC-2/REC-3 (migration 049) on the same run: the finish makes a draft
+    // lesson and copies the chat onto it (jsonb_agg, the offset arithmetic).
+    // The queue is replaced — a job for a lesson that is rolled back would
+    // wait in Redis for a row that never existed.
+    name: "recording a live session, and the lesson it becomes (migrations 048, 049)",
     run: async () => {
       const client = await pool.connect();
       const original = { query: pool.query, connect: pool.connect };
@@ -1139,14 +1144,25 @@ const checks = [
           const answers = await consentsFor(recordingId);
           if (answers.get(Number(guest.id)) !== false) throw new Error("a changed answer did not replace the first");
         }
-        const done = await finishRecording(session.id, recordingId, host.id);
+        await saveChatMessage(recordingId, { id: host.id, displayName: "smoke" }, "שורה בצ'אט");
+        let queued = null;
+        const done = await finishRecording(session.id, recordingId, host.id, { trigger: async (id) => { queued = id; } });
         storedKey = done.s3_key;
         if (done.status !== "finished" || done.parts !== 2 || Number(done.bytes) !== 14) {
           throw new Error(`finished as ${done.status} with ${done.parts} part(s), ${done.bytes} bytes`);
         }
         const { rows: [after] } = await client.query("SELECT recording_s3_key FROM live_sessions WHERE id=$1", [session.id]);
         if (after.recording_s3_key !== done.s3_key) throw new Error("the session does not point at its recording");
-        return `2 parts joined to ${done.s3_key.startsWith("local/") ? "local disk" : "S3"}, consent upserted, session updated (rolled back)`;
+        if (!done.media_id || queued !== done.media_id) throw new Error("the recording did not become a lesson queued for processing");
+        const { rows: [lesson] } = await client.query("SELECT media_type, is_published, session_id FROM media_items WHERE id=$1", [done.media_id]);
+        if (lesson.media_type !== "audio" || lesson.is_published || lesson.session_id !== session.id) {
+          throw new Error(`the lesson is ${JSON.stringify(lesson)}`);
+        }
+        const chat = await getLessonChat(done.media_id);
+        if (chat.length !== 1 || chat[0].text !== "שורה בצ'אט" || typeof chat[0].offset !== "number") {
+          throw new Error(`the appendix is ${JSON.stringify(chat)}`);
+        }
+        return `2 parts joined to ${done.s3_key.startsWith("local/") ? "local disk" : "S3"}, consent upserted, session updated, draft lesson ${done.media_id} with its chat (rolled back)`;
       } finally {
         pool.query = original.query;
         pool.connect = original.connect;

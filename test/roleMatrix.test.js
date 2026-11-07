@@ -82,6 +82,7 @@ const MATRIX = {
   "get /api/media/creators": ANY,
   "get /api/media/continue-watching": ANY,
   "get /api/media/:id": ANY,
+  "get /api/media/:id/session-chat": ANY,
   "get /api/media/:id/stream": ANY,
   // A lecturer's page (PRD ATTR-10): counted over what the caller may see.
   "get /api/media/creators/:name": ANY,

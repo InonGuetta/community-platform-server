@@ -1,5 +1,6 @@
 // @ts-check
 import * as servicesMedia from "../services/servicesMedia.js";
+import { getLessonChat } from "../services/servicesSessionRecordings.js";
 import { notifyNewLesson } from "../services/servicesNotifications.js";
 import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
@@ -193,6 +194,15 @@ export const getMediaById = async (req, res) => {
   const item = await servicesMedia.getMediaById(req.params.id);
   if (await refuseIfHidden(req, res, item)) return;
   res.status(200).json(publicMedia(item));
+};
+
+// The chat of the session a lesson was recorded in (PRD REC-3), for whoever
+// may see the lesson — the same rule as the lesson itself. [] for a lesson
+// that was not recorded in a session, or whose session had no chat.
+export const getSessionChat = async (req, res) => {
+  const item = await servicesMedia.getMediaById(req.params.id);
+  if (await refuseIfHidden(req, res, item)) return;
+  res.status(200).json(await getLessonChat(item.id));
 };
 
 // The course a lesson is filed in and the lecturer it credits, checked against

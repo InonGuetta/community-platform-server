@@ -83,6 +83,8 @@ router.get("/creators/:name", controllersMedia.getCreatorProfile);
 // "continue-watching" as a malformed id and this route would be unreachable.
 router.get("/continue-watching", controllersMedia.getContinueWatching);
 router.get("/:id", validateIntParam("id"), controllersMedia.getMediaById);
+// A lesson recorded in a live session: that session's chat (PRD REC-3).
+router.get("/:id/session-chat", validateIntParam("id"), controllersMedia.getSessionChat);
 // multer reports a rejected file (wrong type, over the size limit) through its
 // own callback rather than as an AppError, so it needs this wrapper to become a
 // 400 instead of falling through to the generic 500 handler.

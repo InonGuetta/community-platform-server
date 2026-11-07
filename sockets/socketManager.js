@@ -2,7 +2,7 @@
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { getSessionByRoomToken, endSessionByRoomToken } from "../services/servicesSessions.js";
-import { openRecordingInRoom, recordConsent, finishOpenRecordings, consentsFor } from "../services/servicesSessionRecordings.js";
+import { openRecordingInRoom, recordConsent, finishOpenRecordings, consentsFor, saveChatMessage } from "../services/servicesSessionRecordings.js";
 import { getActiveUserById, tokenPredatesPasswordChange } from "../services/servicesAuth.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
@@ -457,7 +457,7 @@ export const initSockets = (httpServer) => {
     // reconnect is not silent about that — it replays what the server holds,
     // which for now is nothing.
     const allowChat = createChatBucket();
-    onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, ({ text }) => {
+    onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, async ({ text }) => {
       const [room] = sessionRoomsOf(socket);
       if (!room) {
         logger.debug(`[socket] chat from ${socket.id} ignored: not in a room`);
@@ -487,6 +487,14 @@ export const initSockets = (httpServer) => {
       // participant renders the same list in the same order — the server's — and
       // nobody has to reconcile an optimistic local copy against it.
       io.to(room).emit(SOCKET_EVENTS.CHAT_MESSAGE, message);
+
+      // The one case a chat line is kept (PRD REC-3, migration 049): the room
+      // is being recorded and the writer's voice is in the recording — the
+      // host, or someone who said yes. It becomes the lesson's appendix.
+      const recording = recordingRooms.get(room);
+      if (recording && (socket.id === recording.hostSocketId || recording.answers.get(socket.id)?.consented)) {
+        await saveChatMessage(recording.recordingId, socket.user, body);
+      }
     });
 
     // Signaling is relayed to one specific peer (`to`) and stamped with the
