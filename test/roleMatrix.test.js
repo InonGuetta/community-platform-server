@@ -153,6 +153,9 @@ const MATRIX = {
   "post /api/sessions/create": LECTURER,
   "post /api/sessions/:id/start": LECTURER,
   "delete /api/sessions/:id/end": LECTURER,
+  "post /api/sessions/:id/recordings": LECTURER,
+  "put /api/sessions/:id/recordings/:recordingId/parts/:part": LECTURER,
+  "post /api/sessions/:id/recordings/:recordingId/finish": LECTURER,
 
   // ── Personal ── private to the caller, whatever their role
   "get /api/discussion/archive/conversation": ANY,

@@ -7,6 +7,7 @@ import { optionalId } from "../lib/validate.js";
 import { assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
 import { closeSessionRoom } from "../sockets/socketManager.js";
+import * as servicesSessionRecordings from "../services/servicesSessionRecordings.js";
 
 // Mirrors the session_type enum from migration 003. Without this check an
 // unknown value reaches Postgres as "invalid input value for enum" and surfaces
@@ -151,5 +152,35 @@ export const getSessionCalendar = async (req, res) => {
 export const endSession = async (req, res) => {
   const session = await servicesSessions.endSession(req.params.id, req.user.id);
   closeSessionRoom(session.room_token);
+  // A recording still open is joined from what reached the server (PRD REC-1).
+  // Never throws, so the session is ended whatever happens to it.
+  await servicesSessionRecordings.finishOpenRecordings(session.id);
   res.status(200).json(publicSession(session));
+};
+
+// ── Recording (PRD REC-1) ───────────────────────────────────────────────────
+// The host's browser records and sends parts; see servicesSessionRecordings.js.
+// The host-only rule is in the service (the session's host_id), behind canHost.
+
+export const startRecording = async (req, res) => {
+  const recording = await servicesSessionRecordings.startRecording(req.params.id, req.user.id, req.body?.mimeType);
+  res.status(201).json(recording);
+};
+
+// The body is the part itself (application/octet-stream, express.raw).
+export const uploadRecordingPart = async (req, res) => {
+  await servicesSessionRecordings.savePart({
+    sessionId: req.params.id,
+    recordingId: req.params.recordingId,
+    hostId: req.user.id,
+    // Digits only — "1e3" or "0x10" is not a part number.
+    partNumber: /^\d{1,5}$/.test(req.params.part) ? Number(req.params.part) : NaN,
+    body: req.body,
+  });
+  res.status(204).end();
+};
+
+export const finishRecording = async (req, res) => {
+  const recording = await servicesSessionRecordings.finishRecording(req.params.id, req.params.recordingId, req.user.id);
+  res.status(200).json(recording);
 };

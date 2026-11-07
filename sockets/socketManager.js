@@ -2,6 +2,7 @@
 import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
 import { getSessionByRoomToken, endSessionByRoomToken } from "../services/servicesSessions.js";
+import { openRecordingInRoom, recordConsent, finishOpenRecordings, consentsFor } from "../services/servicesSessionRecordings.js";
 import { getActiveUserById, tokenPredatesPasswordChange } from "../services/servicesAuth.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
@@ -182,11 +183,67 @@ export const createChatBucket = ({ burst = CHAT_BURST, refillMs = CHAT_REFILL_MS
   };
 };
 
+// ── Recording consent (PRD REC-1) ───────────────────────────────────────────
+//
+// Which rooms are being recorded, and who in each has answered. In memory: it
+// describes sockets, which exist only in this process, and a restart drops
+// every socket with it. What must outlive the process — the recording and the
+// answers — is in the database (migration 048).
+//
+//   roomToken → { recordingId, hostSocketId, answers: Map(socketId → { userId, consented }) }
+//
+// The host's own socket counts as consenting: the host started it.
+const recordingRooms = new Map();
+
+/**
+ * What every socket in the room is told: who is recorded, who declined.
+ * Anyone in neither list has not answered yet — and is not recorded.
+ * Exported for the tests.
+ */
+export const recordingStatePayload = (state) => {
+  if (!state) return { active: false, recordingId: null, hostSocketId: null, consented: [], declined: [] };
+  const consented = [state.hostSocketId];
+  const declined = [];
+  for (const [socketId, answer] of state.answers) {
+    if (socketId === state.hostSocketId) continue;
+    (answer.consented ? consented : declined).push(socketId);
+  }
+  return { active: true, recordingId: state.recordingId, hostSocketId: state.hostSocketId, consented, declined };
+};
+
+const broadcastRecording = (io, room) => {
+  traceOut("room", SOCKET_EVENTS.RECORDING_STATE);
+  io.to(room).emit(SOCKET_EVENTS.RECORDING_STATE, recordingStatePayload(recordingRooms.get(room)));
+};
+
+// A socket leaving a room: its answer goes with it, and if it was the host's,
+// the recording in that browser has stopped — the room is told so.
+const leaveRecording = (io, socket, room) => {
+  const state = recordingRooms.get(room);
+  if (!state) return;
+  if (state.hostSocketId === socket.id) recordingRooms.delete(room);
+  else if (!state.answers.delete(socket.id)) return;
+  broadcastRecording(io, room);
+};
+
+// The answers on record for this recording, applied to the sockets now in the
+// room — each socket by its user. A reconnect is a new socket id for the same
+// person, and their answer stands.
+const seedAnswers = async (io, room, state) => {
+  const known = await consentsFor(state.recordingId);
+  for (const socketId of io.sockets.adapter.rooms.get(room) ?? []) {
+    const user = io.sockets.sockets.get(socketId)?.user;
+    if (socketId === state.hostSocketId || !user || !known.has(user.id)) continue;
+    state.answers.set(socketId, { userId: user.id, consented: known.get(user.id) });
+  }
+};
+
 // Ending a room: tell everyone in it, then take every socket OUT of it. The
 // broadcast alone left the sockets in the room, so a client that ignored
 // SESSION_ENDED could keep chatting and relaying signalling in a session the
 // database says is over.
 const closeRoom = (io, roomToken) => {
+  recordingRooms.delete(roomToken);
   traceOut("room", SOCKET_EVENTS.SESSION_ENDED);
   io.to(roomToken).emit(SOCKET_EVENTS.SESSION_ENDED);
   io.in(roomToken).socketsLeave(roomToken);
@@ -287,6 +344,7 @@ export const initSockets = (httpServer) => {
           return;
         }
         for (const previous of sessionRoomsOf(socket)) {
+          leaveRecording(io, socket, previous);
           socket.leave(previous);
           socket.to(previous).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
         }
@@ -300,6 +358,20 @@ export const initSockets = (httpServer) => {
         }
 
         logger.info(`[socket] ${socket.id} joined session ${session.id} (${occupants} in room)`);
+        // Whether the room is being recorded, told to every newcomer — also
+        // when it is not, which is how a host whose connection dropped learns
+        // the room has forgotten its recording and announces it again.
+        // Someone arriving mid-recording is asked like everyone else, and is
+        // not recorded until they say yes — unless they already answered
+        // before a dropped connection.
+        const recording = recordingRooms.get(roomToken);
+        if (recording) {
+          await seedAnswers(io, roomToken, recording);
+          broadcastRecording(io, roomToken);
+        } else {
+          traceOut(socket.id, SOCKET_EVENTS.RECORDING_STATE);
+          socket.emit(SOCKET_EVENTS.RECORDING_STATE, recordingStatePayload(null));
+        }
         traceOut(`room ${session.id}`, SOCKET_EVENTS.USER_JOINED);
         socket.to(roomToken).emit(SOCKET_EVENTS.USER_JOINED, {
           socketId: socket.id,
@@ -322,8 +394,54 @@ export const initSockets = (httpServer) => {
         return;
       }
       socket.leave(roomToken);
+      leaveRecording(io, socket, roomToken);
       traceOut("room", SOCKET_EVENTS.USER_LEFT);
       socket.to(roomToken).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
+    });
+
+    // ── Recording (PRD REC-1) ───────────────────────────────────────────────
+    // The room always comes from the server's record of this socket's
+    // membership, never from the payload — the rule chat and signalling follow.
+
+    // The host has started a recording over REST and says so. Believed only
+    // if that recording is the open one of THIS room's session and this user
+    // hosts it.
+    onEvent(socket, SOCKET_EVENTS.RECORDING_STARTED, async (/** @type {{ recordingId?: number }} */ { recordingId } = {}) => {
+      const [room] = sessionRoomsOf(socket);
+      if (!room) return;
+      const recording = await openRecordingInRoom(Number(recordingId), room, socket.user.id);
+      if (!recording) {
+        logger.debug(`[socket] recording-started from ${socket.id} refused: not an open recording of its room`);
+        return socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Only the host can record this session" });
+      }
+      const state = { recordingId: recording.id, hostSocketId: socket.id, answers: new Map() };
+      await seedAnswers(io, room, state);
+      recordingRooms.set(room, state);
+      logger.info(`[socket] session ${recording.session_id} is being recorded (recording ${recording.id})`);
+      broadcastRecording(io, room);
+    });
+
+    onEvent(socket, SOCKET_EVENTS.RECORDING_STOPPED, () => {
+      const [room] = sessionRoomsOf(socket);
+      const state = room && recordingRooms.get(room);
+      if (!state || state.hostSocketId !== socket.id) return;
+      recordingRooms.delete(room);
+      broadcastRecording(io, room);
+    });
+
+    // A participant's answer. Only `true` is consent — anything else, absent
+    // or malformed included, is a no. Stored before the room is told, so the
+    // host never mixes in someone whose consent is not on record.
+    onEvent(socket, SOCKET_EVENTS.RECORDING_CONSENT, async (/** @type {{ consent?: boolean }} */ { consent } = {}) => {
+      const [room] = sessionRoomsOf(socket);
+      const state = room && recordingRooms.get(room);
+      if (!state || state.hostSocketId === socket.id) return;
+      const consented = consent === true;
+      await recordConsent(state.recordingId, socket.user.id, consented);
+      // The recording may have stopped while that was being written.
+      if (recordingRooms.get(room) !== state) return;
+      state.answers.set(socket.id, { userId: socket.user.id, consented });
+      broadcastRecording(io, room);
     });
 
     // Chat, broadcast to the room the sender is actually in.
@@ -398,6 +516,8 @@ export const initSockets = (httpServer) => {
         }
         logger.info(`[socket] session ended by user ${socket.user.id}`);
         closeRoom(io, roomToken);
+        // A recording still open is joined from what reached the server.
+        await finishOpenRecordings(ended.id);
       } catch (err) {
         logger.error(`[socket] end-session failed: ${err.message}`);
         socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Could not end the session" });
@@ -409,6 +529,7 @@ export const initSockets = (httpServer) => {
     socket.on(SOCKET_LIFECYCLE.DISCONNECTING, () => {
       socket.rooms.forEach((room) => {
         if (room !== socket.id) {
+          leaveRecording(io, socket, room);
           traceOut("room", SOCKET_EVENTS.USER_LEFT);
           socket.to(room).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
         }

@@ -27,6 +27,10 @@ import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/serv
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
+import { startRecording, savePart, finishRecording, recordConsent, consentsFor, openRecordingInRoom, PARTS_DIR } from "../services/servicesSessionRecordings.js";
+import { LOCAL_UPLOAD_DIR as SMOKE_UPLOAD_DIR } from "../lib/storage.js";
+import fsSmoke from "fs/promises";
+import pathSmoke from "path";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -1092,6 +1096,64 @@ const checks = [
         pool.connect = original.connect;
         await client.query("ROLLBACK").catch(() => {});
         client.release();
+      }
+    },
+  },
+  {
+    // REC-1 (migration 048): a session recorded through the real SQL — the
+    // recording row and its partial unique index, two parts, a consent given
+    // and changed (the ON CONFLICT upsert), the room lookup, and the finish
+    // whose CTE also writes live_sessions.recording_s3_key. On one client in a
+    // transaction that is always rolled back; the files it wrote are removed.
+    name: "recording a live session (migration 048)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      let recordingId = null;
+      let storedKey = null;
+      try {
+        await client.query("BEGIN");
+        const { rows: [host] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND role IN ('lecturer', 'admin') ORDER BY id LIMIT 1"
+        );
+        if (!host) return "skipped — no lecturer or admin to host";
+        const { rows: [guest] } = await client.query("SELECT id FROM users WHERE is_active AND id <> $1 ORDER BY id LIMIT 1", [host.id]);
+        const { rows: [session] } = await client.query(
+          `INSERT INTO live_sessions (host_id, title, session_type, room_token, started_at, is_active)
+           VALUES ($1, '__smoke recording', 'group', 'smoke-' || md5(random()::text), NOW(), TRUE)
+           RETURNING id, room_token`,
+          [host.id]
+        );
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+
+        const recording = await startRecording(session.id, host.id, "audio/webm;codecs=opus");
+        recordingId = recording.id;
+        await savePart({ sessionId: session.id, recordingId, hostId: host.id, partNumber: 0, body: Buffer.from("smoke-a") });
+        await savePart({ sessionId: session.id, recordingId, hostId: host.id, partNumber: 1, body: Buffer.from("smoke-b") });
+        if (!(await openRecordingInRoom(recordingId, session.room_token, host.id))) throw new Error("the room lookup did not find the open recording");
+        if (guest) {
+          await recordConsent(recordingId, guest.id, true);
+          await recordConsent(recordingId, guest.id, false);
+          const answers = await consentsFor(recordingId);
+          if (answers.get(Number(guest.id)) !== false) throw new Error("a changed answer did not replace the first");
+        }
+        const done = await finishRecording(session.id, recordingId, host.id);
+        storedKey = done.s3_key;
+        if (done.status !== "finished" || done.parts !== 2 || Number(done.bytes) !== 14) {
+          throw new Error(`finished as ${done.status} with ${done.parts} part(s), ${done.bytes} bytes`);
+        }
+        const { rows: [after] } = await client.query("SELECT recording_s3_key FROM live_sessions WHERE id=$1", [session.id]);
+        if (after.recording_s3_key !== done.s3_key) throw new Error("the session does not point at its recording");
+        return `2 parts joined to ${done.s3_key.startsWith("local/") ? "local disk" : "S3"}, consent upserted, session updated (rolled back)`;
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+        if (recordingId) await fsSmoke.rm(pathSmoke.join(PARTS_DIR, String(recordingId)), { recursive: true, force: true });
+        if (storedKey?.startsWith("local/")) await fsSmoke.rm(pathSmoke.join(SMOKE_UPLOAD_DIR, storedKey.slice(6)), { force: true });
       }
     },
   },

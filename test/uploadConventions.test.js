@@ -26,7 +26,10 @@ test("LOCAL_UPLOAD_DIR resolves where every consumer expects", () => {
 
 test("every file already on disk still resolves and still gets a real type", (t) => {
   if (!fs.existsSync(LOCAL_UPLOAD_DIR)) return t.skip("no uploads directory in this environment");
-  const files = fs.readdirSync(LOCAL_UPLOAD_DIR).filter((f) => !f.startsWith("."));
+  // Files only: recording-parts/ (migration 048) holds a recording's parts
+  // until it is joined, and is not media.
+  const files = fs.readdirSync(LOCAL_UPLOAD_DIR)
+    .filter((f) => !f.startsWith(".") && fs.statSync(path.join(LOCAL_UPLOAD_DIR, f)).isFile());
   if (files.length === 0) return t.skip("no stored media to check");
 
   for (const filename of files) {

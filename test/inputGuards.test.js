@@ -284,11 +284,16 @@ test("a tag both chosen and excluded is said out loud, not answered with nothing
 
 // ── The recording endpoint is gone, and stays gone ──────────────────────────
 
-test("no route accepts a recording key", () => {
+test("no route accepts a recording key — the only recording routes are the host's three", () => {
   // Asserted against the mounted routers rather than a file, so re-adding the
-  // handler anywhere — under any prefix — fails here. It was removed because
-  // nothing called it while it let any host write an arbitrary bucket key onto
-  // their own session; the column it wrote to is deliberately still in the schema.
+  // handler anywhere — under any prefix — fails here. The old POST
+  // /:id/recording was removed because nothing called it while it let any host
+  // write an arbitrary bucket key onto their own session.
+  //
+  // Recording now exists (PRD REC-1, migration 048), and none of its routes
+  // takes a key: the server names the file itself
+  // (servicesSessionRecordings.js → assemble). Pinned to exactly these three,
+  // so a route that DID take one would have to be added here on purpose.
   const paths = [];
   for (const [prefix, router] of API_ROUTERS) {
     for (const layer of router.stack ?? []) {
@@ -296,10 +301,13 @@ test("no route accepts a recording key", () => {
     }
   }
   assert.ok(paths.length > 40, "the inventory must actually be populated");
-  assert.equal(
-    paths.some((p) => /recording/i.test(p)),
-    false,
-    "recording has no client and no caller — see ARCHITECTURE.md's known-debt list"
+  assert.deepEqual(
+    paths.filter((p) => /recording/i.test(p)).sort(),
+    [
+      "/api/sessions/:id/recordings",
+      "/api/sessions/:id/recordings/:recordingId/finish",
+      "/api/sessions/:id/recordings/:recordingId/parts/:part",
+    ]
   );
 });
 
