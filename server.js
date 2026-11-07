@@ -3,6 +3,7 @@ import "dotenv/config";
 // Must stay directly after dotenv/config and above every other import — see the
 // header of lib/checkEnv.js for why the position is load-bearing.
 import "./lib/checkEnv.js";
+import { initMonitoring, captureError, flushMonitoring } from "./lib/monitoring.js";
 import { createServer } from "http";
 import { createApp } from "./app.js";
 import { pool } from "./db/pool.js";
@@ -11,6 +12,10 @@ import { llmQueue } from "./queue/llmQueue.js";
 import { initSockets } from "./sockets/socketManager.js";
 import { logger } from "./lib/logger.js";
 import { startSessionReminders } from "./lib/sessionReminders.js";
+
+// Before anything can fail: external error reporting (PRD NFR-1), a no-op
+// without SENTRY_DSN.
+initMonitoring("api");
 
 // The application itself lives in app.js, so the tests can exercise the real
 // middleware chain without any of the process lifecycle below.
@@ -55,6 +60,8 @@ const shutdown = async (reason, exitCode) => {
     // admin queue-stats endpoint uses.
     await Promise.all([transcriptionQueue.close(), llmQueue.close()]);
     await pool.end();
+    // Whatever was reported in the last moments goes out before the exit.
+    await flushMonitoring();
     logger.info("Shutdown complete");
   } catch (err) {
     logger.error(`Error during shutdown: ${err.message}`);
@@ -75,9 +82,10 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 // `instanceof Error` rather than `err?.stack || err`: a promise can be rejected
 // with anything — a string, undefined — and the old form printed "undefined" for
 // those, losing the only notice we get.
-process.on("unhandledRejection", (err) =>
-  logger.error("unhandledRejection:", err instanceof Error ? err.stack : err)
-);
+process.on("unhandledRejection", (err) => {
+  logger.error("unhandledRejection:", err instanceof Error ? err.stack : err);
+  captureError(err, { tags: { kind: "unhandledRejection" } });
+});
 
 // After an uncaughtException the process state is undefined, so the correct
 // move is to shut down and let a supervisor start a clean one. That is only an
@@ -88,6 +96,7 @@ process.on("unhandledRejection", (err) =>
 const EXIT_ON_UNCAUGHT = process.env.EXIT_ON_UNCAUGHT === "true";
 process.on("uncaughtException", (err) => {
   logger.error("uncaughtException:", err?.stack || err);
+  captureError(err, { tags: { kind: "uncaughtException" } });
   if (EXIT_ON_UNCAUGHT) shutdown("uncaughtException", 1);
 });
 

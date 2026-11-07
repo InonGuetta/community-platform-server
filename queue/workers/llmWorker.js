@@ -20,6 +20,7 @@ import { notifyProcessingOutcome } from "../../services/servicesNotifications.js
 import { suggestTagsForMedia } from "../../services/transcripts/tagging.js";
 import { generateSuggestedQuestions } from "../../services/transcripts/questions.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
+import { captureError } from "../../lib/monitoring.js";
 
 // This worker now serves two sources that converge on the same job:
 //
@@ -212,6 +213,10 @@ llmQueue.process(async (job) => {
     // The same reason the row now carries, and only for that kind: see
     // notifyProcessingOutcome.
     await notifyProcessingOutcome(mediaId, { ok: false, reason: permanent ? err.message : null });
+    // Reported outside only when it is ours to fix (PRD NFR-1): a permanent
+    // AppError is the file's problem — a scan with no text — and the lecturer
+    // has already been told.
+    if (!permanent) captureError(err, { tags: { kind: "job-failed", queue: "llm" }, extra: { mediaId } });
     throw err;
   }
 });

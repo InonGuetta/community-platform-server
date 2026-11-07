@@ -19,6 +19,7 @@ import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
 import { env } from "../../lib/env.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
+import { captureError } from "../../lib/monitoring.js";
 import { parseSegmentStarts, assumedSegmentStarts } from "./segmentOffsets.js";
 import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
 
@@ -319,6 +320,9 @@ transcriptionQueue.process(async (job) => {
       // Final attempt only, like the row. No reason: what fails here is ffmpeg,
       // Whisper or the network, none of it the lecturer's to fix.
       await notifyProcessingOutcome(mediaId, { ok: false });
+      // Reported outside (PRD NFR-1): ffmpeg, Whisper or the network failed
+      // for good — never the lecturer's to fix, so always ours.
+      captureError(err, { tags: { kind: "job-failed", queue: "transcription" }, extra: { mediaId } });
     }
     throw err;
   } finally {

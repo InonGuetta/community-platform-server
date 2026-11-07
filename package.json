@@ -16,6 +16,7 @@
     "migrate": "node db/migrate.js",
     "seed": "node db/seed.js",
     "migrate:uploads-to-s3": "node db/migrateUploadsToS3.js",
+    "backup:status": "node scripts/backupStatus.js",
     "backfill:embeddings": "node db/backfillEmbeddings.js",
     "backfill:durations": "node db/backfillDurations.js",
     "backfill:pages": "node db/backfillPageNumbers.js",
@@ -29,6 +30,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.0.0",
     "@aws-sdk/lib-storage": "^3.1040.0",
+    "@sentry/node": "^11.11.0",
     "bcryptjs": "^2.4.3",
     "bull": "^4.12.2",
     "cookie-parser": "^1.4.7",

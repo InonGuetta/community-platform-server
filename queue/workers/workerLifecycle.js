@@ -1,4 +1,5 @@
 // @ts-check
+import { initMonitoring, captureError, flushMonitoring } from "../../lib/monitoring.js";
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
 
@@ -65,6 +66,8 @@ const GRACE_MS = Number(process.env.WORKER_SHUTDOWN_GRACE_MS) || 10 * 60 * 1000;
 
 export const installWorkerLifecycle = (name, queue) => {
   let shuttingDown = false;
+  // External error reporting (PRD NFR-1); a no-op without SENTRY_DSN.
+  initMonitoring(`${name}-worker`);
 
   const shutdown = async (reason) => {
     if (shuttingDown) return;
@@ -81,6 +84,7 @@ export const installWorkerLifecycle = (name, queue) => {
       // close() stops taking new jobs and resolves once the active one is done.
       await queue.close();
       await pool.end();
+      await flushMonitoring();
       logger.info(`[WORKER:${name}] shutdown complete`);
     } catch (err) {
       logger.error(`[WORKER:${name}] error during shutdown: ${err.message}`);
@@ -98,7 +102,8 @@ export const installWorkerLifecycle = (name, queue) => {
   // rejected with anything at all — a string, undefined — and the old form
   // printed "undefined" for those, losing the only notice we get. This also
   // narrows the `unknown` the checker hands us, instead of asserting past it.
-  process.on("unhandledRejection", (err) =>
-    logger.error(`[WORKER:${name}] unhandledRejection:`, err instanceof Error ? err.stack : err)
-  );
+  process.on("unhandledRejection", (err) => {
+    logger.error(`[WORKER:${name}] unhandledRejection:`, err instanceof Error ? err.stack : err);
+    captureError(err, { tags: { kind: "unhandledRejection" } });
+  });
 };

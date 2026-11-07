@@ -2,6 +2,8 @@
 import { logger } from "../lib/logger.js";
 import { ERROR_CODES } from "../lib/AppError.js";
 import { env } from "../lib/env.js";
+import { captureError } from "../lib/monitoring.js";
+import { getRequestId } from "../lib/requestContext.js";
 
 // Postgres SQLSTATEs / Node errno codes that indicate the DB connection
 // itself died (idle drop, cold pool, network reset). Surfacing these as
@@ -92,6 +94,14 @@ export const errorHandler = (err, req, res, next) => {
   // lands (?search=…, ?code=… on the OAuth callback), and this line goes to the
   // log at error level where it is kept the longest.
   logger.error(`Unhandled error on ${req.method} ${req.path}:`, err.stack || err);
+  // The one branch that is OUR failure, reported outside (PRD NFR-1). The
+  // AppErrors, the database hiccups and the refused input above are expected
+  // and handled; they would only be noise there. The path, never originalUrl,
+  // for the reason above; the request id finds the full story in our own log.
+  captureError(err, {
+    tags: { kind: "http-500", method: req.method },
+    extra: { path: req.path, requestId: getRequestId() ?? null },
+  });
 
   const body = { message: "Internal server error", code: ERROR_CODES.INTERNAL };
   if (!env.isProduction) body.error = err.message;
