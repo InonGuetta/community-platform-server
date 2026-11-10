@@ -17,8 +17,11 @@ import { MAX_QUERY_CHARS, MAX_QUESTION_CHARS } from "../controllers/controllersD
 // Read as TEXT, like every mirror test here: the client is a separate npm
 // package, and importing it would pull its dependency graph into this suite.
 
+// Paths under the client's src/components. The chat pane is shared — the
+// lesson page's tab and the archive-wide /ask page both render it — so it is in
+// features/, while the search pane belongs to the lesson page alone.
 const clientFile = (path) =>
-  readFile(new URL(`../../community-platform-client/src/components/pages/mediaView/componentsMediaView/AIDiscussion/${path}`, import.meta.url), "utf8");
+  readFile(new URL(`../../community-platform-client/src/components/${path}`, import.meta.url), "utf8");
 
 const constantIn = (source, name) => {
   const match = new RegExp(`const ${name} = (\\d+);`).exec(source);
@@ -26,13 +29,16 @@ const constantIn = (source, name) => {
 };
 
 test("the search box stops where the server's limit is", async () => {
-  const value = constantIn(await clientFile("SmartSearchPane.jsx"), "MAX_QUERY_CHARS");
+  const value = constantIn(
+    await clientFile("pages/mediaView/componentsMediaView/AIDiscussion/SmartSearchPane.jsx"),
+    "MAX_QUERY_CHARS"
+  );
   assert.notEqual(value, null, "the client's MAX_QUERY_CHARS was not found — moved or renamed?");
   assert.equal(value, MAX_QUERY_CHARS);
 });
 
 test("the question box stops where the server's limit is", async () => {
-  const value = constantIn(await clientFile("ChatPane.jsx"), "MAX_QUESTION_CHARS");
+  const value = constantIn(await clientFile("features/ChatPane/ChatPane.jsx"), "MAX_QUESTION_CHARS");
   assert.notEqual(value, null, "the client's MAX_QUESTION_CHARS was not found — moved or renamed?");
   assert.equal(value, MAX_QUESTION_CHARS);
 });
