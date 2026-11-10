@@ -1,9 +1,8 @@
 import "./setup.js";
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
-import { readdir, readFile } from "fs/promises";
 import path from "path";
-import { fileURLToPath } from "url";
+import { serverSourceFiles } from "./sourceFiles.js";
 import { escapeLike } from "../lib/sqlLike.js";
 import { escapeHtml } from "../lib/html.js";
 import { withTimeout } from "../lib/timeout.js";
@@ -11,8 +10,6 @@ import { normalizeEmail } from "../lib/validate.js";
 
 // Small helpers several modules share, and the guard that keeps each of them to
 // one definition, in lib/ — a second copy is how two of them came to disagree.
-
-const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("escapeLike makes % and _ literal, escaping the backslash first", () => {
   assert.equal(escapeLike("100%"), "100\\%");
@@ -64,19 +61,6 @@ test("withTimeout accepts a plain value, as the health check passes the Redis cl
 
 // ── One copy each ───────────────────────────────────────────────────────────
 
-const SOURCE_DIRS = ["controllers", "services", "lib", "middleware", "sockets", "queue", "routes", "db", "scripts", "config"];
-
-const jsFilesUnder = async (dir) => {
-  const entries = await readdir(path.join(ROOT, dir), { withFileTypes: true });
-  const files = [];
-  for (const entry of entries) {
-    const rel = path.join(dir, entry.name);
-    if (entry.isDirectory()) files.push(...(await jsFilesUnder(rel)));
-    else if (entry.name.endsWith(".js")) files.push(rel);
-  }
-  return files;
-};
-
 const HOMES = {
   escapeLike: path.join("lib", "sqlLike.js"),
   escapeHtml: path.join("lib", "html.js"),
@@ -85,16 +69,13 @@ const HOMES = {
 };
 
 test("each shared helper is defined once, in its lib/ module", async () => {
-  const files = (await Promise.all(SOURCE_DIRS.map(jsFilesUnder))).flat();
+  const files = await serverSourceFiles();
   // The walk found the tree, or the assertion below would pass over nothing.
   assert.ok(files.length > 50, `only ${files.length} source files found`);
 
   for (const [name, home] of Object.entries(HOMES)) {
-    const definers = [];
-    for (const file of files) {
-      const source = await readFile(path.join(ROOT, file), "utf8");
-      if (new RegExp(`\\bconst ${name}\\s*=`).test(source)) definers.push(file);
-    }
+    const pattern = new RegExp(`\\bconst ${name}\\s*=`);
+    const definers = files.filter(({ source }) => pattern.test(source)).map(({ file }) => file);
     assert.deepEqual(definers, [home], `${name} is defined in ${definers.join(", ")}`);
   }
 });

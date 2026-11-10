@@ -5,6 +5,7 @@
 // only module that owns the storage shape, and it is what the two workers write
 // through.
 import { pool } from "../../db/pool.js";
+import { withTransaction } from "../../db/transaction.js";
 import { chunkTextByParagraph } from "../../lib/textChunks.js";
 import { canSeeMediaRow } from "../../lib/permissions.js";
 import { logger } from "../../lib/logger.js";
@@ -116,9 +117,7 @@ const INSERT_BATCH = 500;
 // transaction, so the chunks and the timings always describe the same words.
 // Omitted for a document, which has none.
 const writeChunks = async (mediaId, chunks, anchors = null) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  await withTransaction(async (client) => {
     await client.query("DELETE FROM transcript_chunks WHERE media_id=$1", [mediaId]);
 
     for (let offset = 0; offset < chunks.length; offset += INSERT_BATCH) {
@@ -156,14 +155,7 @@ const writeChunks = async (mediaId, chunks, anchors = null) => {
         [mediaId, JSON.stringify(anchors)]
       );
     }
-
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
   return chunks.length;
 };
 

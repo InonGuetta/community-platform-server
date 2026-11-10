@@ -1,5 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { visibleMediaSql } from "../lib/permissions.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 
@@ -97,9 +98,7 @@ export const addSave = async (userId, mediaId) => {
 // here to prevent. Other users' lists are untouched — the subquery is scoped to
 // this user's playlists.
 export const removeSave = async (userId, mediaId) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  await withTransaction(async (client) => {
     await client.query("DELETE FROM saved_items WHERE user_id=$1 AND media_id=$2", [userId, mediaId]);
     await client.query(
       `DELETE FROM playlist_items
@@ -107,13 +106,7 @@ export const removeSave = async (userId, mediaId) => {
          AND playlist_id IN (SELECT id FROM playlists WHERE user_id = $1)`,
       [userId, mediaId]
     );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
   // Deliberately not a 404 when there was nothing to delete: "unsave something I
   // have not saved" has already arrived at the state the caller wanted.
   return { saved: false, mediaId };
@@ -255,41 +248,36 @@ export const getPlaylistWithMedia = async (userId, playlistId, scope = { courses
 // client can say something precise about this one — see ERROR_CODES.
 export const createPlaylist = async (userId, title, mediaId = null) => {
   const cleanedTitle = cleanTitle(title);
-  const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-
-    const result = await client.query(
-      "INSERT INTO playlists (user_id, title) VALUES ($1, $2) RETURNING *",
-      [userId, cleanedTitle]
-    );
-    const playlist = result.rows[0];
-
-    if (mediaId) {
-      // Same pair as addToPlaylist: filing a lecture also saves it, because the
-      // general save is the container every list is a grouping inside.
-      await client.query(
-        "INSERT INTO saved_items (user_id, media_id) VALUES ($1, $2) ON CONFLICT (user_id, media_id) DO NOTHING",
-        [userId, mediaId]
+    return await withTransaction(async (client) => {
+      const result = await client.query(
+        "INSERT INTO playlists (user_id, title) VALUES ($1, $2) RETURNING *",
+        [userId, cleanedTitle]
       );
-      await client.query(
-        "INSERT INTO playlist_items (playlist_id, media_id) VALUES ($1, $2)",
-        [playlist.id, mediaId]
-      );
-    }
+      const playlist = result.rows[0];
 
-    await client.query("COMMIT");
-    // Shaped like the rows getPlaylists returns, so the client can drop it
-    // straight into the same list without a refetch.
-    return { ...playlist, item_count: mediaId ? 1 : 0, contains: Boolean(mediaId) };
+      if (mediaId) {
+        // Same pair as addToPlaylist: filing a lecture also saves it, because the
+        // general save is the container every list is a grouping inside.
+        await client.query(
+          "INSERT INTO saved_items (user_id, media_id) VALUES ($1, $2) ON CONFLICT (user_id, media_id) DO NOTHING",
+          [userId, mediaId]
+        );
+        await client.query(
+          "INSERT INTO playlist_items (playlist_id, media_id) VALUES ($1, $2)",
+          [playlist.id, mediaId]
+        );
+      }
+
+      // Shaped like the rows getPlaylists returns, so the client can drop it
+      // straight into the same list without a refetch.
+      return { ...playlist, item_count: mediaId ? 1 : 0, contains: Boolean(mediaId) };
+    });
   } catch (err) {
-    await client.query("ROLLBACK");
     if (err.code === "23505") {
       throw conflict("A list with that name already exists", ERROR_CODES.PLAYLIST_TITLE_TAKEN);
     }
     throw err;
-  } finally {
-    client.release();
   }
 };
 
@@ -354,9 +342,7 @@ export const deletePlaylist = async (userId, playlistId) => {
 // straight into a list would sit there while the save button showed unsaved —
 // the button would be lying about the only thing it says.
 export const addToPlaylist = async (userId, playlistId, mediaId) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  await withTransaction(async (client) => {
     await assertOwnedPlaylist(client, userId, playlistId);
     await client.query(
       "INSERT INTO saved_items (user_id, media_id) VALUES ($1, $2) ON CONFLICT (user_id, media_id) DO NOTHING",
@@ -366,13 +352,7 @@ export const addToPlaylist = async (userId, playlistId, mediaId) => {
       "INSERT INTO playlist_items (playlist_id, media_id) VALUES ($1, $2) ON CONFLICT (playlist_id, media_id) DO NOTHING",
       [playlistId, mediaId]
     );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
   return { playlistId, mediaId, contains: true };
 };
 

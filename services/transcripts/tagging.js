@@ -21,6 +21,7 @@
 // upload, before any of this exists. The two are different signals and are not
 // merged: that one knows the title, this one has read the lesson.
 import { pool } from "../../db/pool.js";
+import { withTransaction } from "../../db/transaction.js";
 import { meterOpenAI } from "../../lib/openaiClient.js";
 import { logger } from "../../lib/logger.js";
 import { badRequest, ERROR_CODES } from "../../lib/AppError.js";
@@ -200,9 +201,7 @@ export const suggestTagsForMedia = async (mediaId, { interactive = false } = {})
     tags
   );
 
-  const db = await pool.connect();
-  try {
-    await db.query("BEGIN");
+  await withTransaction(async (db) => {
     await db.query("DELETE FROM media_ai_tag_suggestions WHERE media_id = $1", [mediaId]);
     if (choices.length > 0) {
       await db.query(
@@ -211,13 +210,7 @@ export const suggestTagsForMedia = async (mediaId, { interactive = false } = {})
         [mediaId, choices.map((c) => c.id), choices.map((c) => c.reason)]
       );
     }
-    await db.query("COMMIT");
-  } catch (err) {
-    await db.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    db.release();
-  }
+  });
   logger.debug(`[tagging] mediaId=${mediaId} proposed ${choices.length} tag(s)`);
   return getAiTagSuggestions(mediaId);
 };

@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomBytes, createHash } from "crypto";
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { conflict, unauthorized, notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
@@ -437,10 +438,7 @@ export const requestPasswordReset = async (email) => {
 // tokens still work, or sessions ended while the password did not change.
 export const resetPassword = async (token, newPassword) => {
   assertUsablePassword(newPassword);
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
+  const { userId, user } = await withTransaction(async (client) => {
     // FOR UPDATE so two confirms of the same token serialise rather than both
     // seeing it unused. `purpose` keeps a verification link from working here.
     const { rows } = await client.query(
@@ -476,20 +474,15 @@ export const resetPassword = async (token, newPassword) => {
       [userId]
     );
 
-    await client.query("COMMIT");
-    logger.info(`[auth] password reset completed for user ${userId}`);
-    // The row is returned so the caller can open a session without looking the
-    // token up again — it has just been burned, and a second lookup would find
-    // nothing. Signing them straight in is also the point: sending someone back
-    // to the login form to type the password they chose four seconds ago is a
-    // step that exists only because the flow was built in two halves.
-    return { user: updated.rows[0] };
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+    return { userId, user: updated.rows[0] };
+  });
+  logger.info(`[auth] password reset completed for user ${userId}`);
+  // The row is returned so the caller can open a session without looking the
+  // token up again — it has just been burned, and a second lookup would find
+  // nothing. Signing them straight in is also the point: sending someone back
+  // to the login form to type the password they chose four seconds ago is a
+  // step that exists only because the flow was built in two halves.
+  return { user };
 };
 
 // ── The signed-in user changing their own details ───────────────────────────

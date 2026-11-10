@@ -24,6 +24,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 
 const out = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -45,45 +46,38 @@ const setup = async () => {
 
 const teardown = async (runId) => {
   if (!RUN_ID.test(runId ?? "")) throw new Error(`not a run id: ${runId}`);
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  const { media, courses, notices, removed } = await withTransaction(async (client) => {
     const { rows: users } = await client.query(
       "SELECT id FROM users WHERE email LIKE $1",
       [`e2e-%-${runId}@example.test`]
     );
     const ids = users.map((u) => u.id);
-    const { rows: media } = await client.query(
+    const { rows: deletedMedia } = await client.query(
       "DELETE FROM media_items WHERE uploader_id = ANY($1::int[]) RETURNING s3_key",
       [ids]
     );
-    const { rowCount: courses } = await client.query("DELETE FROM courses WHERE lecturer_id = ANY($1::int[])", [ids]);
+    const { rowCount: deletedCourses } = await client.query("DELETE FROM courses WHERE lecturer_id = ANY($1::int[])", [ids]);
     // Notices ABOUT this run's people that went to somebody else — the role
     // request the lecturer's sign-up sends every admin, real ones included. A
     // user's own notifications go with the user; these would otherwise sit in
     // a real admin's bell, naming an account that no longer exists.
-    const { rowCount: notices } = await client.query(
+    const { rowCount: deletedNotices } = await client.query(
       `DELETE FROM notifications
         WHERE payload->>'email' LIKE $1 OR payload->>'userId' = ANY($2::text[])`,
       [`e2e-%-${runId}@example.test`, ids.map(String)]
     );
-    const { rowCount: removed } = await client.query("DELETE FROM users WHERE id = ANY($1::int[])", [ids]);
-    await client.query("COMMIT");
+    const { rowCount: deletedUsers } = await client.query("DELETE FROM users WHERE id = ANY($1::int[])", [ids]);
+    return { media: deletedMedia, courses: deletedCourses, notices: deletedNotices, removed: deletedUsers };
+  });
 
-    // The files after the rows: a file left behind is litter, a row pointing
-    // at a deleted file is a broken lesson.
-    for (const { s3_key: key } of media) {
-      if (typeof key === "string" && key.startsWith("local/")) {
-        await fs.rm(path.join(LOCAL_UPLOAD_DIR, key.slice("local/".length)), { force: true });
-      }
+  // The files after the rows: a file left behind is litter, a row pointing
+  // at a deleted file is a broken lesson.
+  for (const { s3_key: key } of media) {
+    if (typeof key === "string" && key.startsWith("local/")) {
+      await fs.rm(path.join(LOCAL_UPLOAD_DIR, key.slice("local/".length)), { force: true });
     }
-    out({ runId, users: removed, courses, media: media.length, notices });
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
   }
+  out({ runId, users: removed, courses, media: media.length, notices });
 };
 
 const main = async () => {

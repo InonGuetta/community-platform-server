@@ -10,6 +10,7 @@
 //              each result's score is Σ 1/(k + rank_in_each_list). This is the
 //              default; it catches both exact-word and meaning matches.
 import { pool } from "../../db/pool.js";
+import { withTransaction } from "../../db/transaction.js";
 import { visibleMediaSql } from "../../lib/permissions.js";
 import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
@@ -181,21 +182,11 @@ const searchKeyword = async (query, scope) => {
 // naming that setting on an older server is an error, not a no-op.
 const VECTOR_EF_SEARCH = 400;
 
-export const withWideVectorScan = async (run) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+export const withWideVectorScan = (run) =>
+  withTransaction(async (client) => {
     await client.query(`SET LOCAL hnsw.ef_search = ${VECTOR_EF_SEARCH}`);
-    const result = await run(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-};
+    return run(client);
+  });
 
 const searchSemantic = async (query, scope) => {
   const queryVector = toVectorLiteral(await embedQuery(query));

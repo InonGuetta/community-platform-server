@@ -12,6 +12,7 @@
 // about the course and its roster.
 import { randomInt } from "node:crypto";
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { getCourseById } from "./servicesCourses.js";
 
@@ -141,9 +142,7 @@ export const getPendingJoinRequests = async (courseId) => {
  */
 export const decideJoinRequest = async (courseId, requestId, approve, deciderId) => {
   const status = approve ? "approved" : "rejected";
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  return withTransaction(async (client) => {
     const { rows } = await client.query(
       `UPDATE course_join_requests
           SET status = $3, decided_at = NOW(), decided_by = $4
@@ -168,14 +167,8 @@ export const decideJoinRequest = async (courseId, requestId, approve, deciderId)
         [userId, courseId]
       );
     }
-    await client.query("COMMIT");
     return { userId, status };
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 };
 
 // The caller's own requests still waiting, for "הקורסים שלי".
