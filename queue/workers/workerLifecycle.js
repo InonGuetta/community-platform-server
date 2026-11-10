@@ -2,11 +2,12 @@
 import { initMonitoring, captureError, flushMonitoring } from "../../lib/monitoring.js";
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
+import { env } from "../../lib/env.js";
 
 // Host and port only — REDIS_URL can carry a password.
 const redisTarget = () => {
   try {
-    const url = new URL(process.env.REDIS_URL);
+    const url = new URL(env.redisUrl);
     return `${url.hostname}:${url.port || 6379}`;
   } catch {
     return "the configured REDIS_URL";
@@ -62,7 +63,8 @@ export const installQueueErrorLogging = (name, queue) => {
 //
 // Practical consequence: deploy the workers when nothing is running, or expect
 // the supervisor's own kill timeout to cut this short.
-const GRACE_MS = Number(process.env.WORKER_SHUTDOWN_GRACE_MS) || 10 * 60 * 1000;
+// WORKER_SHUTDOWN_GRACE_MS, ten minutes unless set.
+const GRACE_MS = env.workerShutdownGraceMs;
 
 export const installWorkerLifecycle = (name, queue) => {
   let shuttingDown = false;

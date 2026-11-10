@@ -1,7 +1,8 @@
 // @ts-check
 import Bull from "bull";
+import { env } from "../lib/env.js";
 
-if (!process.env.REDIS_URL) throw new Error("Missing REDIS_URL");
+if (!env.redisUrl) throw new Error("Missing REDIS_URL");
 
 // Bull keeps every finished job forever by default, so Redis — an in-memory
 // store — grew without bound for the life of the deployment. A bounded window
@@ -13,10 +14,11 @@ const KEEP_FINISHED = { count: 50 };
 // backstop, not a schedule: a three-hour lecture legitimately spends a long
 // time in ffmpeg and then in a sequence of Whisper calls, so the value is
 // deliberately far above any real run.
-const DEFAULT_JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 4 * 60 * 60 * 1000;
+// JOB_TIMEOUT_MS, four hours unless set.
+const DEFAULT_JOB_TIMEOUT_MS = env.jobTimeoutMs;
 
 export const createQueue = (name, jobOptions = {}) =>
-  new Bull(name, process.env.REDIS_URL, {
+  new Bull(name, env.redisUrl, {
     defaultJobOptions: {
       removeOnComplete: KEEP_FINISHED,
       removeOnFail: KEEP_FINISHED,

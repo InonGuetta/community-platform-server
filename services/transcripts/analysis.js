@@ -7,6 +7,7 @@
 // the batch summaries analysed together (reduce), so no single call exceeds the
 // TPM limit — which is what silently broke multi-hour lectures.
 import { logger } from "../../lib/logger.js";
+import { env } from "../../lib/env.js";
 import { completionText, completionJson } from "../../lib/openaiClient.js";
 import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
 import { meterOpenAI } from "../../lib/openaiClient.js";
@@ -75,8 +76,8 @@ const summarizeBatch = async (text) => {
 // rather than unbounded because these calls share the org's per-minute token
 // budget: three 5,000-word batches in flight is ~22k tokens against a 30k TPM
 // limit, so this stays under it in the normal case and the SDK's Retry-After
-// handling absorbs the rest.
-const MAP_CONCURRENCY = Number(process.env.LLM_MAP_CONCURRENCY) || 3;
+// handling absorbs the rest. LLM_MAP_CONCURRENCY, three unless set.
+const MAP_CONCURRENCY = env.llmMapConcurrency;
 
 // A ceiling on the fold below, purely as a stop against a pathological input
 // that somehow never shrinks. Two levels already cover a 250k-word book.

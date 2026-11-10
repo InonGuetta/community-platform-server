@@ -1,10 +1,11 @@
 // @ts-check
 import pg from "pg";
 import { logger, debugEnabled } from "../lib/logger.js";
+import { env } from "../lib/env.js";
 
 const { Pool } = pg;
 
-if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
+if (!env.databaseUrl) throw new Error("Missing DATABASE_URL");
 
 // ── Zoneless TIMESTAMP columns are UTC ──────────────────────────────────────
 //
@@ -52,10 +53,10 @@ pg.defaults.parseInputDatesAsUTC = true;
 // decision buried in a constructor. To tighten it: download the provider's root
 // certificate, point PGSSLROOTCERT at it (Node's TLS stack reads that), and set
 // DATABASE_SSL_STRICT=true.
-const sslStrict = process.env.DATABASE_SSL_STRICT === "true";
+const sslStrict = env.databaseSslStrict;
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.databaseUrl,
   ssl: { rejectUnauthorized: sslStrict },
   keepAlive: true,
   connectionTimeoutMillis: 10000,

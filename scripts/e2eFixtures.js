@@ -25,6 +25,7 @@ import path from "node:path";
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
 import { withTransaction } from "../db/transaction.js";
+import { env } from "../lib/env.js";
 import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 
 const out = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -81,7 +82,7 @@ const teardown = async (runId) => {
 };
 
 const main = async () => {
-  if (process.env.NODE_ENV === "production") throw new Error("e2e fixtures never run against production");
+  if (env.isProduction) throw new Error("e2e fixtures never run against production");
   const [command, runId] = process.argv.slice(2);
   if (command === "setup") await setup();
   else if (command === "teardown") await teardown(runId);

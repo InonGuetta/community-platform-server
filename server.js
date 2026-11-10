@@ -3,6 +3,7 @@ import "dotenv/config";
 // Must stay directly after dotenv/config and above every other import — see the
 // header of lib/checkEnv.js for why the position is load-bearing.
 import "./lib/checkEnv.js";
+import { env } from "./lib/env.js";
 import { initMonitoring, captureError, flushMonitoring } from "./lib/monitoring.js";
 import { createServer } from "http";
 import { createApp } from "./app.js";
@@ -93,7 +94,7 @@ process.on("unhandledRejection", (err) => {
 // stays dead — so it is opt-in: set EXIT_ON_UNCAUGHT=true once the app runs
 // under pm2 / systemd / Docker with a restart backoff. Until then we log and
 // keep running, exactly as before.
-const EXIT_ON_UNCAUGHT = process.env.EXIT_ON_UNCAUGHT === "true";
+const EXIT_ON_UNCAUGHT = env.exitOnUncaught;
 process.on("uncaughtException", (err) => {
   logger.error("uncaughtException:", err?.stack || err);
   captureError(err, { tags: { kind: "uncaughtException" } });
@@ -107,7 +108,7 @@ pool.query("SELECT 1").catch((err) =>
   logger.error("[pg pool] warmup failed:", err.message)
 );
 
-const PORT = process.env.PORT || 3001;
+const PORT = env.port;
 
 // On Windows, `node --watch` can start the new process before the previous
 // one has released the port, so the fresh process hits EADDRINUSE and (being

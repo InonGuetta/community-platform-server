@@ -8,6 +8,7 @@ import { transcriptionQueue } from "../../queue/transcriptionQueue.js";
 import { llmQueue } from "../../queue/llmQueue.js";
 import { isExtractableText } from "../../lib/mediaFormats.js";
 import { logger } from "../../lib/logger.js";
+import { env } from "../../lib/env.js";
 import { withExclusive } from "../../lib/inFlight.js";
 import { withTimeout } from "../../lib/timeout.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
@@ -159,7 +160,8 @@ const stranded = `
 // of work is far more likely to be a mistake (a restored backup, a bad
 // migration) than a genuine backlog. Queue a bounded batch and say what was
 // held back; the next reconnect picks up where this left off.
-const MAX_RECONCILE_PER_RUN = Number(process.env.MAX_RECONCILE_PER_RUN) || 10;
+// MAX_RECONCILE_PER_RUN, ten unless set.
+const MAX_RECONCILE_PER_RUN = env.maxReconcilePerRun;
 
 // getJob/add have no timeout of their own: if Redis disappears mid-sweep they
 // hang indefinitely instead of rejecting, which would strand the exclusive lock
