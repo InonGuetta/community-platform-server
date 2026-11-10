@@ -3,6 +3,7 @@ import * as servicesAuth from "../services/servicesAuth.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "../lib/mailer.js";
 import { notifyAdmins, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { badRequest } from "../lib/AppError.js";
+import { normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -95,7 +96,7 @@ export const forgotPassword = async (req, res) => {
   if (!email || typeof email !== "string") throw badRequest("Email is required");
 
   const token = await servicesAuth.requestPasswordReset(email);
-  if (token) sendPasswordResetEmail(email.trim().toLowerCase(), token).catch(() => {});
+  if (token) sendPasswordResetEmail(normalizeEmail(email), token).catch(() => {});
 
   res.status(200).json({
     message: "If that address has an account, a reset link is on its way",

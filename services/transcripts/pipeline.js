@@ -9,6 +9,7 @@ import { llmQueue } from "../../queue/llmQueue.js";
 import { isExtractableText } from "../../lib/mediaFormats.js";
 import { logger } from "../../lib/logger.js";
 import { withExclusive } from "../../lib/inFlight.js";
+import { withTimeout } from "../../lib/timeout.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
 import { assertWithinAiBudget } from "../servicesAiUsage.js";
 
@@ -164,19 +165,11 @@ const MAX_RECONCILE_PER_RUN = Number(process.env.MAX_RECONCILE_PER_RUN) || 10;
 // hang indefinitely instead of rejecting, which would strand the exclusive lock
 // and silently disable every future reconcile until the worker restarts — in a
 // feature whose whole point is surviving exactly that. Bound the wait so a queue
-// that dies underneath us costs one skipped item, not all of them. The abandoned
-// call is still observed by the race, so its late rejection is never unhandled.
+// that dies underneath us costs one skipped item, not all of them.
 const TRIGGER_TIMEOUT_MS = 10_000;
 
-const triggerWithTimeout = (mediaId) => {
-  let timer;
-  return Promise.race([
-    triggerPipeline(mediaId),
-    new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("queue did not respond in time")), TRIGGER_TIMEOUT_MS);
-    }),
-  ]).finally(() => clearTimeout(timer));
-};
+const triggerWithTimeout = (mediaId) =>
+  withTimeout(triggerPipeline(mediaId), TRIGGER_TIMEOUT_MS, "queue did not respond in time");
 
 export const reconcileMissingTranscripts = () =>
   withExclusive(

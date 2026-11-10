@@ -2,6 +2,7 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
 import { pool } from "./pool.js";
+import { normalizeEmail } from "../lib/validate.js";
 
 // Creates the first admin so a fresh install has someone who can sign in.
 //
@@ -14,7 +15,7 @@ import { pool } from "./pool.js";
 // Consequently there is no recovery path here for a locked-out admin, which is
 // the intended trade: that should be a deliberate, manual act, not a side
 // effect of running a script twice.
-const ADMIN_EMAIL = (process.env.SEED_ADMIN_EMAIL || "admin@community.local").trim().toLowerCase();
+const ADMIN_EMAIL = normalizeEmail(process.env.SEED_ADMIN_EMAIL || "admin@community.local");
 const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD;
 const ADMIN_NAME = process.env.SEED_ADMIN_NAME || "Admin";
 

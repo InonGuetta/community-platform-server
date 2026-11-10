@@ -2,6 +2,7 @@
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { visibleMediaSql } from "../lib/permissions.js";
+import { escapeLike } from "../lib/sqlLike.js";
 
 // Notes are joined to media so the client can show which lecture a note came
 // from (title) without a second round-trip. media_title is null for free notes.
@@ -62,10 +63,6 @@ const LIGHT_SELECT = `
   FROM notes n
   LEFT JOIN media_items m ON m.id = n.media_id
 `;
-
-// What a LIKE needs escaped so the user's text is matched literally — the same
-// rule as the archive search (servicesMedia.escapeLike).
-const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
 
 /**
  * The notebook's list: every note, light. With `search`, only the notes whose

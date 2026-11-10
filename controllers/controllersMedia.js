@@ -16,6 +16,7 @@ import ffmpeg from "fluent-ffmpeg";
 import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType, isViewableText } from "../lib/mediaFormats.js";
 import { decodeTextBuffer } from "../lib/textEncoding.js";
+import { escapeHtml } from "../lib/html.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
@@ -1067,9 +1068,6 @@ export const streamPublicMedia = async (req, res, next) => {
 // tags naming the lesson, then an immediate redirect to the guest page in the
 // app. For a lesson that is not public it names nothing — a generic card — and
 // redirects all the same, so the link reveals no title it should not.
-const escapeHtml = (value) =>
-  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
 const excerpt = (text, max = 200) => {
   const clean = String(text ?? "").replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;

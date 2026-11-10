@@ -3,6 +3,7 @@ import { pool } from "../db/pool.js";
 import { visibleMediaSql } from "../lib/permissions.js";
 import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { DEFAULT_MEDIA_SORT } from "../lib/validate.js";
+import { escapeLike } from "../lib/sqlLike.js";
 
 // ── Attribution ─────────────────────────────────────────────────────────────
 //
@@ -91,16 +92,6 @@ const MEDIA_JOINS = `
   LEFT JOIN users u ON m.uploader_id = u.id
   LEFT JOIN users l ON m.lecturer_id = l.id
   LEFT JOIN courses c ON m.course_id = c.id`;
-
-// What the user typed is a phrase to find, not a pattern to match with.
-//
-// The value is a bound parameter, so this was never an injection — but ILIKE
-// reads % and _ as wildcards wherever they appear, and they appear in real
-// titles. A search for "100%" matched every title starting "100", and one for
-// "פרק_ב" matched "פרקאב". Backslash is Postgres' default LIKE escape, and it
-// has to escape itself first or a title containing one would consume the
-// character after it.
-const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
 
 // The zone the platform's days are measured in. See the date filter below.
 const DISPLAY_TIMEZONE = "Asia/Jerusalem";

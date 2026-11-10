@@ -1,6 +1,7 @@
 // @ts-check
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { escapeLike } from "../lib/sqlLike.js";
 
 const TITLE_MAX = 255; // matches VARCHAR(255)
 
@@ -237,11 +238,6 @@ const MIN_SEARCH_LENGTH = 2;
 // And a ceiling, so a two-character query that matches half the membership still
 // cannot be used to enumerate it.
 const SEARCH_LIMIT = 20;
-
-// Backslash is Postgres' default LIKE escape and has to escape itself first.
-// Same treatment, and the same reason, as escapeLike in servicesMedia: % and _
-// are wildcards to ILIKE and ordinary characters in a real name.
-const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
 
 /**
  * People this lecturer could add to this course.

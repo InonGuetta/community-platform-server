@@ -2,12 +2,7 @@
 import { pool } from "../db/pool.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
 import { llmQueue } from "../queue/llmQueue.js";
-
-const withTimeout = (promise, ms) =>
-  Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
-  ]);
+import { withTimeout } from "../lib/timeout.js";
 
 export const getStats = async () => {
   const [users, media, donations] = await Promise.all([

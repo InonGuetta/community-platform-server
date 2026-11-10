@@ -2,11 +2,10 @@
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
-import { assertUsableEmail } from "../lib/validate.js";
+import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
-const normalizeEmail = (email) => email.trim().toLowerCase();
 
 export const getAllUsers = async () => {
   // Admins manage every account here, including inactive ones — otherwise a

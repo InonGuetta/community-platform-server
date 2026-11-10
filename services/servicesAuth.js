@@ -4,13 +4,11 @@ import jwt from "jsonwebtoken";
 import { randomBytes, createHash } from "crypto";
 import { pool } from "../db/pool.js";
 import { conflict, unauthorized, notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
-import { assertUsableEmail } from "../lib/validate.js";
+import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 
 const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8.U8nJ.JtbCmHkY2Z9Y6XYC8N7yL3a";
-
-const normalizeEmail = (email) => email.trim().toLowerCase();
 
 // The floor a chosen password has to clear. Deliberately a length and nothing
 // else: composition rules ("one capital, one symbol") push people towards

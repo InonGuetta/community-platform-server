@@ -10,6 +10,7 @@ import { pool } from "../../db/pool.js";
 import { llmQueue } from "../../queue/llmQueue.js";
 import { logger } from "../../lib/logger.js";
 import { AppError, notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
+import { withTimeout } from "../../lib/timeout.js";
 import { assertWithinAiBudget } from "../servicesAiUsage.js";
 import { fixHebrewTranscript } from "./hebrew.js";
 import { generateKeyPointHeadings } from "./headings.js";
@@ -65,12 +66,6 @@ export const AI_ACTION_STALE_MINUTES = 30;
 // seconds is far longer than a healthy add takes.
 const QUEUE_ADD_TIMEOUT_MS = 5000;
 
-const withTimeout = (promise, ms) =>
-  Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`queue add timed out after ${ms}ms`)), ms).unref?.()),
-  ]);
-
 /**
  * Claim an action and put it on the LLM queue. Returns the transcript row as
  * it now stands — status 'queued' — for the page to start polling from.
@@ -110,7 +105,8 @@ export const requestAiAction = async (mediaId, name) => {
     // user sees the failure and decides.
     await withTimeout(
       llmQueue.add(action.jobName, { mediaId }, { attempts: 1 }),
-      QUEUE_ADD_TIMEOUT_MS
+      QUEUE_ADD_TIMEOUT_MS,
+      `queue add timed out after ${QUEUE_ADD_TIMEOUT_MS}ms`
     );
   } catch (err) {
     // Release the claim, or the button would say "already running" about work
