@@ -6,7 +6,7 @@ import { calendarForSession } from "../lib/ics.js";
 import { optionalId } from "../lib/validate.js";
 import { assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
-import { closeSessionRoom } from "../sockets/socketManager.js";
+import { afterSessionEnded } from "../sockets/socketManager.js";
 import * as servicesSessionRecordings from "../services/servicesSessionRecordings.js";
 
 // Mirrors the session_type enum from migration 003. Without this check an
@@ -149,12 +149,11 @@ export const getSessionCalendar = async (req, res) => {
 // Ending over REST closes the live room too. It used to update the row and tell
 // nobody, so participants stayed connected, talking, in a session the list
 // showed as ended — the socket END_SESSION path was the only one that told them.
+// What follows the row is the same for both doors (afterSessionEnded): the
+// room closed, then a recording still open joined.
 export const endSession = async (req, res) => {
   const session = await servicesSessions.endSession(req.params.id, req.user.id);
-  closeSessionRoom(session.room_token);
-  // A recording still open is joined from what reached the server (PRD REC-1).
-  // Never throws, so the session is ended whatever happens to it.
-  await servicesSessionRecordings.finishOpenRecordings(session.id);
+  await afterSessionEnded(session);
   res.status(200).json(publicSession(session));
 };
 

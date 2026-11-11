@@ -251,13 +251,32 @@ const closeRoom = (io, roomToken) => {
 
 // The live server, for the one caller outside this file that needs it: the
 // REST "end session" route, which used to update the row and tell nobody in the
-// room. Set by initSockets; null in tests and in the worker processes, where
-// there are no sockets to close.
+// room. Set by initSockets; null in the worker processes, where there are no
+// sockets to close.
 let liveIo = null;
 
-export const closeSessionRoom = (roomToken) => {
-  if (!liveIo || !roomToken) return;
-  closeRoom(liveIo, roomToken);
+// ── Ending a session: what follows the row, whichever door ended it ─────────
+//
+// Two doors end a session: DELETE /api/sessions/:id/end (controllersSessions)
+// and the host's END_SESSION below. Each ends the row its own way — by id, and
+// idempotently, over REST; by room token over the socket — because in both the
+// UPDATE's WHERE clause is the host check. What follows is the same, and is
+// here, in this order:
+//
+//   1. the room is told SESSION_ENDED and emptied (closeRoom);
+//   2. a recording still open is joined from what reached the server (PRD
+//      REC-1). finishOpenRecordings never throws, so the session is ended
+//      whatever happens to the recording.
+//
+// `io` is the socket handler's own server; the REST route leaves it to the one
+// initSockets stored — null where there is no room to close.
+/**
+ * @param {{ id: number, room_token: string }} session  the ended row
+ * @param {Server | null} [io]
+ */
+export const afterSessionEnded = async (session, io = liveIo) => {
+  if (io && session.room_token) closeRoom(io, session.room_token);
+  await finishOpenRecordings(session.id);
 };
 
 // Returns the io instance so the caller can close it during shutdown —
@@ -523,9 +542,7 @@ export const initSockets = (httpServer) => {
           return socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Only the host can end the session" });
         }
         logger.info(`[socket] session ended by user ${socket.user.id}`);
-        closeRoom(io, roomToken);
-        // A recording still open is joined from what reached the server.
-        await finishOpenRecordings(ended.id);
+        await afterSessionEnded(ended, io);
       } catch (err) {
         logger.error(`[socket] end-session failed: ${err.message}`);
         socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Could not end the session" });
