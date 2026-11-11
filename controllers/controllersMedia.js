@@ -92,24 +92,19 @@ export const getAllMedia = async (req, res) => {
   }
 
   const privileged = isPrivileged(req.user);
+  // The access rule, passed to the service whole and applied by it
+  // unconditionally. It used to be expressed as `published: true` for a student —
+  // a filter in the same slot as the caller's own — so the rule and the
+  // preference were one field, and whether a draft was hidden depended on the
+  // controller remembering to set it. They are now separate arguments because
+  // they are separate things.
+  //
   // Resolved ONCE. For a student this costs an enrolment query, so calling it
-  // per field would double it on the busiest read in the application.
+  // per read would double it on the busiest read in the application.
   const scope = await viewerScopeFor(req.user);
 
   const filters = {
     types: parsedTypes,
-    // The access rule, applied by the service unconditionally. It used to be
-    // expressed as `published: true` for a student — a filter in the same slot
-    // as the caller's own — so the rule and the preference were one field, and
-    // whether a draft was hidden depended on the controller remembering to set
-    // it. They are now separate arguments because they are separate things.
-    //
-    // Both halves are passed, and both matter: courses decides which PUBLISHED
-    // lessons, drafts decides WHOSE unpublished ones. Passing only the first
-    // would fail closed on drafts — the safe direction, but silently wrong for
-    // the lecturer whose own work in progress would vanish from their archive.
-    visibleCourses: scope.courses,
-    visibleDrafts: scope.drafts,
     // A narrowing filter the caller chooses. It can only shrink what they were
     // already entitled to, and it is meaningless to anyone who cannot see drafts
     // in the first place — so it is read only for a privileged caller.
@@ -144,8 +139,8 @@ export const getAllMedia = async (req, res) => {
   // count does not change as the reader scrolls, so asking for it again on
   // every page would be paying for an answer the client already holds.
   const [page, total] = await Promise.all([
-    servicesMedia.getMediaPage(filters, { limit: pageSize, offset }),
-    offset === 0 ? servicesMedia.countMedia(filters) : Promise.resolve(undefined),
+    servicesMedia.getMediaPage(scope, filters, { limit: pageSize, offset }),
+    offset === 0 ? servicesMedia.countMedia(scope, filters) : Promise.resolve(undefined),
   ]);
   res.status(200).json({
     items: page.items.map(publicMedia),

@@ -22,8 +22,7 @@ export const getTags = async (req, res) => {
   // The counts are per VIEWER: a student must not be offered "7" beside a branch
   // that answers with three. Same scope object the listing resolves, so the
   // number on a chip and the rows behind it are decided by one rule.
-  const scope = await viewerScopeFor(req.user);
-  res.status(200).json(await getTagTree({ visibleCourses: scope.courses, visibleDrafts: scope.drafts }));
+  res.status(200).json(await getTagTree(await viewerScopeFor(req.user)));
 };
 
 // What this item looks like it is about, offered to whoever may tag it.

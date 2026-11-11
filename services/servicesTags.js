@@ -2,7 +2,7 @@
 import { pool } from "../db/pool.js";
 import { withTransaction } from "../db/transaction.js";
 import { badRequest, conflict, notFound, ERROR_CODES } from "../lib/AppError.js";
-import { visibleMediaSql } from "../lib/permissions.js";
+import { visibleMediaSql, scopeParams } from "../lib/permissions.js";
 
 // Tags — what kind of content an item is.
 //
@@ -216,10 +216,9 @@ export const getTagsInUse = async () => {
  * predicate, from the same place, so the two cannot drift.
  */
 /**
- * @param {{ visibleCourses?: number[]|null, visibleDrafts?: number[]|null }} [scope]
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} [scope]  from viewerScopeFor
  */
-export const getTagTree = async (scope = {}) => {
-  const { visibleCourses, visibleDrafts } = scope;
+export const getTagTree = async (scope) => {
   const { rows } = await pool.query(
     `WITH RECURSIVE descendants AS (
        SELECT id AS root_id, id AS tag_id FROM tags
@@ -245,7 +244,7 @@ export const getTagTree = async (scope = {}) => {
      ORDER BY t.parent_id NULLS FIRST, t.id`,
     // The same fail-closed rule as the listing: an ABSENT scope means nobody's
     // courses and nobody's drafts, never everybody's.
-    [visibleCourses === undefined ? [] : visibleCourses, visibleDrafts === undefined ? [] : visibleDrafts]
+    scopeParams(scope)
   );
   return rows;
 };

@@ -171,8 +171,8 @@ const checks = [
       // array exercises the array branch, which is the one a student gets and
       // the one that casts to int[]. Both, because they are different SQL paths.
       // Both dimensions, as an admin gets them, then as a student in no course.
-      const all = await getAllMedia({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED });
-      const asStudent = await getAllMedia({ visibleCourses: [], visibleDrafts: [] });
+      const all = await getAllMedia({ courses: UNRESTRICTED, drafts: UNRESTRICTED });
+      const asStudent = await getAllMedia({ courses: [], drafts: [] });
       return `${all.length} visible unrestricted, ${asStudent.length} to an unenrolled student`;
     },
   },
@@ -181,10 +181,10 @@ const checks = [
     run: async () => {
       // `= ANY($n::media_type[])` is a cast the planner either accepts or does
       // not, and the suite only ever sees it as a string.
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const all = await getAllMedia(scope);
-      const two = await getAllMedia({ ...scope, types: ["video", "audio"] });
-      const one = await getAllMedia({ ...scope, types: ["video"] });
+      const two = await getAllMedia(scope, { types: ["video", "audio"] });
+      const one = await getAllMedia(scope, { types: ["video"] });
       if (one.length > two.length || two.length > all.length) {
         throw new Error("a wider type filter returned FEWER rows than a narrower one");
       }
@@ -198,10 +198,10 @@ const checks = [
       // can say whether it parses — `like_count` names an output column, which
       // ORDER BY accepts only as a bare name, and a reshuffle that wrapped it in
       // an expression would pass every stubbed test and fail here.
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const counts = [];
       for (const sort of MEDIA_SORTS) {
-        const rows = await getAllMedia({ ...scope, sort });
+        const rows = await getAllMedia(scope, { sort });
         counts.push(rows.length);
       }
       if (new Set(counts).size > 1) {
@@ -218,16 +218,16 @@ const checks = [
     // planner can accept or refuse.
     name: "the archive in pages, in every sort order (getMediaPage, countMedia)",
     run: async () => {
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const size = 5;
       let walked = 0;
       for (const sort of MEDIA_SORTS) {
-        const all = (await getAllMedia({ ...scope, sort })).map((r) => r.id);
-        const total = await countMedia({ ...scope, sort });
+        const all = (await getAllMedia(scope, { sort })).map((r) => r.id);
+        const total = await countMedia(scope, { sort });
         if (total !== all.length) throw new Error(`${sort}: count ${total}, list ${all.length}`);
         const paged = [];
         for (let offset = 0, more = true; more; offset += size) {
-          const page = await getMediaPage({ ...scope, sort }, { limit: size, offset });
+          const page = await getMediaPage(scope, { sort }, { limit: size, offset });
           paged.push(...page.items.map((r) => r.id));
           more = page.hasMore;
           if (paged.length > all.length + size) throw new Error(`${sort}: paging did not stop`);
@@ -244,7 +244,7 @@ const checks = [
       // Real rows, real planner. The ranges are the client's buckets; together
       // they must account for every recording with a known length exactly once,
       // which is what min-inclusive / max-exclusive promises.
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const buckets = [
         { maxDuration: 900 },
         { minDuration: 900, maxDuration: 1800 },
@@ -253,7 +253,7 @@ const checks = [
       ];
       const counts = [];
       for (const range of buckets) {
-        const rows = await getAllMedia({ ...scope, ...range });
+        const rows = await getAllMedia(scope, range);
         if (rows.some((r) => r.media_type === "text" || r.duration_seconds === null)) {
           throw new Error("a length range returned a document or a recording of unknown length");
         }
@@ -284,14 +284,13 @@ const checks = [
         `SELECT id FROM tags WHERE parent_id IS NULL ORDER BY id LIMIT 2`
       );
       const [first, second] = rows.map((r) => r.id);
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
 
-      const chosen = await getAllMedia({ ...scope, tagIds: first ? [first] : [] });
+      const chosen = await getAllMedia(scope, { tagIds: first ? [first] : [] });
       // "Everything except X", with no positive choice — the standalone path.
-      const without = await getAllMedia({ ...scope, excludeTagIds: second ? [second] : [] });
+      const without = await getAllMedia(scope, { excludeTagIds: second ? [second] : [] });
       // And both at once, which is the arrangement the UI actually produces.
-      const both = await getAllMedia({
-        ...scope,
+      const both = await getAllMedia(scope, {
         tagIds: first ? [first] : [],
         excludeTagIds: second ? [second] : [],
       });
@@ -365,7 +364,7 @@ const checks = [
   {
     name: "creator_name on the archive listing (migration 020)",
     run: async () => {
-      const items = await getAllMedia({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED });
+      const items = await getAllMedia({ courses: UNRESTRICTED, drafts: UNRESTRICTED });
       // An empty library is a legitimate state and must not fail the check — but
       // it also proves nothing, so say so rather than reporting a pass.
       if (items.length === 0) return "no media to inspect (column not exercised)";

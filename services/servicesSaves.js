@@ -15,7 +15,7 @@ const TITLE_MAX = 120;
 
 // ── The general save ────────────────────────────────────────────────────────
 
-// Both reads below take the SAME `visibleCourses`, and that is the point.
+// Both reads below take the SAME `scope`, and that is the point.
 //
 // They answer one question — "what has this user saved" — for two different
 // consumers: the page that lists the cards, and the button that lights up on a
@@ -23,7 +23,7 @@ const TITLE_MAX = 120;
 // said נשמר on an item the page refused to show, and nothing the user could do
 // reconciled them.
 //
-// The value is decided once, in the controller, by visibleCoursesFor(req.user) —
+// The value is decided once, in the controller, by viewerScopeFor(req.user) —
 // the same helper that governs what the archive, the media page and the stream
 // hand out. So a student sees the same items in both places, and a lecturer sees
 // their own draft in both, including a lit button on it.

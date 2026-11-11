@@ -35,9 +35,6 @@ export const viewerScopeFor = async (user) => {
   return { courses: await getEnrolledCourseIds(user.id), drafts: [] };
 };
 
-// The courses half, for the handful of callers that only need that one.
-export const visibleCoursesFor = async (user) => (await viewerScopeFor(user)).courses;
-
 // Whether one already-loaded item may be seen, without paying for the enrolment
 // lookup unless the answer actually depends on it.
 //

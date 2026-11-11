@@ -1,6 +1,6 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { visibleMediaSql } from "../lib/permissions.js";
+import { visibleMediaSql, scopeParams } from "../lib/permissions.js";
 import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { DEFAULT_MEDIA_SORT } from "../lib/validate.js";
 import { escapeLike } from "../lib/sqlLike.js";
@@ -133,30 +133,31 @@ export const MEDIA_ORDER = {
 //
 // Returns the clause (starting at WHERE) and its parameters; callers append
 // their own ORDER BY / LIMIT after it.
-const mediaFilterSql = (filters = {}) => {
+//
+// `scope` is the viewer's { courses, drafts } from viewerScopeFor, and it is its
+// own argument rather than one more field among the filters: it is not a filter
+// the caller may or may not supply, it is the condition under which any of these
+// rows may be returned at all.
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null } | undefined} scope
+ * @param {Record<string, any>} [filters]
+ */
+const mediaFilterSql = (scope, filters = {}) => {
   // The visibility rule opens the WHERE clause rather than being one more
-  // optional `if` below, and that is the point: it is not a filter the caller
-  // may or may not supply, it is the condition under which any of these rows may
-  // be returned at all. `WHERE 1=1` with the rule as an optional addition put it
-  // one forgotten argument away from listing the whole library.
+  // optional `if` below, and that is the point. `WHERE 1=1` with the rule as an
+  // optional addition put it one forgotten argument away from listing the whole
+  // library.
+  //
+  // An ABSENT scope fails closed — published lessons in no course, nobody's
+  // drafts — while null, on either half, is "unrestricted". scopeParams
+  // (lib/permissions.js) is where that `=== undefined` distinction is drawn, the
+  // same one updateMedia draws with `"courseId" in body`, and optionalSeconds
+  // with zero: presence is not the same question as value.
+  //
   // Annotated because the elements are of mixed type: without it the array
   // infers from its first element and every push below is an error.
-  //
-  // `=== undefined` and NOT `??`, and the difference is the whole rule. null is a
-  // meaningful value here — it is how "unrestricted" is spelled — so `?? []`
-  // silently rewrote every lecturer and admin into someone enrolled in nothing,
-  // emptying the archive of every course lesson and every draft for exactly the
-  // people who are supposed to see them. Only an ABSENT argument may fail closed.
-  //
-  // The same distinction updateMedia draws with `"courseId" in body`, and
-  // optionalSeconds with zero: presence is not the same question as value.
   /** @type {Array<string|number|boolean|number[]|string[]|null>} */
-  const params = [
-    filters.visibleCourses === undefined ? [] : filters.visibleCourses,
-    // The second dimension, and it fails closed the same way: an absent argument
-    // means nobody's drafts, never everybody's.
-    filters.visibleDrafts === undefined ? [] : filters.visibleDrafts,
-  ];
+  const params = [...scopeParams(scope)];
   let query = `WHERE ${visibleMediaSql("$1", "m", "$2")}`;
 
   // Any of the chosen types. An empty list is no filter, never "no types".
@@ -348,8 +349,12 @@ const mediaFilterSql = (filters = {}) => {
 
 const orderFor = (filters) => MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT];
 
-export const getAllMedia = async (filters = {}) => {
-  const { where, params } = mediaFilterSql(filters);
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} scope  from viewerScopeFor
+ * @param {Record<string, any>} [filters]
+ */
+export const getAllMedia = async (scope, filters = {}) => {
+  const { where, params } = mediaFilterSql(scope, filters);
   const result = await pool.query(
     `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} ${where} ORDER BY ${orderFor(filters)}`,
     params
@@ -377,12 +382,13 @@ export const getAllMedia = async (filters = {}) => {
 // LIMIT one more than asked: the extra row is how "is there a next page" is
 // answered without a second query.
 /**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} scope  from viewerScopeFor
  * @param {Record<string, any>} filters
  * @param {{ limit: number, offset: number }} page
  * @returns {Promise<{ items: any[], hasMore: boolean }>}
  */
-export const getMediaPage = async (filters, { limit, offset }) => {
-  const { where, params } = mediaFilterSql(filters);
+export const getMediaPage = async (scope, filters, { limit, offset }) => {
+  const { where, params } = mediaFilterSql(scope, filters);
   params.push(limit + 1, offset);
   const result = await pool.query(
     `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} ${where}
@@ -397,8 +403,12 @@ export const getMediaPage = async (filters, { limit, offset }) => {
 // WHERE over media_items alone — none of MEDIA_COLUMNS' per-row subqueries and
 // none of its joins, which add nothing to a count — and asked only for the
 // first page, since scrolling does not change the answer.
-export const countMedia = async (filters) => {
-  const { where, params } = mediaFilterSql(filters);
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} scope  from viewerScopeFor
+ * @param {Record<string, any>} filters
+ */
+export const countMedia = async (scope, filters) => {
+  const { where, params } = mediaFilterSql(scope, filters);
   const result = await pool.query(`SELECT COUNT(*)::int AS count FROM media_items m ${where}`, params);
   return result.rows[0]?.count ?? 0;
 };
