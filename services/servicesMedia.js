@@ -123,6 +123,222 @@ export const MEDIA_ORDER = {
   liked: `like_count DESC, ${TIE_BREAK}`,
 };
 
+// ── The archive's filters, one function each ────────────────────────────────
+//
+// Each takes the filters the listing was asked for and `param`, which adds one
+// value to the statement's parameters and answers its placeholder ("$3"), and
+// returns the condition it adds — starting " AND " — or "" when it was not
+// asked for. mediaFilterSql applies them in the order of MEDIA_FILTERS, after
+// the visibility rule, so a new filter is one function and one entry there.
+//
+// Placeholders are numbered in the order param() is called, so a filter calls
+// it once per value, before it writes the value's placeholder anywhere.
+/**
+ * @typedef {(filters: Record<string, any>, param: (value: any) => string) => string} MediaFilter
+ */
+
+// Any of the chosen types. An empty list is no filter, never "no types".
+/** @type {MediaFilter} */
+const typesFilter = ({ types }, param) =>
+  (types?.length ? ` AND m.media_type = ANY(${param(types)}::media_type[])` : "");
+
+/** @type {MediaFilter} */
+const courseFilter = ({ courseId }, param) =>
+  (courseId !== undefined ? ` AND m.course_id=${param(courseId)}` : "");
+
+/** @type {MediaFilter} */
+const publishedFilter = ({ published }, param) =>
+  (published !== undefined ? ` AND m.is_published=${param(published)}` : "");
+
+// The creator is a narrowing filter like the type, not part of the search: it
+// is chosen from a list of exact values, so an exact match is what it means.
+/** @type {MediaFilter} */
+const creatorFilter = ({ creator }, param) =>
+  (creator ? ` AND m.creator_name = ${param(creator)}` : "");
+
+// ── Search ────────────────────────────────────────────────────────────
+//
+// Over the title, the attribution AND the tags. It used to be the title alone,
+// which made typing a tag name into the search box return nothing while the
+// filter beside it found ten items — two controls answering the same question
+// differently, with nothing on screen to explain why.
+//
+// By NAME here, deliberately, and it is not the ambiguity the tag filter
+// avoids: a search is "find me anything that mentions this", so matching both
+// שופטים the parasha and שופטים the book is the right answer. The filter is
+// where the caller says which one they meant.
+/** @type {MediaFilter} */
+const searchFilter = ({ search }, param) => {
+  if (!search) return "";
+  const term = param(`%${escapeLike(search)}%`);
+  return ` AND (
+      m.title ILIKE ${term}
+      OR m.creator_name ILIKE ${term}
+      OR EXISTS (
+        SELECT 1 FROM media_tags mt
+        JOIN tags t ON t.id = mt.tag_id
+        WHERE mt.media_id = m.id AND t.name ILIKE ${term}
+      )
+    )`;
+};
+
+// ── Tags ──────────────────────────────────────────────────────────────
+//
+// By ID, not by name. The taxonomy in migration 025 legitimately repeats five
+// names in different branches — שופטים is both a parasha and a book — so a
+// name filter would silently match both and there is no way for the caller to
+// say which one it meant.
+//
+// Choosing a tag also chooses everything BENEATH it: picking "תורה" finds a
+// shiur tagged "וירא", which is the whole point of a hierarchy.
+//
+// ── OR inside a heading, AND between headings ─────────────────────────
+//
+// Two chosen tags under the SAME top-level heading are alternatives; two under
+// different headings are conditions. "בהר or בחוקותי" and "something in תנ"ך
+// that is also about מוסר" are both ordinary requests, and this is the only
+// arrangement that lets both be asked.
+//
+// It used to be AND across every chosen tag, and that made the commonest
+// request in the archive impossible: choosing two parashot asked for a shiur
+// that is simultaneously on both, of which there are almost none. The user saw
+// an empty archive and concluded the filter was broken — which is exactly what
+// it was.
+//
+// So the unit of AND is the HEADING (the root of the branch a choice sits in),
+// not the choice. Each chosen id is walked UP to the root it belongs to and
+// DOWN into its own subtree; an item satisfies a heading if it carries
+// anything in any subtree chosen under it, and must satisfy every heading
+// named. With one heading chosen this is a plain OR; with one tag it is what
+// it always was.
+/** @type {MediaFilter} */
+const tagsFilter = ({ tagIds }, param) => {
+  if (!(Array.isArray(tagIds) && tagIds.length > 0)) return "";
+  const ids = param(tagIds);
+  // The heading each chosen tag belongs to, and every tag underneath the
+  // choice. Written once as a string because the count below has to be
+  // measured against the same walk — a second, differently-written copy is how
+  // "matched every heading" and "how many headings were named" come to
+  // disagree.
+  const facets = `
+        WITH RECURSIVE up AS (
+          SELECT id AS chosen_id, id AS node_id, parent_id FROM tags WHERE id = ANY(${ids}::int[])
+          UNION ALL
+          SELECT u.chosen_id, t.id, t.parent_id FROM tags t JOIN up u ON t.id = u.parent_id
+        ),
+        heading AS (SELECT chosen_id, node_id AS facet_id FROM up WHERE parent_id IS NULL),
+        down AS (
+          SELECT id AS chosen_id, id AS tag_id FROM tags WHERE id = ANY(${ids}::int[])
+          UNION ALL
+          SELECT d.chosen_id, t.id FROM tags t JOIN down d ON t.parent_id = d.tag_id
+        )`;
+  return ` AND (
+      SELECT COUNT(DISTINCT sub.facet_id)
+      FROM media_tags mt
+      JOIN (${facets}
+        SELECT h.facet_id, d.tag_id FROM down d JOIN heading h ON h.chosen_id = d.chosen_id
+      ) sub ON sub.tag_id = mt.tag_id
+      WHERE mt.media_id = m.id
+    ) = (${facets}
+      SELECT COUNT(DISTINCT facet_id) FROM heading
+    )`;
+};
+
+// ── Tags taken back out ───────────────────────────────────────────────
+//
+// "Everything in תורה except שמות" — a request the filter above cannot express
+// on its own, and the reason it cannot is worth stating so nobody tries the
+// shortcut again. Chosen tags combine with AND, so naming the four books to
+// keep asks for an item that is in בראשית and in שמות at once, and nothing is:
+// the archive comes back empty. Removal has to be its own list.
+//
+// An exclusion removes the whole SUBTREE, exactly as a choice adds one — the
+// hierarchy has to mean the same thing in both directions, or excluding שמות
+// would leave every parasha inside it still showing.
+//
+// NOT EXISTS rather than a count: one excluded tag on the item is enough, and
+// there is nothing to tally. It is also independent of the filter above, which
+// is what lets "everything except X" be asked with no positive choice at all —
+// a legitimate request, and one that would otherwise have no way to be made.
+/** @type {MediaFilter} */
+const excludedTagsFilter = ({ excludeTagIds }, param) => {
+  if (!(Array.isArray(excludeTagIds) && excludeTagIds.length > 0)) return "";
+  return ` AND NOT EXISTS (
+      SELECT 1
+      FROM media_tags mt
+      JOIN (
+        WITH RECURSIVE excluded_descendants AS (
+          SELECT id AS tag_id FROM tags WHERE id = ANY(${param(excludeTagIds)}::int[])
+          UNION ALL
+          SELECT t.id FROM tags t JOIN excluded_descendants e ON t.parent_id = e.tag_id
+        )
+        SELECT tag_id FROM excluded_descendants
+      ) sub ON sub.tag_id = mt.tag_id
+      WHERE mt.media_id = m.id
+    )`;
+};
+
+// ── Upload date ───────────────────────────────────────────────────────
+//
+// Both ends optional and independent, so "everything since March" and
+// "everything before March" are both expressible.
+//
+// Compared as a LOCAL date, not as a UTC one, and that is a correctness fix
+// rather than a nicety. created_at is a TIMESTAMP stored in UTC; Israel is two
+// or three hours ahead. A shiur uploaded at 00:30 on the 6th is stored as
+// 21:30 or 22:30 on the FIFTH, so a plain comparison filed it under the wrong
+// day — and only ever for uploads near midnight, which makes the symptom look
+// random rather than systematic.
+//
+// The zone is named rather than taken from the request: this is a Hebrew,
+// Israel-facing platform, and a filter that quietly changed meaning with the
+// reader's laptop clock would be worse than one that is explicit. It is stated
+// in one constant so a second audience is a one-line change.
+/** @type {MediaFilter} */
+const uploadedAfterFilter = ({ uploadedAfter }, param) =>
+  (uploadedAfter ? ` AND ${localDateSql("m.created_at")} >= ${param(uploadedAfter)}::date` : "");
+
+// Inclusive of the chosen day. Comparing the local DATE rather than the
+// timestamp is what makes that true without the "+ 1 day" arithmetic the
+// previous version needed — and that arithmetic was in UTC too.
+/** @type {MediaFilter} */
+const uploadedBeforeFilter = ({ uploadedBefore }, param) =>
+  (uploadedBefore ? ` AND ${localDateSql("m.created_at")} <= ${param(uploadedBefore)}::date` : "");
+
+// The length of a recording, from duration_seconds (measured at upload — see
+// lib/mediaDuration.js — and backfilled for older rows).
+//
+// Asking for a length at all means asking for something to listen to or
+// watch, so a document — which has no length — is left out, and so is a
+// recording whose length is not known: placing it in a range it might not
+// belong to would be a guess shown as a fact. Min inclusive, max exclusive,
+// so neighbouring ranges meet without overlapping.
+/** @type {MediaFilter} */
+const lengthFilter = ({ minDuration, maxDuration }, param) => {
+  const hasMin = Number.isInteger(minDuration);
+  const hasMax = Number.isInteger(maxDuration);
+  if (!hasMin && !hasMax) return "";
+  return " AND m.media_type <> 'text' AND m.duration_seconds IS NOT NULL"
+    + (hasMin ? ` AND m.duration_seconds >= ${param(minDuration)}` : "")
+    + (hasMax ? ` AND m.duration_seconds < ${param(maxDuration)}` : "");
+};
+
+// The order the conditions are written in, and so the order of their
+// placeholders — test/mediaFilterSql.test.js holds the statement to it.
+/** @type {MediaFilter[]} */
+const MEDIA_FILTERS = [
+  typesFilter,
+  courseFilter,
+  publishedFilter,
+  creatorFilter,
+  searchFilter,
+  tagsFilter,
+  excludedTagsFilter,
+  uploadedAfterFilter,
+  uploadedBeforeFilter,
+  lengthFilter,
+];
+
 // ── The archive's WHERE clause, built once ──────────────────────────────────
 //
 // Three readers share it: the whole list (getAllMedia — the smoke checks and
@@ -144,7 +360,7 @@ export const MEDIA_ORDER = {
  */
 const mediaFilterSql = (scope, filters = {}) => {
   // The visibility rule opens the WHERE clause rather than being one more
-  // optional `if` below, and that is the point. `WHERE 1=1` with the rule as an
+  // filter in the list, and that is the point. `WHERE 1=1` with the rule as an
   // optional addition put it one forgotten argument away from listing the whole
   // library.
   //
@@ -158,193 +374,15 @@ const mediaFilterSql = (scope, filters = {}) => {
   // infers from its first element and every push below is an error.
   /** @type {Array<string|number|boolean|number[]|string[]|null>} */
   const params = [...scopeParams(scope)];
-  let query = `WHERE ${visibleMediaSql("$1", "m", "$2")}`;
-
-  // Any of the chosen types. An empty list is no filter, never "no types".
-  if (filters.types?.length) {
-    params.push(filters.types);
-    query += ` AND m.media_type = ANY($${params.length}::media_type[])`;
-  }
-  if (filters.courseId !== undefined) {
-    params.push(filters.courseId);
-    query += ` AND m.course_id=$${params.length}`;
-  }
-  if (filters.published !== undefined) {
-    params.push(filters.published);
-    query += ` AND m.is_published=$${params.length}`;
-  }
-  // The creator is a narrowing filter like the type, not part of the search: it
-  // is chosen from a list of exact values, so an exact match is what it means.
-  if (filters.creator) {
-    params.push(filters.creator);
-    query += ` AND m.creator_name = $${params.length}`;
-  }
-  // ── Search ────────────────────────────────────────────────────────────
-  //
-  // Over the title, the attribution AND the tags. It used to be the title alone,
-  // which made typing a tag name into the search box return nothing while the
-  // filter beside it found ten items — two controls answering the same question
-  // differently, with nothing on screen to explain why.
-  //
-  // By NAME here, deliberately, and it is not the ambiguity the tag filter
-  // avoids: a search is "find me anything that mentions this", so matching both
-  // שופטים the parasha and שופטים the book is the right answer. The filter is
-  // where the caller says which one they meant.
-  if (filters.search) {
-    params.push(`%${escapeLike(filters.search)}%`);
-    const term = params.length;
-    query += ` AND (
-      m.title ILIKE $${term}
-      OR m.creator_name ILIKE $${term}
-      OR EXISTS (
-        SELECT 1 FROM media_tags mt
-        JOIN tags t ON t.id = mt.tag_id
-        WHERE mt.media_id = m.id AND t.name ILIKE $${term}
-      )
-    )`;
-  }
-  // ── Tags ──────────────────────────────────────────────────────────────
-  //
-  // By ID, not by name. The taxonomy in migration 025 legitimately repeats five
-  // names in different branches — שופטים is both a parasha and a book — so a
-  // name filter would silently match both and there is no way for the caller to
-  // say which one it meant.
-  //
-  // Choosing a tag also chooses everything BENEATH it: picking "תורה" finds a
-  // shiur tagged "וירא", which is the whole point of a hierarchy.
-  //
-  // ── OR inside a heading, AND between headings ─────────────────────────
-  //
-  // Two chosen tags under the SAME top-level heading are alternatives; two under
-  // different headings are conditions. "בהר or בחוקותי" and "something in תנ"ך
-  // that is also about מוסר" are both ordinary requests, and this is the only
-  // arrangement that lets both be asked.
-  //
-  // It used to be AND across every chosen tag, and that made the commonest
-  // request in the archive impossible: choosing two parashot asked for a shiur
-  // that is simultaneously on both, of which there are almost none. The user saw
-  // an empty archive and concluded the filter was broken — which is exactly what
-  // it was.
-  //
-  // So the unit of AND is the HEADING (the root of the branch a choice sits in),
-  // not the choice. Each chosen id is walked UP to the root it belongs to and
-  // DOWN into its own subtree; an item satisfies a heading if it carries
-  // anything in any subtree chosen under it, and must satisfy every heading
-  // named. With one heading chosen this is a plain OR; with one tag it is what
-  // it always was.
-  if (Array.isArray(filters.tagIds) && filters.tagIds.length > 0) {
-    params.push(filters.tagIds);
-    const idsParam = params.length;
-    // The heading each chosen tag belongs to, and every tag underneath the
-    // choice. Written once as a string because the count below has to be
-    // measured against the same walk — a second, differently-written copy is how
-    // "matched every heading" and "how many headings were named" come to
-    // disagree.
-    const facets = `
-        WITH RECURSIVE up AS (
-          SELECT id AS chosen_id, id AS node_id, parent_id FROM tags WHERE id = ANY($${idsParam}::int[])
-          UNION ALL
-          SELECT u.chosen_id, t.id, t.parent_id FROM tags t JOIN up u ON t.id = u.parent_id
-        ),
-        heading AS (SELECT chosen_id, node_id AS facet_id FROM up WHERE parent_id IS NULL),
-        down AS (
-          SELECT id AS chosen_id, id AS tag_id FROM tags WHERE id = ANY($${idsParam}::int[])
-          UNION ALL
-          SELECT d.chosen_id, t.id FROM tags t JOIN down d ON t.parent_id = d.tag_id
-        )`;
-    query += ` AND (
-      SELECT COUNT(DISTINCT sub.facet_id)
-      FROM media_tags mt
-      JOIN (${facets}
-        SELECT h.facet_id, d.tag_id FROM down d JOIN heading h ON h.chosen_id = d.chosen_id
-      ) sub ON sub.tag_id = mt.tag_id
-      WHERE mt.media_id = m.id
-    ) = (${facets}
-      SELECT COUNT(DISTINCT facet_id) FROM heading
-    )`;
-  }
-  // ── Tags taken back out ───────────────────────────────────────────────
-  //
-  // "Everything in תורה except שמות" — a request the filter above cannot express
-  // on its own, and the reason it cannot is worth stating so nobody tries the
-  // shortcut again. Chosen tags combine with AND, so naming the four books to
-  // keep asks for an item that is in בראשית and in שמות at once, and nothing is:
-  // the archive comes back empty. Removal has to be its own list.
-  //
-  // An exclusion removes the whole SUBTREE, exactly as a choice adds one — the
-  // hierarchy has to mean the same thing in both directions, or excluding שמות
-  // would leave every parasha inside it still showing.
-  //
-  // NOT EXISTS rather than a count: one excluded tag on the item is enough, and
-  // there is nothing to tally. It is also independent of the block above, which
-  // is what lets "everything except X" be asked with no positive choice at all —
-  // a legitimate request, and one that would otherwise have no way to be made.
-  if (Array.isArray(filters.excludeTagIds) && filters.excludeTagIds.length > 0) {
-    params.push(filters.excludeTagIds);
-    query += ` AND NOT EXISTS (
-      SELECT 1
-      FROM media_tags mt
-      JOIN (
-        WITH RECURSIVE excluded_descendants AS (
-          SELECT id AS tag_id FROM tags WHERE id = ANY($${params.length}::int[])
-          UNION ALL
-          SELECT t.id FROM tags t JOIN excluded_descendants e ON t.parent_id = e.tag_id
-        )
-        SELECT tag_id FROM excluded_descendants
-      ) sub ON sub.tag_id = mt.tag_id
-      WHERE mt.media_id = m.id
-    )`;
-  }
-  // ── Upload date ───────────────────────────────────────────────────────
-  //
-  // Both ends optional and independent, so "everything since March" and
-  // "everything before March" are both expressible.
-  //
-  // Compared as a LOCAL date, not as a UTC one, and that is a correctness fix
-  // rather than a nicety. created_at is a TIMESTAMP stored in UTC; Israel is two
-  // or three hours ahead. A shiur uploaded at 00:30 on the 6th is stored as
-  // 21:30 or 22:30 on the FIFTH, so a plain comparison filed it under the wrong
-  // day — and only ever for uploads near midnight, which makes the symptom look
-  // random rather than systematic.
-  //
-  // The zone is named rather than taken from the request: this is a Hebrew,
-  // Israel-facing platform, and a filter that quietly changed meaning with the
-  // reader's laptop clock would be worse than one that is explicit. It is stated
-  // in one constant so a second audience is a one-line change.
-  if (filters.uploadedAfter) {
-    params.push(filters.uploadedAfter);
-    query += ` AND ${localDateSql("m.created_at")} >= $${params.length}::date`;
-  }
-  if (filters.uploadedBefore) {
-    params.push(filters.uploadedBefore);
-    // Inclusive of the chosen day. Comparing the local DATE rather than the
-    // timestamp is what makes that true without the "+ 1 day" arithmetic the
-    // previous version needed — and that arithmetic was in UTC too.
-    query += ` AND ${localDateSql("m.created_at")} <= $${params.length}::date`;
-  }
-  // The length of a recording, from duration_seconds (measured at upload — see
-  // lib/mediaDuration.js — and backfilled for older rows).
-  //
-  // Asking for a length at all means asking for something to listen to or
-  // watch, so a document — which has no length — is left out, and so is a
-  // recording whose length is not known: placing it in a range it might not
-  // belong to would be a guess shown as a fact. Min inclusive, max exclusive,
-  // so neighbouring ranges meet without overlapping.
-  const hasMin = Number.isInteger(filters.minDuration);
-  const hasMax = Number.isInteger(filters.maxDuration);
-  if (hasMin || hasMax) {
-    query += " AND m.media_type <> 'text' AND m.duration_seconds IS NOT NULL";
-    if (hasMin) {
-      params.push(filters.minDuration);
-      query += ` AND m.duration_seconds >= $${params.length}`;
-    }
-    if (hasMax) {
-      params.push(filters.maxDuration);
-      query += ` AND m.duration_seconds < $${params.length}`;
-    }
-  }
-
-  return { where: query, params };
+  const param = (value) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  const where = MEDIA_FILTERS.reduce(
+    (sql, filter) => sql + filter(filters, param),
+    `WHERE ${visibleMediaSql("$1", "m", "$2")}`
+  );
+  return { where, params };
 };
 
 const orderFor = (filters) => MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT];
