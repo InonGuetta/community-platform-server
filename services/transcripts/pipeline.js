@@ -13,6 +13,7 @@ import { withExclusive } from "../../lib/inFlight.js";
 import { withTimeout } from "../../lib/timeout.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
 import { assertWithinAiBudget } from "../servicesAiUsage.js";
+import { markPending } from "./status.js";
 
 // A fixed job id per media item, the same in both queues — see the comment in
 // triggerPipeline. Bull ignores an add() whose id already exists, which is what
@@ -111,13 +112,8 @@ export const triggerPipeline = async (mediaId) => {
     if (q === queue) await existing.remove();
   }
 
-  // error_message is cleared alongside the status: a stale "this file is a scan"
-  // must not sit next to a fresh run that is still in progress.
-  await pool.query(
-    `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
-     ON CONFLICT (media_id) DO UPDATE SET status='pending', error_message=NULL, updated_at=NOW()`,
-    [mediaId]
-  );
+  // Also clears the last run's error_message (see markPending).
+  await markPending(mediaId);
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
 
   const job = await queue.add({ mediaId, s3Key }, { jobId });

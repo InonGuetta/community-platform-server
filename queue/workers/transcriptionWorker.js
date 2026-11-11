@@ -6,8 +6,9 @@ import path from "path";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { transcriptionQueue } from "../transcriptionQueue.js";
-import { pool } from "../../db/pool.js";
-import { saveChunks, reconcileMissingTranscripts, queueLlmForMedia } from "../../services/servicesTranscripts.js";
+import {
+  saveChunks, reconcileMissingTranscripts, queueLlmForMedia, markProcessing, markAnalyzing, markFailed,
+} from "../../services/servicesTranscripts.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { setDurationIfMissing } from "../../services/servicesMedia.js";
 import { probeDurationSeconds } from "../../lib/mediaDuration.js";
@@ -15,6 +16,7 @@ import { makeOpenAI, meterOpenAI } from "../../lib/openaiClient.js";
 import { s3Configured, isLocalKey, localPathOf, downloadToTemp } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
+import { isFinalAttempt } from "./jobAttempts.js";
 import { captureError } from "../../lib/monitoring.js";
 import { parseSegmentStarts, assumedSegmentStarts } from "./segmentOffsets.js";
 import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
@@ -174,10 +176,7 @@ transcriptionQueue.process(async (job) => {
   const t0 = Date.now();
   logger.info(`[WORKER:transcription] ── job picked up jobId=${job.id} mediaId=${mediaId}`);
 
-  await pool.query(
-    "UPDATE transcripts SET status='processing', updated_at=NOW() WHERE media_id=$1",
-    [mediaId]
-  );
+  await markProcessing(mediaId);
   logger.debug(`[WORKER:transcription] step 1/6 — status='processing' set in DB`);
 
   let source = null;
@@ -235,10 +234,7 @@ transcriptionQueue.process(async (job) => {
     // it done here ended the client's polling before that work existed, so the
     // summary panel stayed empty until someone reloaded the page. The LLM
     // worker moves it to 'done'.
-    await pool.query(
-      "UPDATE transcripts SET status='analyzing', updated_at=NOW() WHERE media_id=$1",
-      [mediaId]
-    );
+    await markAnalyzing(mediaId);
     logger.debug(`[WORKER:transcription] step 6/6 ✓ status='analyzing' set in DB`);
 
     // Best-effort: embed the freshly-saved chunks for semantic search. This must
@@ -282,12 +278,10 @@ transcriptionQueue.process(async (job) => {
     // And only on the final attempt, for llmWorker's reason: TRANSCRIPTION_ATTEMPTS
     // can be raised above 1, and an 'error' written before a retry stops the
     // page polling for a run that may yet succeed.
-    const attemptsAllowed = job.opts?.attempts ?? 1;
-    if (job.attemptsMade + 1 >= attemptsAllowed) {
-      await pool.query(
-        "UPDATE transcripts SET status='error', updated_at=NOW() WHERE media_id=$1",
-        [mediaId]
-      ).catch((dbErr) =>
+    if (isFinalAttempt(job)) {
+      // No reason stored: error_message is for a problem with the file, which
+      // the lecturer can fix, and this one is not.
+      await markFailed(mediaId).catch((dbErr) =>
         logger.error(`[WORKER:transcription]   could not set status='error': ${dbErr.message} — the row stays at 'processing'`)
       );
       // Final attempt only, like the row. No reason: what fails here is ffmpeg,

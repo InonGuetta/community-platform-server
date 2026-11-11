@@ -352,23 +352,25 @@ export const getTranscriptText = async (mediaId) => {
   return rows.map((r) => r.content).join("\n\n");
 };
 
+// A person's edit of the transcript and its analysis. Never the status: that is
+// the pipeline's contract with the page (status.js), and the controller's
+// allowlist (EDITABLE_FIELDS) never passes it — a hand-written 'done' on a row
+// still at 'pending' stopped the page polling before the summary existed.
 export const updateTranscript = async (mediaId, data) => {
-  const { editedText, aiSummary, aiChapters, aiKeyPoints, status } = data;
+  const { editedText, aiSummary, aiChapters, aiKeyPoints } = data;
   const result = await pool.query(
     `UPDATE transcripts SET
       edited_text   = COALESCE($1, edited_text),
       ai_summary    = COALESCE($2, ai_summary),
       ai_chapters   = COALESCE($3, ai_chapters),
       ai_key_points = COALESCE($4, ai_key_points),
-      status        = COALESCE($5, status),
       updated_at    = NOW()
-    WHERE media_id=$6 RETURNING *`,
+    WHERE media_id=$5 RETURNING *`,
     [
       editedText,
       aiSummary,
       aiChapters ? JSON.stringify(aiChapters) : null,
       aiKeyPoints ? JSON.stringify(aiKeyPoints) : null,
-      status,
       mediaId,
     ]
   );

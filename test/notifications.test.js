@@ -146,7 +146,10 @@ test("both workers announce the outcome where the status becomes final", async (
   const llm = await readFile(new URL("../queue/workers/llmWorker.js", import.meta.url), "utf8");
   const tx = await readFile(new URL("../queue/workers/transcriptionWorker.js", import.meta.url), "utf8");
 
-  const doneAt = llm.indexOf("status='done'");
+  // The status is written through services/transcripts/status.js, so the
+  // anchors are those calls — matched as calls, so a comment naming 'done'
+  // cannot stand in for the write.
+  const doneAt = llm.indexOf("await markDone(mediaId,");
   const okAt = llm.indexOf("notifyProcessingOutcome(mediaId, { ok: true })");
   assert.ok(doneAt > 0 && okAt > doneAt, "llmWorker: 'done' is announced after it is written");
 
@@ -154,7 +157,7 @@ test("both workers announce the outcome where the status becomes final", async (
   const failAt = llm.indexOf("notifyProcessingOutcome(mediaId, { ok: false");
   assert.ok(finalAt > 0 && failAt > finalAt, "llmWorker: a failure is announced only past the retry check");
 
-  const txFinal = tx.indexOf("job.attemptsMade + 1 >= attemptsAllowed");
+  const txFinal = tx.indexOf("if (isFinalAttempt(job))");
   const txFail = tx.indexOf("notifyProcessingOutcome(mediaId, { ok: false })");
   assert.ok(txFinal > 0 && txFail > txFinal, "transcriptionWorker: inside the final-attempt branch");
 });

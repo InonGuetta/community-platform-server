@@ -463,6 +463,14 @@ export const getMediaById = async (id) => {
   return result.rows[0];
 };
 
+// What kind of lesson it is and where its file is — all the LLM worker needs to
+// prepare its text, without getMediaById's joined card. null when the row is
+// gone (deleted while its job waited).
+export const getMediaSource = async (id) => {
+  const result = await pool.query("SELECT media_type, s3_key FROM media_items WHERE id=$1", [id]);
+  return result.rows[0] ?? null;
+};
+
 export const createMedia = async (data) => {
   const { uploaderId, title, description, mediaType, s3Key, durationSeconds, thumbnailUrl, courseId, lecturerId, creatorName } = data;
   const result = await pool.query(

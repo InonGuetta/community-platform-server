@@ -1,7 +1,6 @@
 // @ts-check
 import "dotenv/config";
 import { llmQueue } from "../llmQueue.js";
-import { pool } from "../../db/pool.js";
 import {
   analyzeTranscript,
   getTranscriptText,
@@ -9,7 +8,12 @@ import {
   MAX_KEY_POINTS_TEXT,
   runAiAction,
   AI_ACTIONS,
+  markProcessing,
+  markAnalyzing,
+  markDone,
+  markFailed,
 } from "../../services/servicesTranscripts.js";
+import { getMediaSource } from "../../services/servicesMedia.js";
 import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { extractDocumentText } from "../../lib/textExtract.js";
 import { textQuality } from "../../lib/textQuality.js";
@@ -20,6 +24,7 @@ import { notifyProcessingOutcome } from "../../services/servicesNotifications.js
 import { suggestTagsForMedia } from "../../services/transcripts/tagging.js";
 import { generateSuggestedQuestions } from "../../services/transcripts/questions.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
+import { attemptsAllowed, isFinalAttempt } from "./jobAttempts.js";
 import { captureError } from "../../lib/monitoring.js";
 
 // This worker now serves two sources that converge on the same job:
@@ -47,14 +52,11 @@ import { captureError } from "../../lib/monitoring.js";
 // jobs queued by older versions, so it is not something to infer a code path
 // from. The database always knows.
 const prepareText = async (mediaId) => {
-  const media = await pool.query(
-    "SELECT media_type, s3_key FROM media_items WHERE id=$1",
-    [mediaId]
-  );
-  if (media.rows.length === 0) {
+  const media = await getMediaSource(mediaId);
+  if (!media) {
     throw new AppError(`Media ${mediaId} no longer exists`, 404);
   }
-  const { media_type: mediaType, s3_key: s3Key } = media.rows[0];
+  const { media_type: mediaType, s3_key: s3Key } = media;
 
   if (mediaType !== "text") {
     // Audio/video: the transcription worker already saved the chunks. Read from
@@ -75,10 +77,7 @@ const prepareText = async (mediaId) => {
     return { text: existing, isText: true };
   }
 
-  await pool.query(
-    "UPDATE transcripts SET status='processing', updated_at=NOW() WHERE media_id=$1",
-    [mediaId]
-  );
+  await markProcessing(mediaId);
 
   logger.debug(`[WORKER:llm] text mediaId=${mediaId} — reading ${s3Key}`);
   const buffer = await readMediaBuffer(s3Key);
@@ -97,10 +96,7 @@ const prepareText = async (mediaId) => {
   // the page that sees 'analyzing' already sees the quality too.
   const quality = textQuality(text);
   logger.info(`[WORKER:llm] text mediaId=${mediaId} — ${quality ?? "?"}% of the text is readable`);
-  await pool.query(
-    "UPDATE transcripts SET status='analyzing', text_quality=$2, updated_at=NOW() WHERE media_id=$1",
-    [mediaId, quality]
-  );
+  await markAnalyzing(mediaId, { textQuality: quality });
 
   // Best-effort, exactly as on the audio path: the chunks are already saved and
   // searchable by keyword, and a missed embedding is recoverable later by the
@@ -133,22 +129,9 @@ llmQueue.process(async (job) => {
     // "subheadings by key points" block that the user produces on demand from
     // the key points below — so we only persist summary + key_points here.
     logger.debug(`[WORKER:llm] step 2/2 — updating transcripts row`);
-    // status='done' lands together with the summary, so the row is never
-    // advertised as finished before the content it promises exists.
-    await pool.query(
-      `UPDATE transcripts SET
-        ai_summary=$1,
-        ai_key_points=$2,
-        status='done',
-        error_message=NULL,
-        updated_at=NOW()
-       WHERE media_id=$3`,
-      [
-        parsed.summary,
-        JSON.stringify(parsed.key_points),
-        mediaId,
-      ]
-    );
+    // 'done' lands together with the summary, so the row is never advertised
+    // as finished before the content it promises exists.
+    await markDone(mediaId, { summary: parsed.summary, keyPoints: parsed.key_points });
     logger.info(`[WORKER:llm] ── DONE mediaId=${mediaId} total=${Date.now() - t0}ms`);
     // Proposed tags (PRD ARCH-4), from the summary just written. After `done`,
     // and never fatal: the lesson is finished either way, and a lecturer can
@@ -198,18 +181,15 @@ llmQueue.process(async (job) => {
     // finish, and also stops the client polling for a summary that will never
     // arrive. error_message is what lets the UI say WHY, which for a document is
     // usually something the user can fix.
-    const attemptsAllowed = job.opts?.attempts ?? 1;
-    const finalAttempt = permanent || job.attemptsMade + 1 >= attemptsAllowed;
+    const finalAttempt = permanent || isFinalAttempt(job);
     if (!finalAttempt) {
       logger.warn(
-        `[WORKER:llm]   attempt ${job.attemptsMade + 1}/${attemptsAllowed} failed — Bull will retry; row left as is`
+        `[WORKER:llm]   attempt ${job.attemptsMade + 1}/${attemptsAllowed(job)} failed — Bull will retry; row left as is`
       );
       throw err;
     }
-    await pool.query(
-      "UPDATE transcripts SET status='error', error_message=$1, updated_at=NOW() WHERE media_id=$2",
-      [permanent ? err.message : null, mediaId]
-    ).catch((dbErr) => logger.error(`[WORKER:llm]   could not set status='error':`, dbErr.message));
+    await markFailed(mediaId, { errorMessage: permanent ? err.message : null })
+      .catch((dbErr) => logger.error(`[WORKER:llm]   could not set status='error':`, dbErr.message));
     // The same reason the row now carries, and only for that kind: see
     // notifyProcessingOutcome.
     await notifyProcessingOutcome(mediaId, { ok: false, reason: permanent ? err.message : null });

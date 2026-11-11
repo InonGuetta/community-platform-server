@@ -1,18 +1,17 @@
 // @ts-check
-// The transcripts service. One resource, six concerns, one entry point.
+// The transcripts service: one resource, one entry point, a module per concern.
 //
-// This file used to BE all of them — 968 lines holding the GPT analysis, the
-// Hebrew correction, the headings, the chunk writer, the queue trigger and a
-// three-mode search engine. Every other file in services/ is 130–160 lines; this
-// was the one that had to be read end to end to find out what was in it.
-//
-//   transcripts/gpt.js        the shared GPT client + model
+//   transcripts/status.js     transcripts.status — the UI's contract — written here only
+//   transcripts/chunks.js     the transcript row and its chunks: read/write
+//   transcripts/pipeline.js   putting work on the queues + reconciliation
+//   transcripts/gpt.js        the shared GPT clients + model
 //   transcripts/analysis.js   transcript → { summary, key_points }
 //   transcripts/hebrew.js     correcting Yiddish-accented Hebrew, on demand
 //   transcripts/headings.js   placing the key points on the timeline
-//   transcripts/chunks.js     the transcript row and its chunks: read/write
-//   transcripts/pipeline.js   putting work on the queues + reconciliation
+//   transcripts/aiActions.js  the two above as queued work with a status
 //   transcripts/search.js     keyword / semantic / hybrid + LLM rerank
+//   transcripts/tagging.js    tags the LLM proposes from the summary (imported directly)
+//   transcripts/questions.js  the chat's starting questions (imported directly)
 //
 // Re-export rather than a move, deliberately. `controllersTranscripts.js` does
 // `import * as servicesTranscripts` and both workers import named functions from
@@ -23,8 +22,17 @@
 // services are.
 //
 // Adding to this feature: put it in the module that owns the concern and export
-// it here. Adding a SEVENTH concern is the signal to ask whether it belongs to
-// transcripts at all.
+// it here. A concern that does not read or write a transcript is the signal to
+// ask whether it belongs here at all.
+
+export {
+  markPending,
+  markProcessing,
+  markAnalyzing,
+  markDone,
+  markDoneUnlessAnalyzing,
+  markFailed,
+} from "./transcripts/status.js";
 
 export {
   saveChunks,

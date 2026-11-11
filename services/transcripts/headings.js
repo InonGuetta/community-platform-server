@@ -12,6 +12,7 @@ import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { notFound, badRequest, ERROR_CODES } from "../../lib/AppError.js";
 import { analyzeTranscript, keyPointRange } from "./analysis.js";
+import { markDoneUnlessAnalyzing } from "./status.js";
 import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
 import { meterOpenAI } from "../../lib/openaiClient.js";
 
@@ -62,15 +63,7 @@ export const generateKeyPointHeadings = async (mediaId) => {
     // own summary — reintroducing exactly the gap 'analyzing' was added to
     // close. Otherwise this call *is* what produced the analysis, so 'done' is
     // correct, including recovering a transcript left at 'error'.
-    await pool.query(
-      `UPDATE transcripts SET
-         ai_summary=$1,
-         ai_key_points=$2,
-         status = CASE WHEN status = 'analyzing' THEN status ELSE 'done' END,
-         updated_at=NOW()
-       WHERE media_id=$3`,
-      [analysis.summary, JSON.stringify(keyPoints), mediaId]
-    );
+    await markDoneUnlessAnalyzing(mediaId, { summary: analysis.summary, keyPoints });
     logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);
   }
 
