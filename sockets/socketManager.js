@@ -1,283 +1,38 @@
 // @ts-check
+// The live sessions' socket server (PRD: live sessions). This file starts it
+// and registers each concern's handlers on every connection; what each does
+// is in its own module:
+//
+//   socketAuth.js         the handshake — who the socket is, from the cookie
+//   socketShared.js       tracing, safe registration, the socket's room
+//   recordingRooms.js     which rooms are being recorded, and who consented
+//   sessionEnd.js         what follows a session's row being ended
+//   handlers/room.js      joining, leaving, a dropped connection
+//   handlers/recording.js the recording's start, stop and consent
+//   handlers/chat.js      the room's chat
+//   handlers/signalling.js the WebRTC offers, answers and candidates
+//   handlers/session.js   the host ending the session
+//
+// What other modules and the tests import is re-exported here, so they keep
+// importing from this one file.
 import { Server } from "socket.io";
-import jwt from "jsonwebtoken";
-import { getSessionByRoomToken, endSessionByRoomToken } from "../services/servicesSessions.js";
-import { openRecordingInRoom, recordConsent, finishOpenRecordings, consentsFor, saveChatMessage } from "../services/servicesSessionRecordings.js";
-import { getActiveUserById, tokenPredatesPasswordChange } from "../services/servicesAuth.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
-import { SOCKET_EVENTS, SOCKET_LIFECYCLE } from "./socketEvents.js";
+import { SOCKET_LIFECYCLE } from "./socketEvents.js";
+import { authenticateSocket } from "./socketAuth.js";
+import { setLiveIo } from "./sessionEnd.js";
+import { registerRoomHandlers, registerDisconnectHandlers } from "./handlers/room.js";
+import { registerRecordingHandlers } from "./handlers/recording.js";
+import { registerChatHandlers } from "./handlers/chat.js";
+import { registerSignallingHandlers } from "./handlers/signalling.js";
+import { registerSessionHandlers } from "./handlers/session.js";
 
-// Pull the JWT out of the handshake's Cookie header (the same httpOnly `token`
-// cookie the REST API uses). The client connects same-origin, so the browser
-// sends it automatically — no token handling needed on the client side.
-const tokenFromHandshake = (socket) => {
-  const raw = socket.handshake.headers.cookie || "";
-  for (const part of raw.split(";")) {
-    const [name, ...rest] = part.trim().split("=");
-    if (name === "token") return decodeURIComponent(rest.join("="));
-  }
-  return null;
-};
-
-// Reject unauthenticated sockets before any signalling can flow. The verified
-// identity — not client-supplied values — is what gets relayed to the room.
-//
-// A valid signature is NOT sufficient, and the second step is why. The token
-// lasts seven days and carries a snapshot of the role it was minted with, so on
-// signature alone a user who was deactivated or demoted keeps whatever they had
-// until it expires. verifyToken has re-read the row on every REST request from
-// the beginning for exactly this reason; this side was trusting the claims, so
-// closing an account shut the API to them while leaving their live signalling
-// connection — and their ability to end a session they host — untouched.
-//
-// Same lookup as the REST path, from the same function, so the two cannot answer
-// differently. Exported so the rule can be tested without standing up a server.
-export const authenticateSocket = async (socket, next) => {
-  const token = tokenFromHandshake(socket);
-  if (!token) {
-    logger.debug("[socket] handshake rejected: no token cookie");
-    return next(new Error("Unauthorized"));
-  }
-
-  let payload;
-  try {
-    payload = jwt.verify(token, env.jwtSecret);
-  } catch {
-    logger.debug("[socket] handshake rejected: invalid token");
-    return next(new Error("Unauthorized"));
-  }
-
-  try {
-    const user = await getActiveUserById(payload.id);
-    if (!user) {
-      logger.debug("[socket] handshake rejected: no active user behind the token");
-      return next(new Error("Unauthorized"));
-    }
-    // The same rule verifyToken applies: a token older than the last password
-    // change is spent. Without it a stolen cookie kept opening signalling
-    // connections for the rest of its seven days after the owner reset their
-    // password — the exact case the REST check exists for.
-    if (tokenPredatesPasswordChange(user, payload.iat)) {
-      logger.debug("[socket] handshake rejected: token predates the last password change");
-      return next(new Error("Unauthorized"));
-    }
-    // The row, not the token's claims — a role changed since the token was signed
-    // takes effect on the next connection rather than on expiry. The display name
-    // rides along so chat messages can say who wrote them.
-    socket.user = { id: user.id, role: user.role, displayName: user.display_name ?? null };
-    next();
-  } catch (err) {
-    // The database being unreachable is not the caller's fault, but a handshake
-    // has no way to say "try again later". Logged at error so a burst of refusals
-    // during an outage is distinguishable from genuine rejections, which are debug.
-    logger.error(`[socket] handshake failed to verify user: ${err.message}`);
-    next(new Error("Unauthorized"));
-  }
-};
-
-// ── Instrumentation ─────────────────────────────────────────────────────────
-//
-// Socket traffic is the one part of this system with no HTTP request behind it,
-// so none of it appears in the access log — which made a room that failed to
-// connect almost impossible to diagnose from the outside.
-//
-// Payloads are never logged, only event names and peer ids. That is not only a
-// privacy choice: an SDP offer is kilobytes of text and ICE candidates arrive in
-// bursts of dozens per connection, so logging bodies would produce a log nobody
-// can read. Everything here is `debug`, silent in production by default.
-const traceIn = (socket, event) =>
-  logger.debug(`[socket] ← ${event} (socket ${socket.id}, user ${socket.user?.id})`);
-
-const traceOut = (target, event) => logger.debug(`[socket] → ${event} (to ${target})`);
-
-// Registers a handler that is traced and cannot take the process down.
-//
-// The second part is the one that matters: socket.io does not catch what a
-// handler throws, and an async handler that rejects becomes an
-// unhandledRejection. The two DB-backed handlers below already guard themselves
-// so they can answer the client properly; this is the backstop for the
-// signalling handlers, which are synchronous today and would otherwise fail
-// silently if that ever changed.
-const onEvent = (socket, event, handler) => {
-  socket.on(event, async (payload) => {
-    traceIn(socket, event);
-    try {
-      await handler(payload);
-    } catch (err) {
-      logger.error(`[socket] ${event} handler threw: ${err.message}`);
-    }
-  });
-};
-
-// ── Who a socket is allowed to talk to ──────────────────────────────────────
-//
-// Every socket sits in its own room named after its id; the session rooms are
-// whatever is left once that one is removed.
-const sessionRoomsOf = (socket) => [...socket.rooms].filter((room) => room !== socket.id);
-
-// Signalling is addressed by socket id, and the id used to be taken at face
-// value: `io.to(to).emit(...)` will deliver to ANY connected socket, so any
-// authenticated user could push an offer, an answer or a stream of ICE candidates
-// at a peer in a room they had never joined. The join path had grown a careful
-// check — the session must exist and still be running — while the three handlers
-// that actually move data had none.
-//
-// A peer is addressable only from inside a room both sockets are in. The sender's
-// membership comes from the server's own adapter, never from the payload.
-// Exported for the tests. The io/socket shapes it touches are small — an adapter
-// with a room map, and a socket with an id and a room set — so the rule can be
-// driven over plain objects instead of a live server, the same trade the client's
-// peerMesh.js makes with RTCPeerConnection.
-export const sharesRoomWith = (io, socket, targetId) =>
-  typeof targetId === "string" &&
-  targetId !== socket.id &&
-  sessionRoomsOf(socket).some((room) => io.sockets.adapter.rooms.get(room)?.has(targetId));
-
-// Whether admitting one more socket puts the room over its limit.
-//
-// Pulled out as its own function because the comparison is `>` and not `>=`, and
-// that is only correct given WHERE it is called: the join now happens first, so
-// `occupants` already counts the socket being admitted. Inlined, the next person
-// to read it has every reason to "fix" it back to `>=` and quietly make every
-// room one seat short.
-export const exceedsCapacity = (occupants, maxParticipants) =>
-  Boolean(maxParticipants) && occupants > maxParticipants;
-
-// Long enough for a source reference or a question, short enough that one
-// participant cannot fill everybody's panel with a single paste.
-const CHAT_MAX_CHARS = 2000;
-
-// One relay for the three signalling events, so the check cannot be present on
-// two of them and forgotten on the third.
-const relaySignal = (io, socket, event, to, body) => {
-  if (!sharesRoomWith(io, socket, to)) {
-    logger.debug(`[socket] ${event} from ${socket.id} refused: ${to} is not a peer in its room`);
-    return;
-  }
-  traceOut(to, event);
-  io.to(to).emit(event, { from: socket.id, ...body });
-};
-
-// ── Chat flood control ──────────────────────────────────────────────────────
-//
-// A token bucket per socket: a burst of CHAT_BURST messages, then one every
-// CHAT_REFILL_MS. Nothing limited this before, so one client in a loop could
-// broadcast 2000-character messages to every participant as fast as the socket
-// allowed. Generous for a person typing; useless for a script.
-//
-// Exported, with the clock injectable, so the rule can be tested without timers.
-const CHAT_BURST = 5;
-const CHAT_REFILL_MS = 1000;
-
-export const createChatBucket = ({ burst = CHAT_BURST, refillMs = CHAT_REFILL_MS, now = Date.now } = {}) => {
-  let tokens = burst;
-  let last = now();
-  return () => {
-    const current = now();
-    tokens = Math.min(burst, tokens + (current - last) / refillMs);
-    last = current;
-    if (tokens < 1) return false;
-    tokens -= 1;
-    return true;
-  };
-};
-
-// ── Recording consent (PRD REC-1) ───────────────────────────────────────────
-//
-// Which rooms are being recorded, and who in each has answered. In memory: it
-// describes sockets, which exist only in this process, and a restart drops
-// every socket with it. What must outlive the process — the recording and the
-// answers — is in the database (migration 048).
-//
-//   roomToken → { recordingId, hostSocketId, answers: Map(socketId → { userId, consented }) }
-//
-// The host's own socket counts as consenting: the host started it.
-const recordingRooms = new Map();
-
-/**
- * What every socket in the room is told: who is recorded, who declined.
- * Anyone in neither list has not answered yet — and is not recorded.
- * Exported for the tests.
- */
-export const recordingStatePayload = (state) => {
-  if (!state) return { active: false, recordingId: null, hostSocketId: null, consented: [], declined: [] };
-  const consented = [state.hostSocketId];
-  const declined = [];
-  for (const [socketId, answer] of state.answers) {
-    if (socketId === state.hostSocketId) continue;
-    (answer.consented ? consented : declined).push(socketId);
-  }
-  return { active: true, recordingId: state.recordingId, hostSocketId: state.hostSocketId, consented, declined };
-};
-
-const broadcastRecording = (io, room) => {
-  traceOut("room", SOCKET_EVENTS.RECORDING_STATE);
-  io.to(room).emit(SOCKET_EVENTS.RECORDING_STATE, recordingStatePayload(recordingRooms.get(room)));
-};
-
-// A socket leaving a room: its answer goes with it, and if it was the host's,
-// the recording in that browser has stopped — the room is told so.
-const leaveRecording = (io, socket, room) => {
-  const state = recordingRooms.get(room);
-  if (!state) return;
-  if (state.hostSocketId === socket.id) recordingRooms.delete(room);
-  else if (!state.answers.delete(socket.id)) return;
-  broadcastRecording(io, room);
-};
-
-// The answers on record for this recording, applied to the sockets now in the
-// room — each socket by its user. A reconnect is a new socket id for the same
-// person, and their answer stands.
-const seedAnswers = async (io, room, state) => {
-  const known = await consentsFor(state.recordingId);
-  for (const socketId of io.sockets.adapter.rooms.get(room) ?? []) {
-    const user = io.sockets.sockets.get(socketId)?.user;
-    if (socketId === state.hostSocketId || !user || !known.has(user.id)) continue;
-    state.answers.set(socketId, { userId: user.id, consented: known.get(user.id) });
-  }
-};
-
-// Ending a room: tell everyone in it, then take every socket OUT of it. The
-// broadcast alone left the sockets in the room, so a client that ignored
-// SESSION_ENDED could keep chatting and relaying signalling in a session the
-// database says is over.
-const closeRoom = (io, roomToken) => {
-  recordingRooms.delete(roomToken);
-  traceOut("room", SOCKET_EVENTS.SESSION_ENDED);
-  io.to(roomToken).emit(SOCKET_EVENTS.SESSION_ENDED);
-  io.in(roomToken).socketsLeave(roomToken);
-};
-
-// The live server, for the one caller outside this file that needs it: the
-// REST "end session" route, which used to update the row and tell nobody in the
-// room. Set by initSockets; null in the worker processes, where there are no
-// sockets to close.
-let liveIo = null;
-
-// ── Ending a session: what follows the row, whichever door ended it ─────────
-//
-// Two doors end a session: DELETE /api/sessions/:id/end (controllersSessions)
-// and the host's END_SESSION below. Each ends the row its own way — by id, and
-// idempotently, over REST; by room token over the socket — because in both the
-// UPDATE's WHERE clause is the host check. What follows is the same, and is
-// here, in this order:
-//
-//   1. the room is told SESSION_ENDED and emptied (closeRoom);
-//   2. a recording still open is joined from what reached the server (PRD
-//      REC-1). finishOpenRecordings never throws, so the session is ended
-//      whatever happens to the recording.
-//
-// `io` is the socket handler's own server; the REST route leaves it to the one
-// initSockets stored — null where there is no room to close.
-/**
- * @param {{ id: number, room_token: string }} session  the ended row
- * @param {Server | null} [io]
- */
-export const afterSessionEnded = async (session, io = liveIo) => {
-  if (io && session.room_token) closeRoom(io, session.room_token);
-  await finishOpenRecordings(session.id);
-};
+export { authenticateSocket } from "./socketAuth.js";
+export { recordingStatePayload } from "./recordingRooms.js";
+export { afterSessionEnded } from "./sessionEnd.js";
+export { exceedsCapacity } from "./handlers/room.js";
+export { createChatBucket } from "./handlers/chat.js";
+export { sharesRoomWith } from "./handlers/signalling.js";
 
 // Returns the io instance so the caller can close it during shutdown —
 // websockets are long-lived and would otherwise hold the process open.
@@ -285,7 +40,7 @@ export const initSockets = (httpServer) => {
   const io = new Server(httpServer, {
     cors: { origin: env.clientUrl, credentials: true },
   });
-  liveIo = io;
+  setLiveIo(io);
 
   // Reject unauthenticated sockets before any signaling can flow. The verified
   // identity — not client-supplied values — is what we relay to the room.
@@ -305,265 +60,15 @@ export const initSockets = (httpServer) => {
   io.on(SOCKET_LIFECYCLE.CONNECTION, (socket) => {
     logger.info(`[socket] connected ${socket.id} (user ${socket.user.id}, role ${socket.user.role})`);
 
-    // Each connection is identified by socket.id — the stable key for every
-    // peer in the mesh. Existing members are notified of a newcomer and are the
-    // ones who initiate the offer toward it (socket.to() excludes the sender),
-    // which keeps the handshake glare-free. The userId/role we broadcast come
-    // from the verified token, not from the client payload.
-    // A valid token alone used to be enough to join any string as a room, so a
-    // client could sit in a room for a session that had ended or never existed.
-    // The room token stays the capability — knowing it is what grants access —
-    // but the session behind it now has to be real and still running.
-    onEvent(socket, SOCKET_EVENTS.JOIN_ROOM, async ({ roomToken }) => {
-      try {
-        // The handshake checked the account once; a socket can outlive that by
-        // hours. Re-asked on every join (which is also every reconnect), so a
-        // deactivated user's open connection cannot enter another room.
-        const stillActive = await getActiveUserById(socket.user.id);
-        if (!stillActive) {
-          logger.debug(`[socket] join refused for ${socket.id}: account no longer active`);
-          socket.emit(SOCKET_EVENTS.JOIN_ERROR, { message: "Unauthorized" });
-          return socket.disconnect(true);
-        }
-
-        const session = await getSessionByRoomToken(roomToken);
-        if (!session || !session.is_active) {
-          logger.debug(`[socket] join refused for ${socket.id}: session missing or ended`);
-          traceOut(socket.id, SOCKET_EVENTS.JOIN_ERROR);
-          return socket.emit(SOCKET_EVENTS.JOIN_ERROR, { message: "Session not found or has ended" });
-        }
-
-        // A scheduled session exists before it begins, and its room must not.
-        // Otherwise the first person to try the link ten minutes early sits alone
-        // in a room the host has not opened, and the host arrives to find people
-        // already "in" a session that never started.
-        if (!session.started_at) {
-          logger.debug(`[socket] join refused for ${socket.id}: session ${session.id} has not started`);
-          traceOut(socket.id, SOCKET_EVENTS.JOIN_ERROR);
-          return socket.emit(SOCKET_EVENTS.JOIN_ERROR, { message: "This session has not started yet" });
-        }
-
-        // max_participants has been stored since the first migration and never
-        // enforced anywhere.
-        //
-        // Join FIRST, then count, then step back out if that put the room over.
-        // Counting before joining reads a number that the await above has already
-        // made stale: two clients arriving together both see the room one short of
-        // full and both proceed. Joining and counting sit next to each other with
-        // no await between them, so on a single event loop no other join can
-        // interleave — the count each one reads already includes itself and every
-        // socket that got in first.
-        //
-        // One room per socket. Chat sends to "the room this socket is in", and
-        // with two of them it picked one arbitrarily. Joining a new room leaves
-        // the previous one, announced the same way a disconnect is. Re-joining
-        // the room it is already in (a duplicate emit) changes nothing.
-        if (socket.rooms.has(roomToken)) {
-          logger.debug(`[socket] ${socket.id} already in session ${session.id}`);
-          return;
-        }
-        for (const previous of sessionRoomsOf(socket)) {
-          leaveRecording(io, socket, previous);
-          socket.leave(previous);
-          socket.to(previous).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
-        }
-        socket.join(roomToken);
-        const occupants = io.sockets.adapter.rooms.get(roomToken)?.size ?? 0;
-        if (exceedsCapacity(occupants, session.max_participants)) {
-          socket.leave(roomToken);
-          logger.debug(`[socket] join refused for ${socket.id}: room full (${occupants - 1})`);
-          traceOut(socket.id, SOCKET_EVENTS.JOIN_ERROR);
-          return socket.emit(SOCKET_EVENTS.JOIN_ERROR, { message: "Session is full" });
-        }
-
-        logger.info(`[socket] ${socket.id} joined session ${session.id} (${occupants} in room)`);
-        // Whether the room is being recorded, told to every newcomer — also
-        // when it is not, which is how a host whose connection dropped learns
-        // the room has forgotten its recording and announces it again.
-        // Someone arriving mid-recording is asked like everyone else, and is
-        // not recorded until they say yes — unless they already answered
-        // before a dropped connection.
-        const recording = recordingRooms.get(roomToken);
-        if (recording) {
-          await seedAnswers(io, roomToken, recording);
-          broadcastRecording(io, roomToken);
-        } else {
-          traceOut(socket.id, SOCKET_EVENTS.RECORDING_STATE);
-          socket.emit(SOCKET_EVENTS.RECORDING_STATE, recordingStatePayload(null));
-        }
-        traceOut(`room ${session.id}`, SOCKET_EVENTS.USER_JOINED);
-        socket.to(roomToken).emit(SOCKET_EVENTS.USER_JOINED, {
-          socketId: socket.id,
-          userId: socket.user.id,
-          role: socket.user.role,
-        });
-      } catch (err) {
-        logger.error(`[socket] join-room failed: ${err.message}`);
-        socket.emit(SOCKET_EVENTS.JOIN_ERROR, { message: "Could not join the session" });
-      }
-    });
-
-    // Leaving is only meaningful for a room this socket is actually in. Without
-    // the guard the token alone was enough to announce somebody else's departure
-    // into any room whose token was known — and the tokens are not secret from a
-    // signed-in user, since the sessions list hands them out.
-    onEvent(socket, SOCKET_EVENTS.LEAVE_ROOM, ({ roomToken }) => {
-      if (!socket.rooms.has(roomToken)) {
-        logger.debug(`[socket] leave-room from ${socket.id} ignored: not in ${roomToken}`);
-        return;
-      }
-      socket.leave(roomToken);
-      leaveRecording(io, socket, roomToken);
-      traceOut("room", SOCKET_EVENTS.USER_LEFT);
-      socket.to(roomToken).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
-    });
-
-    // ── Recording (PRD REC-1) ───────────────────────────────────────────────
-    // The room always comes from the server's record of this socket's
-    // membership, never from the payload — the rule chat and signalling follow.
-
-    // The host has started a recording over REST and says so. Believed only
-    // if that recording is the open one of THIS room's session and this user
-    // hosts it.
-    onEvent(socket, SOCKET_EVENTS.RECORDING_STARTED, async (/** @type {{ recordingId?: number }} */ { recordingId } = {}) => {
-      const [room] = sessionRoomsOf(socket);
-      if (!room) return;
-      const recording = await openRecordingInRoom(Number(recordingId), room, socket.user.id);
-      if (!recording) {
-        logger.debug(`[socket] recording-started from ${socket.id} refused: not an open recording of its room`);
-        return socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Only the host can record this session" });
-      }
-      const state = { recordingId: recording.id, hostSocketId: socket.id, answers: new Map() };
-      await seedAnswers(io, room, state);
-      recordingRooms.set(room, state);
-      logger.info(`[socket] session ${recording.session_id} is being recorded (recording ${recording.id})`);
-      broadcastRecording(io, room);
-    });
-
-    onEvent(socket, SOCKET_EVENTS.RECORDING_STOPPED, () => {
-      const [room] = sessionRoomsOf(socket);
-      const state = room && recordingRooms.get(room);
-      if (!state || state.hostSocketId !== socket.id) return;
-      recordingRooms.delete(room);
-      broadcastRecording(io, room);
-    });
-
-    // A participant's answer. Only `true` is consent — anything else, absent
-    // or malformed included, is a no. Stored before the room is told, so the
-    // host never mixes in someone whose consent is not on record.
-    onEvent(socket, SOCKET_EVENTS.RECORDING_CONSENT, async (/** @type {{ consent?: boolean }} */ { consent } = {}) => {
-      const [room] = sessionRoomsOf(socket);
-      const state = room && recordingRooms.get(room);
-      if (!state || state.hostSocketId === socket.id) return;
-      const consented = consent === true;
-      await recordConsent(state.recordingId, socket.user.id, consented);
-      // The recording may have stopped while that was being written.
-      if (recordingRooms.get(room) !== state) return;
-      state.answers.set(socket.id, { userId: socket.user.id, consented });
-      broadcastRecording(io, room);
-    });
-
-    // Chat, broadcast to the room the sender is actually in.
-    //
-    // The room comes from the server's own record of this socket's membership,
-    // never from the payload — the same rule the signalling relay follows, and
-    // for the same reason: a roomToken in a message body is a claim, and a
-    // client that could name any room could speak into any room.
-    //
-    // Nothing is stored. A session is a conversation, not a record: persisting
-    // it would mean a retention decision, a deletion path and a place for it to
-    // be read back, none of which anyone has asked for. CHAT_HISTORY exists so a
-    // reconnect is not silent about that — it replays what the server holds,
-    // which for now is nothing.
-    const allowChat = createChatBucket();
-    onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, async ({ text }) => {
-      const [room] = sessionRoomsOf(socket);
-      if (!room) {
-        logger.debug(`[socket] chat from ${socket.id} ignored: not in a room`);
-        return;
-      }
-      if (!allowChat()) {
-        logger.debug(`[socket] chat from ${socket.id} dropped: rate limited`);
-        return;
-      }
-      // Trimmed and capped here rather than trusted: it is broadcast verbatim to
-      // everyone in the room, and length is the only thing a relay can sensibly
-      // police. The client renders it as text, never as markup.
-      const body = String(text ?? "").trim().slice(0, CHAT_MAX_CHARS);
-      if (!body) return;
-
-      const message = {
-        from: socket.id,
-        userId: socket.user.id,
-        // From the verified row, like userId — so a participant can see who
-        // wrote a message, and nobody can claim to be someone else.
-        displayName: socket.user.displayName,
-        text: body,
-        at: Date.now(),
-      };
-      traceOut("room", SOCKET_EVENTS.CHAT_MESSAGE);
-      // io.to, not socket.to: the sender gets their own message back, so every
-      // participant renders the same list in the same order — the server's — and
-      // nobody has to reconcile an optimistic local copy against it.
-      io.to(room).emit(SOCKET_EVENTS.CHAT_MESSAGE, message);
-
-      // The one case a chat line is kept (PRD REC-3, migration 049): the room
-      // is being recorded and the writer's voice is in the recording — the
-      // host, or someone who said yes. It becomes the lesson's appendix.
-      const recording = recordingRooms.get(room);
-      if (recording && (socket.id === recording.hostSocketId || recording.answers.get(socket.id)?.consented)) {
-        await saveChatMessage(recording.recordingId, socket.user, body);
-      }
-    });
-
-    // Signaling is relayed to one specific peer (`to`) and stamped with the
-    // sender's id (`from`) so the receiver knows which peer to answer. relaySignal
-    // is what establishes that `to` is a peer the sender shares a room with.
-    onEvent(socket, SOCKET_EVENTS.OFFER, ({ to, offer }) =>
-      relaySignal(io, socket, SOCKET_EVENTS.OFFER, to, { offer }));
-    onEvent(socket, SOCKET_EVENTS.ANSWER, ({ to, answer }) =>
-      relaySignal(io, socket, SOCKET_EVENTS.ANSWER, to, { answer }));
-    onEvent(socket, SOCKET_EVENTS.ICE_CANDIDATE, ({ to, candidate }) =>
-      relaySignal(io, socket, SOCKET_EVENTS.ICE_CANDIDATE, to, { candidate }));
-
-    // Two bugs in one line before: any participant could end the session for
-    // everyone, and ending it only broadcast — it never touched the database, so
-    // is_active stayed TRUE and the session lingered in the active list forever.
-    //
-    // The UPDATE's WHERE clause is the authorization check (host only, matching
-    // what DELETE /api/sessions/:id/end already enforced), so there is no gap
-    // between deciding and acting. Only a row actually updated broadcasts.
-    // The host id comes from the signed token and cannot be spoofed.
-    onEvent(socket, SOCKET_EVENTS.END_SESSION, async ({ roomToken }) => {
-      try {
-        const ended = await endSessionByRoomToken(roomToken, socket.user.id);
-        if (!ended) {
-          logger.debug(`[socket] end-session refused for ${socket.id}: not the host`);
-          return socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Only the host can end the session" });
-        }
-        logger.info(`[socket] session ended by user ${socket.user.id}`);
-        await afterSessionEnded(ended, io);
-      } catch (err) {
-        logger.error(`[socket] end-session failed: ${err.message}`);
-        socket.emit(SOCKET_EVENTS.SESSION_ERROR, { message: "Could not end the session" });
-      }
-    });
-
-    // Use `disconnecting`, not `disconnect`: rooms are still populated here, so
-    // we can tell the room which peer is leaving.
-    socket.on(SOCKET_LIFECYCLE.DISCONNECTING, () => {
-      socket.rooms.forEach((room) => {
-        if (room !== socket.id) {
-          leaveRecording(io, socket, room);
-          traceOut("room", SOCKET_EVENTS.USER_LEFT);
-          socket.to(room).emit(SOCKET_EVENTS.USER_LEFT, { socketId: socket.id });
-        }
-      });
-    });
-
-    socket.on(SOCKET_LIFECYCLE.DISCONNECT, (reason) =>
-      logger.info(`[socket] disconnected ${socket.id} (${reason})`)
-    );
+    // In the order they were always registered. Each registers its events on
+    // this socket; the per-socket state they keep (the chat's flood bucket)
+    // is created there, once per connection.
+    registerRoomHandlers(io, socket);
+    registerRecordingHandlers(io, socket);
+    registerChatHandlers(io, socket);
+    registerSignallingHandlers(io, socket);
+    registerSessionHandlers(io, socket);
+    registerDisconnectHandlers(io, socket);
   });
 
   return io;

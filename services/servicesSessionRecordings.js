@@ -4,7 +4,7 @@
 // The server never sees a session's media — the mesh is peer to peer — so the
 // recording is made in the HOST's browser: it mixes the audio of everyone who
 // agreed to be recorded (the consent travels over the socket, see
-// sockets/socketManager.js) and sends it here in numbered parts while the
+// sockets/handlers/recording.js) and sends it here in numbered parts while the
 // session runs. This module is the server's half:
 //
 //   startRecording   a row for a new recording; closes a previous open one
