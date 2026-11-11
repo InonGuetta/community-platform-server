@@ -8,13 +8,13 @@
 //
 // It is the lesson chat with three parts swapped, and everything else shared:
 //
-//   finding passages  the archive's own hybrid retrieval below (keyword + the
-//                     HNSW vector index, RRF, GPT-4o rerank), with the
-//                     visibility predicate of lib/permissions.js INSIDE each
-//                     ranking CTE — the same rule as the library-wide search
-//                     (../transcripts/search.js), and for the same reason: a
-//                     filter applied after the ranking would let lessons the
-//                     caller may not see take the candidate slots.
+//   finding passages  hybrid retrieval across lessons (keyword + the HNSW
+//                     vector index, RRF, GPT-4o rerank) — the library-wide
+//                     search's own statement (../transcripts/search.js →
+//                     hybridSearchSql), with the visibility predicate of
+//                     lib/permissions.js INSIDE each ranking CTE: a filter
+//                     applied after the ranking would let lessons the caller
+//                     may not see take the candidate slots.
 //   labels            each passage names its lesson and lecturer, and so does
 //                     each stored citation (archiveCitation)
 //   the conversation  an ai_conversations row with media_id NULL (migration
@@ -27,7 +27,7 @@ import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
 import { visibleMediaSql } from "../../lib/permissions.js";
 import { embedQuery, toVectorLiteral } from "../servicesEmbeddings.js";
-import { rerankByRelevance, withWideVectorScan, RRF_K, FUSE_DEPTH } from "../transcripts/search.js";
+import { rerankByRelevance, withWideVectorScan, hybridSearchSql } from "../transcripts/search.js";
 import { passageLabel, citationSnapshot } from "./context.js";
 import { getRecentMessages, MESSAGES_PAGE } from "./conversations.js";
 import {
@@ -64,43 +64,10 @@ const PASSAGE_COLS = `
   c.char_start, c.content,
   m.title AS media_title, m.creator_name, m.media_type`;
 
-// $1 query text, $2 query embedding, $3 visible courses, $4 drafts.
-const HYBRID_SQL = `
-  WITH kw AS (
-    SELECT c.id,
-      row_number() OVER (
-        ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
-      ) AS rank
-    FROM transcript_chunks c
-    JOIN media_items m ON c.media_id = m.id
-    WHERE to_tsvector('simple', c.content) @@ plainto_tsquery('simple', $1)
-      AND ${VISIBLE}
-    ORDER BY rank
-    LIMIT ${FUSE_DEPTH}
-  ),
-  vec AS (
-    SELECT c.id,
-      row_number() OVER (ORDER BY c.embedding <=> $2::vector) AS rank
-    FROM transcript_chunks c
-    JOIN media_items m ON c.media_id = m.id
-    WHERE c.embedding IS NOT NULL
-      AND ${VISIBLE}
-    ORDER BY c.embedding <=> $2::vector
-    LIMIT ${FUSE_DEPTH}
-  ),
-  fused AS (
-    SELECT
-      COALESCE(kw.id, vec.id) AS id,
-      COALESCE(1.0 / (${RRF_K} + kw.rank), 0) +
-      COALESCE(1.0 / (${RRF_K} + vec.rank), 0) AS score
-    FROM kw FULL OUTER JOIN vec ON kw.id = vec.id
-  )
-  SELECT ${PASSAGE_COLS}
-  FROM fused f
-  JOIN transcript_chunks c ON c.id = f.id
-  JOIN media_items m ON c.media_id = m.id
-  ORDER BY f.score DESC
-  LIMIT ${CANDIDATE_LIMIT}`;
+// The library search's own hybrid statement (../transcripts/search.js →
+// hybridSearchSql): $1 query text, $2 query embedding, $3 visible courses,
+// $4 drafts, with the visibility inside each ranking.
+const HYBRID_SQL = hybridSearchSql(PASSAGE_COLS, CANDIDATE_LIMIT);
 
 // What is left when the question could not be embedded. $1 query text,
 // $3/$4 as above — $2 is unused and passed as NULL so the numbering, and the

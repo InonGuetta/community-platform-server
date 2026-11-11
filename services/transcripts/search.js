@@ -206,15 +206,26 @@ const searchSemantic = async (query, scope) => {
   return result.rows;
 };
 
-const searchHybrid = async (query, scope) => {
-  const queryVector = toVectorLiteral(await embedQuery(query));
-  // $1 = query text (FTS), $2 = query embedding (vector), $3 = may see drafts.
-  // Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN unions the two id
-  // sets and RRF sums the reciprocal ranks. ts_headline highlights the FTS terms
-  // (semantic-only hits simply have no terms to highlight, which is fine).
-  // Both CTEs join media_items solely to apply the visibility predicate.
-  const result = await withWideVectorScan((client) => client.query(
-    `WITH kw AS (
+// ── The hybrid statement, across every lesson the caller may see ────────────
+//
+// Shared by this library-wide search and the archive chat's retrieval
+// (../discussion/archive.js): the same two rankings, the same visibility inside
+// each, the same fusion. Each caller chooses only what it reads back for each
+// fused chunk (`columns`, over `c` = transcript_chunks and `m` = media_items)
+// and how many (`limit`). The search inside ONE lesson
+// (../discussion/retrieval.js) is a different statement — it ranks a
+// materialized lesson rather than the vector index — and is not built here.
+//
+// $1 = query text (FTS), $2 = query embedding (vector), $3 = visible courses,
+// $4 = whose drafts. Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN
+// unions the two id sets and RRF sums the reciprocal ranks. Both CTEs join
+// media_items solely to apply the visibility predicate — inside each ranking,
+// for the reason on VISIBLE above.
+/**
+ * @param {string} columns  the SELECT list for each fused chunk
+ * @param {number} limit    how many fused chunks, best first
+ */
+export const hybridSearchSql = (columns, limit) => `WITH kw AS (
        SELECT c.id,
          row_number() OVER (
            ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
@@ -244,15 +255,24 @@ const searchHybrid = async (query, scope) => {
        FROM kw FULL OUTER JOIN vec ON kw.id = vec.id
      )
      SELECT
-       ${SELECT_COLS},
-       ts_headline('simple', c.content, plainto_tsquery('simple', $1),
-         'MaxWords=20, MinWords=5') AS headline,
-       1 - (c.embedding <=> $2::vector) AS similarity
+       ${columns}
      FROM fused f
      JOIN transcript_chunks c ON c.id = f.id
      JOIN media_items m ON c.media_id = m.id
      ORDER BY f.score DESC
-     LIMIT ${CANDIDATE_LIMIT}`,
+     LIMIT ${limit}`;
+
+// What a library search result carries. ts_headline highlights the FTS terms
+// (semantic-only hits simply have no terms to highlight, which is fine).
+const HYBRID_COLS = `${SELECT_COLS},
+       ts_headline('simple', c.content, plainto_tsquery('simple', $1),
+         'MaxWords=20, MinWords=5') AS headline,
+       1 - (c.embedding <=> $2::vector) AS similarity`;
+
+const searchHybrid = async (query, scope) => {
+  const queryVector = toVectorLiteral(await embedQuery(query));
+  const result = await withWideVectorScan((client) => client.query(
+    hybridSearchSql(HYBRID_COLS, CANDIDATE_LIMIT),
     [query, queryVector, scope.courses, scope.drafts]
   ));
 
