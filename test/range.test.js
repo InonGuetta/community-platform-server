@@ -1,7 +1,7 @@
 import "./setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseRange, RANGE_UNSATISFIABLE } from "../controllers/controllersMedia.js";
+import { parseRange, RANGE_UNSATISFIABLE } from "../lib/httpStream.js";
 
 const describe = (v) => (v === RANGE_UNSATISFIABLE ? "416" : v === null ? "whole file" : `${v.start}-${v.end}`);
 const at = (header, size) => describe(parseRange(header, size));

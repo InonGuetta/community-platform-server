@@ -7,6 +7,7 @@ import { requireRole } from "../middleware/requireRole.js";
 import { userRateLimit } from "../middleware/userRateLimit.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
+import * as controllersMediaFiles from "../controllers/controllersMediaFiles.js";
 import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { MEDIA_TYPE_BY_EXT, extensionOf } from "../lib/mediaFormats.js";
 import { logger } from "../lib/logger.js";
@@ -124,8 +125,8 @@ router.delete(
   controllersMedia.withdrawMediaTagProposal
 );
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
-router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
-router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);
+router.get("/:id/stream", validateIntParam("id"), controllersMediaFiles.streamMedia);
+router.get("/:id/download", validateIntParam("id"), controllersMediaFiles.downloadMedia);
 // Each request here is a full ffmpeg transcode of a lecture on the API host, so
 // it is limited per user here and capped globally in the controller
 // (MAX_CONCURRENT_AUDIO_EXTRACTS). Nobody downloads ten lectures a minute.
@@ -134,7 +135,7 @@ const audioExtractLimiter = userRateLimit({
   max: 5,
   message: "Too many audio downloads, please try again in a minute",
 });
-router.get("/:id/download/audio", audioExtractLimiter, validateIntParam("id"), controllersMedia.downloadMediaAudio);
+router.get("/:id/download/audio", audioExtractLimiter, validateIntParam("id"), controllersMediaFiles.downloadMediaAudio);
 router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
 router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);
 

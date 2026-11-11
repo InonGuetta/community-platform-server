@@ -3,6 +3,7 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
+import * as controllersMediaFiles from "../controllers/controllersMediaFiles.js";
 
 // What anyone with a link may open, signed in or not (PRD COM-3b, COM-4).
 //
@@ -26,7 +27,7 @@ const publicLimiter = rateLimit({
 router.use(publicLimiter);
 
 router.get("/media/:id", validateIntParam("id"), controllersMedia.getPublicLesson);
-router.get("/media/:id/stream", validateIntParam("id"), controllersMedia.streamPublicMedia);
+router.get("/media/:id/stream", validateIntParam("id"), controllersMediaFiles.streamPublicMedia);
 // The link that is shared: Open Graph tags for a WhatsApp preview, then a
 // redirect to the guest page.
 router.get("/share/:id", validateIntParam("id"), controllersMedia.sharePage);
