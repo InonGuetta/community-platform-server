@@ -28,7 +28,7 @@ import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
 import { startRecording, savePart, finishRecording, recordConsent, consentsFor, openRecordingInRoom, saveChatMessage, getLessonChat, PARTS_DIR } from "../services/servicesSessionRecordings.js";
-import { LOCAL_UPLOAD_DIR as SMOKE_UPLOAD_DIR } from "../lib/storage.js";
+import { isLocalKey as isLocalKeySmoke, removeStored as removeStoredSmoke } from "../lib/storage.js";
 import fsSmoke from "fs/promises";
 import pathSmoke from "path";
 
@@ -1162,14 +1162,14 @@ const checks = [
         if (chat.length !== 1 || chat[0].text !== "שורה בצ'אט" || typeof chat[0].offset !== "number") {
           throw new Error(`the appendix is ${JSON.stringify(chat)}`);
         }
-        return `2 parts joined to ${done.s3_key.startsWith("local/") ? "local disk" : "S3"}, consent upserted, session updated, draft lesson ${done.media_id} with its chat (rolled back)`;
+        return `2 parts joined to ${isLocalKeySmoke(done.s3_key) ? "local disk" : "S3"}, consent upserted, session updated, draft lesson ${done.media_id} with its chat (rolled back)`;
       } finally {
         pool.query = original.query;
         pool.connect = original.connect;
         await client.query("ROLLBACK").catch(() => {});
         client.release();
         if (recordingId) await fsSmoke.rm(pathSmoke.join(PARTS_DIR, String(recordingId)), { recursive: true, force: true });
-        if (storedKey?.startsWith("local/")) await fsSmoke.rm(pathSmoke.join(SMOKE_UPLOAD_DIR, storedKey.slice(6)), { force: true });
+        if (isLocalKeySmoke(storedKey)) await removeStoredSmoke(storedKey, { missingOk: true });
       }
     },
   },

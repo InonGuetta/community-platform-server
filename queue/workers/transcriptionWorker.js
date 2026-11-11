@@ -15,7 +15,7 @@ import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { setDurationIfMissing } from "../../services/servicesMedia.js";
 import { probeDurationSeconds } from "../../lib/mediaDuration.js";
 import { makeOpenAI, meterOpenAI } from "../../lib/openaiClient.js";
-import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../../lib/storage.js";
+import { s3, s3Configured, isLocalKey, localPathOf } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
 import { env } from "../../lib/env.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
@@ -65,9 +65,8 @@ const safeRmDir = (p) => fs.promises.rm(p, { recursive: true, force: true }).cat
 // for media"; controllersMedia.resolveSeekablePath already streams. This is now
 // the third place that agrees.
 const resolveSourcePath = async (s3Key) => {
-  if (s3Key.startsWith("local/")) {
-    const filename = s3Key.slice("local/".length);
-    return { path: path.join(LOCAL_UPLOAD_DIR, filename), isTemp: false };
+  if (isLocalKey(s3Key)) {
+    return { path: localPathOf(s3Key), isTemp: false };
   }
   if (!s3Configured()) {
     throw new Error(`S3 not configured but s3_key is remote: ${s3Key}`);
@@ -210,7 +209,7 @@ transcriptionQueue.process(async (job) => {
   let source = null;
   let segmentDir = null;
   try {
-    logger.debug(`[WORKER:transcription] step 2/6 — resolving source from ${s3Key.startsWith("local/") ? "local FS" : "S3"}`);
+    logger.debug(`[WORKER:transcription] step 2/6 — resolving source from ${isLocalKey(s3Key) ? "local FS" : "S3"}`);
     source = await resolveSourcePath(s3Key);
     logger.debug(`[WORKER:transcription] step 2/6 ✓ source ready at ${source.path} (${Date.now() - t0}ms)`);
 

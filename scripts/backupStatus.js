@@ -52,7 +52,7 @@ const NEWEST = [
   ["035", "notifications"],
 ];
 
-const snapshot = async ({ pool, LOCAL_UPLOAD_DIR, s3Configured, PARTS_DIR }) => {
+const snapshot = async ({ pool, isLocalKey, localPathOf, s3Configured, PARTS_DIR }) => {
   const { rows: [size] } = await pool.query("SELECT pg_database_size(current_database())::bigint AS bytes");
   const counts = {};
   for (const table of TABLES) {
@@ -70,8 +70,8 @@ const snapshot = async ({ pool, LOCAL_UPLOAD_DIR, s3Configured, PARTS_DIR }) => 
   const missing = [];
   let localBytes = 0;
   for (const m of media) {
-    if (!String(m.s3_key ?? "").startsWith("local/")) continue;
-    const file = path.join(LOCAL_UPLOAD_DIR, m.s3_key.slice("local/".length));
+    if (!isLocalKey(m.s3_key)) continue;
+    const file = localPathOf(m.s3_key);
     if (fs.existsSync(file)) {
       local.push(m.id);
       localBytes += fs.statSync(file).size;

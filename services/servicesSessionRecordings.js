@@ -39,7 +39,7 @@ import { Upload } from "@aws-sdk/lib-storage";
 import { pool } from "../db/pool.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
-import { LOCAL_UPLOAD_DIR, s3, s3Configured } from "../lib/storage.js";
+import { LOCAL_UPLOAD_DIR, s3, s3Configured, localKeyFor, localPathOf } from "../lib/storage.js";
 import { AppError, notFound, forbidden, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { createMedia } from "./servicesMedia.js";
@@ -229,7 +229,8 @@ const assemble = async (recording) => {
   if (files.length === 0) return { s3Key: null, parts: 0, bytes: 0 };
 
   const name = `session-${recording.session_id}-recording-${recording.id}.${extensionFor(recording.mime_type)}`;
-  const joined = path.join(LOCAL_UPLOAD_DIR, name);
+  const localKey = localKeyFor(name);
+  const joined = localPathOf(localKey);
   const out = fs.createWriteStream(joined);
   for (const file of files) {
     await pipeline(fs.createReadStream(file), out, { end: false });
@@ -241,7 +242,7 @@ const assemble = async (recording) => {
   // S3, reading its header means fetching it back. null when unreadable.
   const durationSeconds = await probeDurationSeconds(joined);
 
-  let s3Key = `local/${name}`;
+  let s3Key = localKey;
   if (s3Configured()) {
     s3Key = `recordings/${name}`;
     await new Upload({

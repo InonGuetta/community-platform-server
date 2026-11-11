@@ -1,10 +1,9 @@
 // @ts-check
 import "dotenv/config";
 import fs from "fs";
-import path from "path";
 import { Upload } from "@aws-sdk/lib-storage";
 import { pool } from "./pool.js";
-import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
+import { s3, s3Configured, LOCAL_KEY_PREFIX, localNameOf, localPathOf } from "../lib/storage.js";
 import { getMimeType } from "../lib/mediaFormats.js";
 import { env } from "../lib/env.js";
 
@@ -53,8 +52,10 @@ const run = async () => {
     return;
   }
 
+  // The prefix has no LIKE wildcards in it, so it is matched as written.
   const { rows } = await pool.query(
-    "SELECT id, title, s3_key FROM media_items WHERE s3_key LIKE 'local/%' ORDER BY id"
+    "SELECT id, title, s3_key FROM media_items WHERE s3_key LIKE $1 ORDER BY id",
+    [`${LOCAL_KEY_PREFIX}%`]
   );
 
   if (rows.length === 0) {
@@ -69,8 +70,8 @@ const run = async () => {
   let failed = 0;
 
   for (const item of rows) {
-    const filename = item.s3_key.slice("local/".length);
-    const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+    const filename = localNameOf(item.s3_key);
+    const filePath = localPathOf(item.s3_key);
     const label = `#${item.id} ${item.title || "(untitled)"}`;
 
     if (!fs.existsSync(filePath)) {

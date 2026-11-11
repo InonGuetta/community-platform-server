@@ -20,13 +20,11 @@
 // Refuses to run with NODE_ENV=production.
 import "dotenv/config";
 import { randomBytes } from "node:crypto";
-import fs from "node:fs/promises";
-import path from "node:path";
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
 import { withTransaction } from "../db/transaction.js";
 import { env } from "../lib/env.js";
-import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
+import { isLocalKey, removeStored } from "../lib/storage.js";
 
 const out = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 
@@ -74,9 +72,9 @@ const teardown = async (runId) => {
   // The files after the rows: a file left behind is litter, a row pointing
   // at a deleted file is a broken lesson.
   for (const { s3_key: key } of media) {
-    if (typeof key === "string" && key.startsWith("local/")) {
-      await fs.rm(path.join(LOCAL_UPLOAD_DIR, key.slice("local/".length)), { force: true });
-    }
+    // Local files only: an S3 object the run uploaded is left where it is, as it
+    // always was.
+    if (isLocalKey(key)) await removeStored(key, { missingOk: true });
   }
   out({ runId, users: removed, courses, media: media.length, notices });
 };

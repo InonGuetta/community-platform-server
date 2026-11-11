@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
+import { LOCAL_UPLOAD_DIR, localKeyFor, localPathOf } from "../lib/storage.js";
 import { getMimeType, extensionOf, MEDIA_TYPE_BY_EXT } from "../lib/mediaFormats.js";
 
 // The "local/<name>" convention is a contract between the upload, the streaming
@@ -33,9 +33,10 @@ test("every file already on disk still resolves and still gets a real type", (t)
   if (files.length === 0) return t.skip("no stored media to check");
 
   for (const filename of files) {
-    // Exactly what the streaming controller does with an s3_key.
-    const s3Key = `local/${filename}`;
-    const resolved = path.join(LOCAL_UPLOAD_DIR, s3Key.slice("local/".length));
+    // The key an upload stores for this file, resolved the way every reader
+    // resolves it — through lib/storage.js, not a copy of the rule.
+    const s3Key = localKeyFor(filename);
+    const resolved = localPathOf(s3Key);
     assert.ok(fs.existsSync(resolved), `${s3Key} should resolve`);
     assert.notEqual(getMimeType(filename), "application/octet-stream", `${filename} should have a known type`);
   }

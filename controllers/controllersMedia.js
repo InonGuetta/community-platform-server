@@ -2,7 +2,7 @@
 import * as servicesMedia from "../services/servicesMedia.js";
 import { getLessonChat } from "../services/servicesSessionRecordings.js";
 import { notifyNewLesson } from "../services/servicesNotifications.js";
-import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
 import mammoth from "mammoth";
 import sanitizeHtml from "sanitize-html";
@@ -13,7 +13,7 @@ import { randomUUID } from "crypto";
 import { pipeline } from "stream/promises";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
-import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
+import { s3, s3Configured, isLocalKey, localKeyFor, localPathOf, removeStored } from "../lib/storage.js";
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType, isViewableText } from "../lib/mediaFormats.js";
 import { decodeTextBuffer } from "../lib/textEncoding.js";
 import { escapeHtml } from "../lib/html.js";
@@ -294,7 +294,7 @@ export const createMedia = async (req, res) => {
     } else {
       // Already in the right directory under the right name — nothing to move,
       // which is what keeps this off the cross-volume rename path entirely.
-      s3Key = `local/${req.file.filename}`;
+      s3Key = localKeyFor(req.file.filename);
     }
 
     const item = await servicesMedia.createMedia({
@@ -344,8 +344,7 @@ export const createMedia = async (req, res) => {
   } catch (err) {
     await fs.promises.unlink(req.file.path).catch(() => {});
     if (uploadedS3Key) {
-      await s3
-        .send(new DeleteObjectCommand({ Bucket: env.s3Bucket, Key: uploadedS3Key }))
+      await removeStored(uploadedS3Key)
         .catch((s3Err) => logger.warn(`Could not remove orphaned S3 object ${uploadedS3Key}: ${s3Err.message}`));
     }
     throw err;
@@ -444,18 +443,11 @@ export const deleteMedia = async (req, res) => {
   // cheaper failure.
   const result = await servicesMedia.deleteMedia(req.params.id);
 
-  if (item.s3_key.startsWith("local/")) {
-    const filePath = path.join(LOCAL_UPLOAD_DIR, item.s3_key.slice("local/".length));
-    await fs.promises.unlink(filePath).catch((err) =>
-      logger.warn(`Local delete failed for ${item.s3_key}: ${err.message}`));
-  } else {
-    // Best-effort: the row is already gone, so the caller's delete succeeded.
-    try {
-      await s3.send(new DeleteObjectCommand({ Bucket: env.s3Bucket, Key: item.s3_key }));
-    } catch (s3Err) {
-      logger.warn(`S3 delete failed for key ${item.s3_key}: ${s3Err.message}`);
-    }
-  }
+  // Best-effort: the row is already gone, so the caller's delete succeeded.
+  await removeStored(item.s3_key).catch((err) =>
+    logger.warn(isLocalKey(item.s3_key)
+      ? `Local delete failed for ${item.s3_key}: ${err.message}`
+      : `S3 delete failed for key ${item.s3_key}: ${err.message}`));
 
   res.status(200).json(result);
 };
@@ -595,8 +587,9 @@ export const parseRange = (header, size) => {
 };
 
 const streamLocalFile = async (item, req, res) => {
-  const filename = item.s3_key.slice("local/".length);
-  const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+  // The checks below read only the extension, so the key serves as the name.
+  const filename = item.s3_key;
+  const filePath = localPathOf(item.s3_key);
 
   if (isWordFile(filename)) {
     const buffer = await fs.promises.readFile(filePath);
@@ -738,7 +731,7 @@ export const streamMedia = async (req, res, next) => {
       );
     }
 
-    return item.s3_key.startsWith("local/")
+    return isLocalKey(item.s3_key)
       ? await streamLocalFile(item, req, res)
       : await streamS3Object(item, req, res);
   } catch (err) {
@@ -763,13 +756,12 @@ export const downloadMedia = async (req, res, next) => {
     // whole key, and the download was named "<title>.local/1700-abc".
     const ext = extensionOf(item.s3_key) || "bin";
 
-    if (item.s3_key.startsWith("local/")) {
-      const filename = item.s3_key.slice("local/".length);
-      const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+    if (isLocalKey(item.s3_key)) {
+      const filePath = localPathOf(item.s3_key);
       // stat first: a missing file must become a 404 before any header is set.
       const stat = await fs.promises.stat(filePath);
       res.set("Content-Disposition", downloadDisposition(item.title, ext));
-      res.set("Content-Type", getMimeType(filename));
+      res.set("Content-Type", getMimeType(item.s3_key));
       res.set("Content-Length", stat.size);
       return streamToResponse(fs.createReadStream(filePath), res, `download media ${item.id}`);
     }
@@ -793,8 +785,8 @@ export const downloadMedia = async (req, res, next) => {
 // temp file first. A local upload is already a seekable path and is used in
 // place.
 const resolveSeekablePath = async (s3Key) => {
-  if (s3Key.startsWith("local/")) {
-    const filePath = path.join(LOCAL_UPLOAD_DIR, s3Key.slice("local/".length));
+  if (isLocalKey(s3Key)) {
+    const filePath = localPathOf(s3Key);
     await fs.promises.stat(filePath); // 404 before any header goes out
     return { path: filePath, isTemp: false };
   }
@@ -1055,7 +1047,7 @@ export const streamPublicMedia = async (req, res, next) => {
     if (item.media_type === "text" && !isViewableText(item.s3_key)) {
       throw badRequest("This file cannot be displayed", ERROR_CODES.UNVIEWABLE_TEXT_FORMAT);
     }
-    return item.s3_key.startsWith("local/")
+    return isLocalKey(item.s3_key)
       ? await streamLocalFile(item, req, res)
       : await streamS3Object(item, req, res);
   } catch (err) {
