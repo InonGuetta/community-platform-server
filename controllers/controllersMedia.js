@@ -3,7 +3,6 @@ import * as servicesMedia from "../services/servicesMedia.js";
 import { getLessonChat } from "../services/servicesSessionRecordings.js";
 import { notifyNewLesson } from "../services/servicesNotifications.js";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { Upload } from "@aws-sdk/lib-storage";
 import mammoth from "mammoth";
 import sanitizeHtml from "sanitize-html";
 import fs from "fs";
@@ -13,7 +12,7 @@ import { randomUUID } from "crypto";
 import { pipeline } from "stream/promises";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
-import { s3, s3Configured, isLocalKey, localKeyFor, localPathOf, removeStored } from "../lib/storage.js";
+import { s3, isLocalKey, localKeyFor, localPathOf, removeStored, storeFile } from "../lib/storage.js";
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType, isViewableText } from "../lib/mediaFormats.js";
 import { decodeTextBuffer } from "../lib/textEncoding.js";
 import { escapeHtml } from "../lib/html.js";
@@ -277,25 +276,12 @@ export const createMedia = async (req, res) => {
     // header is null, and the transcription worker tries again later.
     const durationSeconds = mediaType === "text" ? null : await probeDurationSeconds(req.file.path);
 
-    let s3Key;
-    if (s3Configured()) {
-      s3Key = `uploads/${req.file.filename}`;
-      // Stream from disk instead of holding the whole body in memory.
-      await new Upload({
-        client: s3,
-        params: {
-          Bucket: env.s3Bucket,
-          Key: s3Key,
-          Body: fs.createReadStream(req.file.path),
-          ContentType: getMimeType(req.file.filename),
-        },
-      }).done();
-      uploadedS3Key = s3Key;
-    } else {
-      // Already in the right directory under the right name — nothing to move,
-      // which is what keeps this off the cross-volume rename path entirely.
-      s3Key = localKeyFor(req.file.filename);
-    }
+    // multer has already written it into the uploads directory under its final
+    // name, so without S3 there is nothing to move — which is what keeps this
+    // off the cross-volume rename path entirely. With S3 it is copied up, and
+    // the local copy goes only once the row exists (below).
+    const s3Key = await storeFile(localKeyFor(req.file.filename), { folder: "uploads" });
+    if (!isLocalKey(s3Key)) uploadedS3Key = s3Key;
 
     const item = await servicesMedia.createMedia({
       uploaderId: req.user.id,

@@ -1,11 +1,8 @@
 // @ts-check
 import "dotenv/config";
 import fs from "fs";
-import { Upload } from "@aws-sdk/lib-storage";
 import { pool } from "./pool.js";
-import { s3, s3Configured, LOCAL_KEY_PREFIX, localNameOf, localPathOf } from "../lib/storage.js";
-import { getMimeType } from "../lib/mediaFormats.js";
-import { env } from "../lib/env.js";
+import { s3Configured, LOCAL_KEY_PREFIX, isLocalKey, localNameOf, localPathOf, storeFile } from "../lib/storage.js";
 
 // Moves media that predates S3 out of the local uploads directory.
 //
@@ -24,20 +21,6 @@ import { env } from "../lib/env.js";
 
 const dryRun = process.argv.includes("--dry");
 const deleteLocal = process.argv.includes("--delete-local");
-
-const uploadOne = async (filename, filePath) => {
-  const key = `uploads/${filename}`;
-  await new Upload({
-    client: s3,
-    params: {
-      Bucket: env.s3Bucket,
-      Key: key,
-      Body: fs.createReadStream(filePath),
-      ContentType: getMimeType(filename),
-    },
-  }).done();
-  return key;
-};
 
 const run = async () => {
   // A dry run reads only the database and the disk, so it answers without S3 —
@@ -89,7 +72,11 @@ const run = async () => {
     }
 
     try {
-      const key = await uploadOne(filename, filePath);
+      // Into the bucket exactly where an upload made today would go.
+      const key = await storeFile(item.s3_key, { folder: "uploads" });
+      // Unreachable while the check at the top of run() holds — here so a run
+      // can never record a file as moved when nothing left the disk.
+      if (isLocalKey(key)) throw new Error("S3 is not configured — nothing was uploaded");
       // Only after the upload resolves, so an interrupted run never leaves a
       // row pointing at an object that was never finished.
       await pool.query("UPDATE media_items SET s3_key=$1 WHERE id=$2", [key, item.id]);

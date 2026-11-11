@@ -35,11 +35,9 @@ import path from "path";
 import { pipeline } from "stream/promises";
 import { execFile } from "child_process";
 import ffmpegPath from "ffmpeg-static";
-import { Upload } from "@aws-sdk/lib-storage";
 import { pool } from "../db/pool.js";
-import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
-import { LOCAL_UPLOAD_DIR, s3, s3Configured, localKeyFor, localPathOf } from "../lib/storage.js";
+import { LOCAL_UPLOAD_DIR, isLocalKey, localKeyFor, localPathOf, storeFile } from "../lib/storage.js";
 import { AppError, notFound, forbidden, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { createMedia } from "./servicesMedia.js";
@@ -242,15 +240,10 @@ const assemble = async (recording) => {
   // S3, reading its header means fetching it back. null when unreadable.
   const durationSeconds = await probeDurationSeconds(joined);
 
-  let s3Key = localKey;
-  if (s3Configured()) {
-    s3Key = `recordings/${name}`;
-    await new Upload({
-      client: s3,
-      params: { Bucket: env.s3Bucket, Key: s3Key, Body: fs.createReadStream(joined), ContentType: recording.mime_type.split(";")[0] },
-    }).done();
-    await fsp.rm(joined, { force: true });
-  }
+  // To the bucket when S3 is configured, and then nothing of it stays here;
+  // otherwise it is already where local media lives.
+  const s3Key = await storeFile(localKey, { folder: "recordings", contentType: recording.mime_type.split(";")[0] });
+  if (!isLocalKey(s3Key)) await fsp.rm(joined, { force: true });
   return { s3Key, parts: files.length, bytes: size || bytes, durationSeconds };
 };
 
