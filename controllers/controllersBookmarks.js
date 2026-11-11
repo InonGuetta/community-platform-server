@@ -1,11 +1,10 @@
 // @ts-check
 import * as servicesBookmarks from "../services/servicesBookmarks.js";
-import * as servicesMedia from "../services/servicesMedia.js";
-import { canUserSeeMedia, viewerScopeFor } from "../services/servicesVisibility.js";
+import { assertUserCanSeeMediaId, viewerScopeFor } from "../services/servicesVisibility.js";
 import {
   requireSeconds, optionalSeconds, optionalId, optionalNote, optionalRect,
 } from "../lib/validate.js";
-import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
+import { badRequest, ERROR_CODES } from "../lib/AppError.js";
 
 export const getBookmarks = async (req, res) => {
   const mediaId = optionalId(req.query.mediaId, "mediaId");
@@ -116,10 +115,7 @@ export const createBookmark = async (req, res) => {
   // 404 rather than 403, and the same code the media read answers: an item a
   // student may not see has to be indistinguishable from one that does not
   // exist, or the id space becomes the enumeration it was going to prevent.
-  const media = await servicesMedia.getMediaById(id);
-  if (!(await canUserSeeMedia(req.user, media))) {
-    throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
-  }
+  const media = await assertUserCanSeeMediaId(req.user, id);
 
   // The anchor has to suit the item: a moment belongs to a recording, a place
   // in a text to a document. A timestamp on a book or a rect on a video is a

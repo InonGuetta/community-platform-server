@@ -1,9 +1,8 @@
 // @ts-check
 import * as servicesNotes from "../services/servicesNotes.js";
-import * as servicesMedia from "../services/servicesMedia.js";
-import { canUserSeeMedia, viewerScopeFor } from "../services/servicesVisibility.js";
+import { assertUserCanSeeMediaId, viewerScopeFor } from "../services/servicesVisibility.js";
 import { optionalId, optionalSeconds, requireIdList, optionalQueryString } from "../lib/validate.js";
-import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
+import { badRequest } from "../lib/AppError.js";
 
 // One route, three answers (PRD NOTE-17) — see servicesNotes:
 //   GET /notes                  the list, light: a preview and no body
@@ -43,18 +42,10 @@ const withoutBodyText = ({ body_text, ...note }) => note;
 // The same 404 the media and transcript endpoints answer, for the same reason:
 // an id that exists but is hidden must be indistinguishable from one that does
 // not, or the endpoint becomes a way to enumerate what is in the library.
-const assertMediaVisible = async (user, mediaId) => {
-  if (mediaId === null) return;
-  const item = await servicesMedia.getMediaById(mediaId);
-  if (!(await canUserSeeMedia(user, item))) {
-    throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
-  }
-};
-
 export const createNote = async (req, res) => {
   const { title, body, mediaId, timestampSeconds } = req.body ?? {};
   const linkedMediaId = optionalId(mediaId, "mediaId");
-  await assertMediaVisible(req.user, linkedMediaId);
+  if (linkedMediaId !== null) await assertUserCanSeeMediaId(req.user, linkedMediaId);
   const note = await servicesNotes.createNote(req.user.id, {
     title,
     body,

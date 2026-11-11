@@ -33,7 +33,7 @@
 // plausible-looking text.
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
-import { assertCanSeeLesson } from "./access.js";
+import { assertScopeCanSeeMediaId } from "../servicesVisibility.js";
 import { embedQuery, toVectorLiteral } from "../servicesEmbeddings.js";
 import { rerankByRelevance, RRF_K, FUSE_DEPTH } from "../transcripts/search.js";
 
@@ -221,7 +221,7 @@ const KEYWORD_SQL = `
  * @param {RetrievalDeps} [deps]
  */
 export const searchWithinMedia = async (mediaId, query, scope, deps = DEFAULT_DEPS) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
 
   let vector = null;
   try {

@@ -4,8 +4,11 @@
 // servicesTranscripts.js and for the same reason: the controller imports this
 // file and never needs to know how the folder is cut.
 //
-//   discussion/access.js         may the caller discuss this lesson at all —
-//                                asked first by every door below
+// Every door below asks first whether the caller may see the lesson at all —
+// servicesVisibility.assertScopeCanSeeMediaId, the guard every lesson read
+// shares — before any chunk is read, any message returned or any OpenAI call
+// made.
+//
 //   discussion/retrieval.js      search inside ONE lesson (keyword + exact
 //                                vector, RRF, GPT-4o rerank) — the smart-search
 //                                mode, and the retrieval the chat builds on

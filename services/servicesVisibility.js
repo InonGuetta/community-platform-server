@@ -7,9 +7,14 @@
 // query, so it belongs in a service, and it belongs in exactly one service or the
 // six handlers that need it would each grow their own copy.
 //
+// It is also the guard every door that takes a lesson's id asks — "may this
+// caller see this item?" — and the 404 it answers when not (below). One copy,
+// because each door that wrote its own check worded the refusal its own way.
+//
 // The name is not a resource, unlike servicesMedia or servicesCourses. Neither is
 // servicesHealth. What both have in common is that they answer a question the
 // application asks rather than manage a thing it stores.
+import { pool } from "../db/pool.js";
 import { canSeeMediaRow, UNRESTRICTED } from "../lib/permissions.js";
 import { getEnrolledCourseIds } from "./servicesCourses.js";
 import { getMediaById } from "./servicesMedia.js";
@@ -57,18 +62,57 @@ export const canUserSeeMedia = async (user, item) => {
   return canSeeMediaRow(item, await getEnrolledCourseIds(user.id), []);
 };
 
-// The write-side form: "this caller is about to attach something of theirs to
-// this item id — may they see it?" Throws the same 404 the media read answers,
-// so a hidden item and a missing one are indistinguishable.
+// ── The guard: every door that takes a lesson's id ──────────────────────────
+//
+// What a lesson the caller may not see answers: 404, and the very error a lesson
+// that does not exist answers (servicesMedia.getMediaById throws the same). Not
+// 403 — an item a student may not see must be indistinguishable from one that
+// does not exist, or the id space becomes a way to enumerate drafts and other
+// courses' lessons.
+export const hiddenMediaError = () => notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
+
+// An item already loaded — the read, the stream, the download, the progress.
+// Returns the item, so a call site can load and check in one line.
+export const assertUserCanSeeMedia = async (user, item) => {
+  if (!(await canUserSeeMedia(user, item))) throw hiddenMediaError();
+  return item;
+};
+
+// By id: "this caller is about to read, or attach something of theirs to, this
+// item — may they see it?"
 //
 // Likes, saves and playlist items wrote against any id the caller named. That
 // let a student like a draft (counted in like_count, which its owner sees) and
 // turned the FK error on a missing id — a 500, against a 201 for one that
-// exists — into a way to enumerate the archive.
-export const assertUserCanSeeMediaId = async (user, mediaId) => {
-  const item = await getMediaById(mediaId);
-  if (!(await canUserSeeMedia(user, item))) {
-    throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
-  }
-  return item;
+// exists — into a way to enumerate the archive. Notes and bookmarks the same:
+// the list they come back in carries the item's title.
+export const assertUserCanSeeMediaId = async (user, mediaId) =>
+  assertUserCanSeeMedia(user, await getMediaById(mediaId));
+
+// By id, for a caller whose scope viewerScopeFor has already resolved — the
+// transcript and every door of the discussion, which hold the scope for their
+// own reads anyway. A transcript has no visibility of its own: it inherits the
+// item's, so the two answering differently is the definition of a leak.
+//
+// uploader_id rides along because the rule has two dimensions: whose DRAFTS a
+// caller may see is answered by who uploaded the item, and a SELECT that omits
+// it silently made every lecturer fail the ownership half.
+/**
+ * @param {number|string} mediaId
+ * @param {{ courses: number[]|null, drafts: number[]|null }} scope  from viewerScopeFor
+ */
+export const canScopeSeeMediaId = async (mediaId, scope) => {
+  const media = await pool.query(
+    "SELECT is_published, course_id, uploader_id FROM media_items WHERE id=$1",
+    [mediaId]
+  );
+  return media.rows.length > 0 && canSeeMediaRow(media.rows[0], scope.courses, scope.drafts);
+};
+
+/**
+ * @param {number|string} mediaId
+ * @param {{ courses: number[]|null, drafts: number[]|null }} scope  from viewerScopeFor
+ */
+export const assertScopeCanSeeMediaId = async (mediaId, scope) => {
+  if (!(await canScopeSeeMediaId(mediaId, scope))) throw hiddenMediaError();
 };

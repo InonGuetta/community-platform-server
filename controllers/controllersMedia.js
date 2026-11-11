@@ -9,14 +9,14 @@ import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { logger } from "../lib/logger.js";
 import { isPrivileged, assertCanManageMedia, assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
-import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
+import { viewerScopeFor, assertUserCanSeeMediaId } from "../services/servicesVisibility.js";
 import {
   requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
   durationRangeFilter, optionalDateFilter, optionalQueryString,
   mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor,
 } from "../lib/validate.js";
 import { setMediaTags, cleanTagSelection } from "../services/servicesTags.js";
-import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
+import { badRequest, notFound } from "../lib/AppError.js";
 
 // s3_key is an internal storage pointer — never ship it to the client. Streaming
 // and downloading go through the dedicated /:id/stream and /:id/download routes.
@@ -45,21 +45,6 @@ const publicMedia = ({ s3_key, ...rest }) => ({
   file_ext: extensionOf(s3_key),
   can_view_inline: rest.media_type === "text" ? isViewableText(s3_key) : null,
 });
-
-// Every handler that loads a media item and then has to decide whether this
-// caller may see it — the read, the session chat and the progress here, and the
-// stream, the download and the audio extract in controllersMediaFiles.js, which
-// imports this. All answer 404 rather than 403: an item a student may not see
-// must be indistinguishable from one that does not exist, or the id space
-// becomes a way to enumerate the library.
-//
-// Returns true when it has already answered, so a call site reads as one line:
-// `if (await refuseIfHidden(req, res, item)) return;`.
-export const refuseIfHidden = async (req, res, item) => {
-  if (await canUserSeeMedia(req.user, item)) return false;
-  res.status(404).json({ message: "Media not found", code: ERROR_CODES.MEDIA_NOT_FOUND });
-  return true;
-};
 
 export const getAllMedia = async (req, res) => {
   const {
@@ -151,8 +136,7 @@ export const getAllMedia = async (req, res) => {
 };
 
 export const getMediaById = async (req, res) => {
-  const item = await servicesMedia.getMediaById(req.params.id);
-  if (await refuseIfHidden(req, res, item)) return;
+  const item = await assertUserCanSeeMediaId(req.user, req.params.id);
   res.status(200).json(publicMedia(item));
 };
 
@@ -160,8 +144,7 @@ export const getMediaById = async (req, res) => {
 // may see the lesson — the same rule as the lesson itself. [] for a lesson
 // that was not recorded in a session, or whose session had no chat.
 export const getSessionChat = async (req, res) => {
-  const item = await servicesMedia.getMediaById(req.params.id);
-  if (await refuseIfHidden(req, res, item)) return;
+  const item = await assertUserCanSeeMediaId(req.user, req.params.id);
   res.status(200).json(await getLessonChat(item.id));
 };
 
@@ -415,8 +398,7 @@ export const getContinueWatching = async (req, res) => {
 // an id that did not exist failed the FK as a 500 while one that existed — draft
 // or not — answered 200, an existence oracle over the id space.
 export const getProgress = async (req, res) => {
-  const item = await servicesMedia.getMediaById(req.params.id);
-  if (await refuseIfHidden(req, res, item)) return;
+  await assertUserCanSeeMediaId(req.user, req.params.id);
   const progress = await servicesMedia.getWatchProgress(req.user.id, req.params.id);
   res.status(200).json(progress);
 };
@@ -425,8 +407,7 @@ export const saveProgress = async (req, res) => {
   // Body first, as createBookmark does: a malformed position is a 400 whatever
   // the item, and costs no query.
   const positionSeconds = requireSeconds(req.body?.positionSeconds, "positionSeconds");
-  const item = await servicesMedia.getMediaById(req.params.id);
-  if (await refuseIfHidden(req, res, item)) return;
+  await assertUserCanSeeMediaId(req.user, req.params.id);
   const progress = await servicesMedia.saveWatchProgress(req.user.id, req.params.id, positionSeconds);
   res.status(200).json(progress);
 };

@@ -45,7 +45,7 @@ import { meterOpenAI } from "../../lib/openaiClient.js";
 // Metered as "chat" — the line this module's calls appear on in the
 // admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
 const openai = meterOpenAI(interactiveOpenai, "chat");
-import { assertCanSeeLesson } from "./access.js";
+import { assertScopeCanSeeMediaId } from "../servicesVisibility.js";
 import { searchWithinMedia } from "./retrieval.js";
 import { getOrStartConversation, getRecentMessages, appendMessage, countQuestionsToday } from "./conversations.js";
 import { lessonChunks, buildContext, formatPassages, citationSnapshot } from "./context.js";
@@ -329,7 +329,7 @@ export const assertQuestionQuota = async (user) => {
  * @param {ChatDeps} [args.deps]
  */
 export const prepareAsk = async ({ user, mediaId, question, scope, deps = DEFAULT_DEPS }) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
 
   // Before anything is paid for — and before the stream opens, so the refusal
   // is an ordinary 429 the client can say something precise about.

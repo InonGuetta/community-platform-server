@@ -7,7 +7,7 @@
 import { pool } from "../../db/pool.js";
 import { withTransaction } from "../../db/transaction.js";
 import { chunkTextByParagraph } from "../../lib/textChunks.js";
-import { canSeeMediaRow } from "../../lib/permissions.js";
+import { canScopeSeeMediaId } from "../servicesVisibility.js";
 import { logger } from "../../lib/logger.js";
 import { notFound, ERROR_CODES } from "../../lib/AppError.js";
 
@@ -243,18 +243,11 @@ export const saveTextChunks = async (mediaId, text, pageOffsets = null) => {
 export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], drafts: [] }, { content = true } = {}) => {
   logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} visible=${JSON.stringify(scope.courses)}`);
 
-  // uploader_id rides along because the visibility rule now has two dimensions:
-  // whose DRAFTS a caller may see is answered by who uploaded the item, and a
-  // SELECT that omits it silently made every lecturer fail the ownership half.
-  const media = await pool.query(
-    "SELECT is_published, course_id, uploader_id FROM media_items WHERE id=$1",
-    [mediaId]
-  );
-  // Same rule as the media reads and the search, from the same function. This is
-  // the site the shared predicate exists for: a transcript has no visibility of
-  // its own, it inherits the item's, so the two answering differently is the
-  // definition of a leak.
-  if (media.rows.length === 0 || !canSeeMediaRow(media.rows[0], scope.courses, scope.drafts)) {
+  // The lesson's own guard (servicesVisibility): a transcript has no visibility
+  // of its own, it inherits the item's. Refused in the transcript's words — the
+  // code this endpoint has always answered — and the same for a lesson that
+  // does not exist.
+  if (!(await canScopeSeeMediaId(mediaId, scope))) {
     logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not visible`);
     throw notFound("Transcript not found", ERROR_CODES.TRANSCRIPT_NOT_FOUND);
   }

@@ -17,9 +17,8 @@ import { streamToResponse, parseRange, RANGE_UNSATISFIABLE, isClientAbort } from
 import { convertWordToHtml } from "../lib/wordToHtml.js";
 import { logger } from "../lib/logger.js";
 import { AppError, badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
-// The 404 for a lesson this caller may not see — shared with the media
-// controller's own reads.
-import { refuseIfHidden } from "./controllersMedia.js";
+// The guard for a lesson this caller may not see, and the 404 it answers.
+import { canUserSeeMedia, assertUserCanSeeMediaId, hiddenMediaError } from "../services/servicesVisibility.js";
 
 // Same bundled binary the transcription worker uses, so the API and the worker
 // cannot end up transcoding with two different ffmpeg builds.
@@ -172,7 +171,12 @@ const errorPage = (err) => {
 export const streamMedia = async (req, res, next) => {
   try {
     const item = await servicesMedia.getMediaById(req.params.id);
-    if (await refuseIfHidden(req, res, item)) return;
+    // Straight to next(), not thrown: the catch below turns an error into the
+    // HTML page when a browser asked for one, and a hidden lesson has always
+    // answered the JSON 404 here, even then — while a missing one gets the page
+    // (test/mediaVisibilityGuard.test.js pins both). Making the two match is a
+    // change of behaviour to make on purpose, not in passing.
+    if (!(await canUserSeeMedia(req.user, item))) return next(hiddenMediaError());
 
     // Refused HERE rather than discovered inside the converter.
     //
@@ -211,8 +215,7 @@ export const streamMedia = async (req, res, next) => {
 
 export const downloadMedia = async (req, res, next) => {
   try {
-    const item = await servicesMedia.getMediaById(req.params.id);
-    if (await refuseIfHidden(req, res, item)) return;
+    const item = await assertUserCanSeeMediaId(req.user, req.params.id);
     // extensionOf, not split(".").pop(): for a key with no dot the latter is the
     // whole key, and the download was named "<title>.local/1700-abc".
     const ext = extensionOf(item.s3_key) || "bin";
@@ -271,8 +274,7 @@ export const downloadMediaAudio = async (req, res, next) => {
   let temp = null;
   let holdsSlot = false;
   try {
-    const item = await servicesMedia.getMediaById(req.params.id);
-    if (await refuseIfHidden(req, res, item)) return;
+    const item = await assertUserCanSeeMediaId(req.user, req.params.id);
     // Audio items already have their own download; documents have no audio at
     // all. Only a video needs this route, so anything else is a client mistake.
     if (item.media_type !== "video") {
