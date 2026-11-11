@@ -5,25 +5,17 @@ import { notifyNewLesson } from "../services/servicesNotifications.js";
 import fs from "fs";
 import { isLocalKey, localKeyFor, removeStored, storeFile } from "../lib/storage.js";
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, isViewableText } from "../lib/mediaFormats.js";
-import { escapeHtml } from "../lib/html.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { logger } from "../lib/logger.js";
-import { env } from "../lib/env.js";
 import { isPrivileged, assertCanManageMedia, assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
 import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
 import {
   requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
   durationRangeFilter, optionalDateFilter, optionalQueryString,
-  mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor, requireIdList,
+  mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor,
 } from "../lib/validate.js";
-import {
-  setMediaTags, cleanTagSelection, getTagTree,
-  proposeTag, getPendingProposalsForMedia, withdrawProposal,
-} from "../services/servicesTags.js";
-import { suggestTags } from "../lib/tagSuggestions.js";
-import * as tagging from "../services/transcripts/tagging.js";
-import { assertWithinAiBudget } from "../services/servicesAiUsage.js";
+import { setMediaTags, cleanTagSelection } from "../services/servicesTags.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // s3_key is an internal storage pointer — never ship it to the client. Streaming
@@ -444,9 +436,6 @@ export const saveProgress = async (req, res) => {
   res.status(200).json(progress);
 };
 
-// Every tag in use, with how many items carry it. Feeds the upload form's
-// autocomplete and the archive's filter — both of which need the same list, so
-// it is one endpoint rather than two shapes of the same query.
 // The creator list for the filter menu. Its own endpoint because the listing is
 // now filtered server-side, and a menu built from filtered rows closes on
 // whatever was chosen.
@@ -464,152 +453,4 @@ export const getCreatorProfile = async (req, res) => {
   const profile = await servicesMedia.getCreatorProfile(name, await viewerScopeFor(req.user));
   if (!profile) throw notFound("No such lecturer");
   res.status(200).json(profile);
-};
-
-// What this item looks like it is about, offered to whoever may tag it.
-//
-// A first guess from the title, never applied on its own — see
-// lib/tagSuggestions.js for what it can and cannot know. It exists because the
-// alternative, which this archive ran on until now, is that items arrive
-// untagged and stay that way: every filter in the application was a control over
-// an empty set, and asking again after the upload, with a starting point, is the
-// cheapest moment to fix that.
-//
-// Ownership is checked, not just the role: a suggestion is about a particular
-// item, and offering it discloses that item's title to whoever asked.
-export const getTagSuggestions = async (req, res) => {
-  const item = await servicesMedia.getMediaById(req.params.id);
-  assertCanManageMedia(req.user, item);
-  const tags = await getTagTree();
-  res.status(200).json(suggestTags(item, tags));
-};
-
-export const getTags = async (req, res) => {
-  // The counts are per VIEWER: a student must not be offered "7" beside a branch
-  // that answers with three. Same scope object the listing resolves, so the
-  // number on a chip and the rows behind it are decided by one rule.
-  const scope = await viewerScopeFor(req.user);
-  res.status(200).json(await getTagTree({ visibleCourses: scope.courses, visibleDrafts: scope.drafts }));
-};
-
-
-// ── A new tag, proposed from an item's tagging dialog ───────────────────────
-//
-// The item is what the tag will be attached to once an admin approves it (an
-// admin's own proposal is approved on the spot), so ownership is checked as for
-// any other write to the item's tags.
-export const proposeTagForMedia = async (req, res) => {
-  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
-  const { name, parentId } = req.body ?? {};
-  const result = await proposeTag({ mediaId: Number(req.params.id), name, parentId, user: req.user });
-  // 201 either way — something was created: a proposal, or (for an admin) the tag.
-  res.status(201).json(result);
-};
-
-export const getMediaTagProposals = async (req, res) => {
-  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
-  res.status(200).json(await getPendingProposalsForMedia(req.params.id));
-};
-
-export const withdrawMediaTagProposal = async (req, res) => {
-  assertCanManageMedia(req.user, await servicesMedia.getMediaById(req.params.id));
-  await withdrawProposal(req.params.id, req.params.proposalId);
-  res.status(204).end();
-};
-
-// ── Tags the LLM proposed (PRD ARCH-4) ──────────────────────────────────────
-//
-// Whoever may change this lesson's tags may see, ask for, accept and dismiss
-// its proposals — the same ownership question as tagging it by hand.
-
-const managedItem = async (req) => {
-  const item = await servicesMedia.getMediaById(req.params.id);
-  assertCanManageMedia(req.user, item);
-  return item;
-};
-
-export const getAiTagSuggestions = async (req, res) => {
-  await managedItem(req);
-  res.status(200).json(await tagging.getAiTagSuggestions(req.params.id));
-};
-
-// Asking now, for a lesson processed before proposals existed or one whose
-// tree has grown since. A person is waiting, and it is spend, so the monthly
-// cap applies (PRD NFR-3).
-export const requestAiTagSuggestions = async (req, res) => {
-  await managedItem(req);
-  await assertWithinAiBudget();
-  res.status(200).json(await tagging.suggestTagsForMedia(req.params.id, { interactive: true }));
-};
-
-export const approveAiTagSuggestions = async (req, res) => {
-  await managedItem(req);
-  const tagIds = requireIdList(req.body?.tagIds, "tagIds");
-  res.status(200).json(await tagging.approveAiTags(req.params.id, tagIds));
-};
-
-// Some (?tagId=…, repeatable) or all of them.
-export const dismissAiTagSuggestions = async (req, res) => {
-  await managedItem(req);
-  const raw = req.query.tagId;
-  const tagIds = raw === undefined ? null : requireIdList([].concat(raw), "tagId");
-  res.status(200).json(await tagging.dismissAiTags(req.params.id, tagIds));
-};
-
-// ── A public lesson, for a guest with the link (PRD COM-3b, COM-4) ──────────
-//
-// No session on any of these: the link is meant to be opened by someone who
-// has never signed up. What makes it safe is the row — public AND published,
-// checked on every request by getPublicMedia — and how little is sent: the
-// recording, the summary and the key points. A lesson that is not public is
-// the same 404 as one that does not exist.
-
-const publicLesson = ({ s3_key, ...lesson }) => lesson;
-
-export const getPublicLesson = async (req, res) => {
-  const lesson = await servicesMedia.getPublicMedia(req.params.id);
-  if (!lesson) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
-  res.status(200).json(publicLesson(lesson));
-};
-
-// What a WhatsApp (or any) link preview reads. Crawlers do not run the app's
-// JavaScript, so the share link is this small server-rendered page: Open Graph
-// tags naming the lesson, then an immediate redirect to the guest page in the
-// app. For a lesson that is not public it names nothing — a generic card — and
-// redirects all the same, so the link reveals no title it should not.
-const excerpt = (text, max = 200) => {
-  const clean = String(text ?? "").replace(/\s+/g, " ").trim();
-  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
-};
-
-export const sharePage = async (req, res) => {
-  const lesson = await servicesMedia.getPublicMedia(req.params.id);
-  const target = `${env.clientUrl}/l/${encodeURIComponent(req.params.id)}`;
-  const title = lesson ? lesson.title : "שיעור בפלטפורמת הקהילה";
-  const by = lesson?.creator_name && lesson.creator_name !== servicesMedia.DEFAULT_CREATOR ? ` · ${lesson.creator_name}` : "";
-  const description = lesson ? excerpt(lesson.ai_summary || lesson.description || "") : "";
-  const image = lesson?.thumbnail_url && /^https?:\/\//.test(lesson.thumbnail_url)
-    ? lesson.thumbnail_url
-    : `${env.clientUrl}/icons/icon-512.png`;
-  const meta = [
-    ["og:type", "article"],
-    ["og:site_name", "פלטפורמת הקהילה"],
-    ["og:title", `${title}${by}`],
-    ["og:description", description],
-    ["og:image", image],
-    ["og:url", target],
-    ["og:locale", "he_IL"],
-  ].filter(([, v]) => v).map(([p, v]) => `<meta property="${p}" content="${escapeHtml(v)}">`).join("");
-  res
-    .status(200)
-    .type("html")
-    .set("Cache-Control", "public, max-age=300")
-    .send(
-      `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">` +
-      `<title>${escapeHtml(`${title}${by}`)}</title>` +
-      `<meta name="description" content="${escapeHtml(description)}">${meta}` +
-      `<meta name="twitter:card" content="summary">` +
-      `<meta http-equiv="refresh" content="0; url=${escapeHtml(target)}">` +
-      `</head><body><a href="${escapeHtml(target)}">${escapeHtml(title)}</a></body></html>`
-    );
 };

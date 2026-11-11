@@ -8,6 +8,7 @@ import { userRateLimit } from "../middleware/userRateLimit.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
 import * as controllersMediaFiles from "../controllers/controllersMediaFiles.js";
+import * as controllersMediaTags from "../controllers/controllersMediaTags.js";
 import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { MEDIA_TYPE_BY_EXT, extensionOf } from "../lib/mediaFormats.js";
 import { logger } from "../lib/logger.js";
@@ -76,7 +77,7 @@ router.get("/get-all", controllersMedia.getAllMedia);
 // Before "/:id" — validateIntParam would reject the literal "tags" as a
 // malformed id and this route would be unreachable. Same hazard as "/my" in
 // routersCourses and "/pending" in routersUsers.
-router.get("/tags", controllersMedia.getTags);
+router.get("/tags", controllersMediaTags.getTags);
 router.get("/creators", controllersMedia.getCreators);
 // One lecturer's page (PRD ATTR-10). Two segments, so "/:id" cannot take it.
 router.get("/creators/:name", controllersMedia.getCreatorProfile);
@@ -106,23 +107,23 @@ router.get(
   "/:id/tag-suggestions",
   canManage,
   validateIntParam("id"),
-  controllersMedia.getTagSuggestions
+  controllersMediaTags.getTagSuggestions
 );
 // A tag that does not exist yet, proposed from this item's tagging dialog. It
 // waits for an admin (routersAdmin) and is attached to the item on approval.
-router.get("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.getMediaTagProposals);
+router.get("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMediaTags.getMediaTagProposals);
 // Tags the LLM proposed (PRD ARCH-4). Asking spends, so it is limited per user.
-router.get("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMedia.getAiTagSuggestions);
-router.post("/:id/ai-tag-suggestions", canManage, aiTagLimiter, validateIntParam("id"), controllersMedia.requestAiTagSuggestions);
-router.post("/:id/ai-tag-suggestions/approve", canManage, validateIntParam("id"), controllersMedia.approveAiTagSuggestions);
-router.delete("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMedia.dismissAiTagSuggestions);
-router.post("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.proposeTagForMedia);
+router.get("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMediaTags.getAiTagSuggestions);
+router.post("/:id/ai-tag-suggestions", canManage, aiTagLimiter, validateIntParam("id"), controllersMediaTags.requestAiTagSuggestions);
+router.post("/:id/ai-tag-suggestions/approve", canManage, validateIntParam("id"), controllersMediaTags.approveAiTagSuggestions);
+router.delete("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMediaTags.dismissAiTagSuggestions);
+router.post("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMediaTags.proposeTagForMedia);
 router.delete(
   "/:id/tag-proposals/:proposalId",
   canManage,
   validateIntParam("id"),
   validateIntParam("proposalId"),
-  controllersMedia.withdrawMediaTagProposal
+  controllersMediaTags.withdrawMediaTagProposal
 );
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
 router.get("/:id/stream", validateIntParam("id"), controllersMediaFiles.streamMedia);
