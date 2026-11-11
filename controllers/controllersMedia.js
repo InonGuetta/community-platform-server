@@ -2,17 +2,17 @@
 import * as servicesMedia from "../services/servicesMedia.js";
 import { getLessonChat } from "../services/servicesSessionRecordings.js";
 import { notifyNewLesson } from "../services/servicesNotifications.js";
-import { GetObjectCommand } from "@aws-sdk/client-s3";
 import mammoth from "mammoth";
 import sanitizeHtml from "sanitize-html";
 import fs from "fs";
 import os from "os";
-import path from "path";
-import { randomUUID } from "crypto";
 import { pipeline } from "stream/promises";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
-import { s3, isLocalKey, localKeyFor, localPathOf, removeStored, storeFile } from "../lib/storage.js";
+import {
+  isLocalKey, localKeyFor, localPathOf, removeStored, storeFile,
+  openBucketObject, downloadToTemp, bufferOf, isStorageNotFound,
+} from "../lib/storage.js";
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, getMimeType, isViewableText } from "../lib/mediaFormats.js";
 import { decodeTextBuffer } from "../lib/textEncoding.js";
 import { escapeHtml } from "../lib/html.js";
@@ -499,15 +499,6 @@ const convertWordToHtml = async (buffer) => {
 </head><body>${html}</body></html>`;
 };
 
-// The DB row outlived the file/object it points at (deleted from disk, removed
-// from the bucket). That's a 404 for the caller, not a server fault — which is
-// what it used to surface as.
-const STORAGE_NOT_FOUND = new Set(["ENOENT", "NoSuchKey", "NotFound"]);
-const isStorageNotFound = (err) =>
-  STORAGE_NOT_FOUND.has(err?.code) ||
-  STORAGE_NOT_FOUND.has(err?.name) ||
-  err?.$metadata?.httpStatusCode === 404;
-
 // The client hung up: the user seeked, closed the tab or navigated away. On a
 // media player this is constant and completely normal, so it must not be logged
 // as an error or the log fills with noise and hides the real failures.
@@ -622,42 +613,27 @@ const streamS3Object = async (item, req, res) => {
   // extension, before the request, exactly as streamLocalFile decides it.
   const convertedWhole = isPlainText(item.s3_key) || isWordFile(item.s3_key);
   const range = convertedWhole ? undefined : req.headers.range;
-  const s3Response = await s3.send(
-    new GetObjectCommand({
-      Bucket: env.s3Bucket,
-      Key: item.s3_key,
-      ...(range ? { Range: range } : {}),
-    })
-  );
-  const contentType = s3Response.ContentType || "application/octet-stream";
+  const object = await openBucketObject(item.s3_key, { range });
+  const contentType = object.contentType || "application/octet-stream";
 
   if (contentType.startsWith("text/plain")) {
-    const stream = /** @type {import("stream").Readable} */ (s3Response.Body);
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    return sendDecodedText(Buffer.concat(chunks), res);
+    return sendDecodedText(await bufferOf(object.stream), res);
   }
 
   if (WORD_MIMES.has(contentType)) {
-    // Same narrowing as lib/storage.js: the SDK types Body as a union spanning
-    // every runtime it supports, and only the Node Readable in that union can be
-    // iterated with `for await`. On Node it is always the Readable.
-    const stream = /** @type {import("stream").Readable} */ (s3Response.Body);
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    const html = await convertWordToHtml(Buffer.concat(chunks));
+    const html = await convertWordToHtml(await bufferOf(object.stream));
     return res.set("Content-Type", "text/html; charset=utf-8").send(html);
   }
 
   res.set("Content-Type", contentType);
   res.set("Accept-Ranges", "bytes");
   res.set("Content-Disposition", "inline");
-  if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
-  if (range && s3Response.ContentRange) {
+  if (object.contentLength) res.set("Content-Length", object.contentLength);
+  if (range && object.contentRange) {
     res.status(206);
-    res.set("Content-Range", s3Response.ContentRange);
+    res.set("Content-Range", object.contentRange);
   }
-  return streamToResponse(s3Response.Body, res, `stream media ${item.id}`);
+  return streamToResponse(object.stream, res, `stream media ${item.id}`);
 };
 
 // ── Failing legibly, now that a browser renders this route directly ────────
@@ -752,13 +728,11 @@ export const downloadMedia = async (req, res, next) => {
       return streamToResponse(fs.createReadStream(filePath), res, `download media ${item.id}`);
     }
 
-    const s3Response = await s3.send(
-      new GetObjectCommand({ Bucket: env.s3Bucket, Key: item.s3_key })
-    );
+    const object = await openBucketObject(item.s3_key);
     res.set("Content-Disposition", downloadDisposition(item.title, ext));
-    res.set("Content-Type", s3Response.ContentType || "application/octet-stream");
-    if (s3Response.ContentLength) res.set("Content-Length", s3Response.ContentLength);
-    return streamToResponse(s3Response.Body, res, `download media ${item.id}`);
+    res.set("Content-Type", object.contentType || "application/octet-stream");
+    if (object.contentLength) res.set("Content-Length", object.contentLength);
+    return streamToResponse(object.stream, res, `download media ${item.id}`);
   } catch (err) {
     if (isStorageNotFound(err)) return next(notFound("Media file not found"));
     next(err);
@@ -776,13 +750,7 @@ const resolveSeekablePath = async (s3Key) => {
     await fs.promises.stat(filePath); // 404 before any header goes out
     return { path: filePath, isTemp: false };
   }
-  const { Body } = await s3.send(new GetObjectCommand({ Bucket: env.s3Bucket, Key: s3Key }));
-  // The SDK types Body as a union covering every runtime it supports; on Node it
-  // is always a Readable. Same narrowing as readMediaBuffer in lib/storage.js.
-  const stream = /** @type {import("stream").Readable} */ (Body);
-  const tmpPath = path.join(os.tmpdir(), `dl-${randomUUID()}${path.extname(s3Key)}`);
-  await pipeline(stream, fs.createWriteStream(tmpPath));
-  return { path: tmpPath, isTemp: true };
+  return { path: await downloadToTemp(s3Key, { dir: os.tmpdir(), prefix: "dl-" }), isTemp: true };
 };
 
 // "Download this lecture as audio" for a video. The audio track is extracted on

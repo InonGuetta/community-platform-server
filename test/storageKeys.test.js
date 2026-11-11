@@ -2,10 +2,13 @@ import "./setup.js";
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import {
   LOCAL_UPLOAD_DIR, LOCAL_KEY_PREFIX, isLocalKey, localKeyFor, localNameOf, localPathOf, removeStored, storeFile, s3,
+  openBucketObject, bufferOf, downloadToTemp, readMediaBuffer, isStorageNotFound,
 } from "../lib/storage.js";
 import { env } from "../lib/env.js";
 import { serverSourceFiles } from "./sourceFiles.js";
@@ -194,10 +197,99 @@ test("no server module but lib/storage.js spells out the local/ prefix", async (
   assert.deepEqual(offending, [], `use isLocalKey / localKeyFor / localPathOf instead: ${offending.join(", ")}`);
 });
 
-test("only lib/storage.js uploads to S3", async () => {
+test("only lib/storage.js talks to S3", async () => {
   const files = await serverSourceFiles();
-  const uploaders = files
-    .filter(({ source }) => /@aws-sdk\/lib-storage/.test(source))
+  const users = files
+    .filter(({ source }) => /@aws-sdk\//.test(source))
     .map(({ file }) => file);
-  assert.deepEqual(uploaders, [path.join("lib", "storage.js")], `use storeFile instead: ${uploaders.join(", ")}`);
+  assert.deepEqual(
+    users,
+    [path.join("lib", "storage.js")],
+    `go through storeFile / openBucketObject / downloadToTemp / removeStored instead: ${users.join(", ")}`
+  );
+});
+
+// ── Reading ─────────────────────────────────────────────────────────────────
+
+// S3 answering every GetObject with `answer`; returns what it was asked.
+const withGetObject = async (answer, fn) => {
+  const asked = [];
+  const send = mock.method(s3, "send", async (command) => {
+    asked.push(command.input);
+    return answer(command.input);
+  });
+  try {
+    return await fn(asked);
+  } finally {
+    send.mock.restore();
+  }
+};
+
+test("openBucketObject passes a range only when there is one, and reports what S3 answered", async () => {
+  await withGetObject(
+    () => ({ Body: Readable.from([Buffer.from("x")]), ContentType: "audio/mpeg", ContentLength: 1, ContentRange: "bytes 0-0/9" }),
+    async (asked) => {
+      const object = await openBucketObject("uploads/a.mp3", { range: "bytes=0-0" });
+      assert.deepEqual(asked[0], { Bucket: env.s3Bucket, Key: "uploads/a.mp3", Range: "bytes=0-0" });
+      assert.equal(object.contentType, "audio/mpeg");
+      assert.equal(object.contentLength, 1);
+      assert.equal(object.contentRange, "bytes 0-0/9");
+      assert.equal(await bufferOf(object.stream).then(String), "x");
+
+      await openBucketObject("uploads/a.mp3");
+      assert.deepEqual(asked[1], { Bucket: env.s3Bucket, Key: "uploads/a.mp3" });
+    }
+  );
+});
+
+test("downloadToTemp writes the whole object to <dir>/<prefix><uuid><ext>", async () => {
+  const dir = path.join(os.tmpdir(), `storage-test-${randomUUID()}`);
+  try {
+    await withGetObject(() => ({ Body: Readable.from([Buffer.from("whole "), Buffer.from("lecture")]) }), async () => {
+      const file = await downloadToTemp("uploads/talk.mp4", { dir, prefix: "dl-" });
+      assert.equal(path.dirname(file), dir);
+      assert.match(path.basename(file), /^dl-[0-9a-f-]{36}\.mp4$/);
+      assert.equal(await fs.readFile(file, "utf8"), "whole lecture");
+    });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a download cut off half-way leaves no partial file behind", async () => {
+  const dir = path.join(os.tmpdir(), `storage-test-${randomUUID()}`);
+  const broken = () => Readable.from((async function* () {
+    yield Buffer.from("half a lect");
+    throw new Error("connection reset");
+  })());
+  try {
+    await withGetObject(() => ({ Body: broken() }), async () => {
+      await assert.rejects(downloadToTemp("uploads/talk.mp4", { dir, prefix: "src-" }), /connection reset/);
+      assert.deepEqual(await fs.readdir(dir), []);
+    });
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("readMediaBuffer reads a local file, and a bucket object when S3 is configured", async () => {
+  await withLocalFile("a book", async (key) => {
+    assert.equal(String(await readMediaBuffer(key)), "a book");
+  });
+  await withEnv(S3_ON, () => withGetObject(() => ({ Body: Readable.from([Buffer.from("from the bucket")]) }), async () => {
+    assert.equal(String(await readMediaBuffer("uploads/b.pdf")), "from the bucket");
+  }));
+  await withEnv(S3_OFF, async () => {
+    await assert.rejects(readMediaBuffer("uploads/b.pdf"), /S3 not configured/);
+  });
+});
+
+test("a stored object that is not there is told apart from a real failure", () => {
+  assert.equal(isStorageNotFound(Object.assign(new Error("x"), { code: "ENOENT" })), true);
+  assert.equal(isStorageNotFound(Object.assign(new Error("x"), { name: "NoSuchKey" })), true);
+  assert.equal(isStorageNotFound(Object.assign(new Error("x"), { name: "NotFound" })), true);
+  assert.equal(isStorageNotFound({ $metadata: { httpStatusCode: 404 } }), true);
+  assert.equal(isStorageNotFound(Object.assign(new Error("x"), { code: "EACCES" })), false);
+  assert.equal(isStorageNotFound({ $metadata: { httpStatusCode: 403 } }), false);
+  assert.equal(isStorageNotFound(undefined), false);
 });

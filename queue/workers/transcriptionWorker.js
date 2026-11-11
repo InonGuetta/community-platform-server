@@ -3,9 +3,6 @@ import "dotenv/config";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { randomUUID } from "crypto";
-import { pipeline } from "stream/promises";
-import { GetObjectCommand } from "@aws-sdk/client-s3";
 import ffmpegPath from "ffmpeg-static";
 import ffmpeg from "fluent-ffmpeg";
 import { transcriptionQueue } from "../transcriptionQueue.js";
@@ -15,9 +12,8 @@ import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { setDurationIfMissing } from "../../services/servicesMedia.js";
 import { probeDurationSeconds } from "../../lib/mediaDuration.js";
 import { makeOpenAI, meterOpenAI } from "../../lib/openaiClient.js";
-import { s3, s3Configured, isLocalKey, localPathOf } from "../../lib/storage.js";
+import { s3Configured, isLocalKey, localPathOf, downloadToTemp } from "../../lib/storage.js";
 import { logger } from "../../lib/logger.js";
-import { env } from "../../lib/env.js";
 import { installWorkerLifecycle, installQueueErrorLogging } from "./workerLifecycle.js";
 import { captureError } from "../../lib/monitoring.js";
 import { parseSegmentStarts, assumedSegmentStarts } from "./segmentOffsets.js";
@@ -44,26 +40,15 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // Metered as "transcription" — Whisper, billed by the minute (lib/openaiClient.js).
 const openai = meterOpenAI(makeOpenAI(3), "transcription");
 
-// Cleanup that must never itself become the reason a job fails. Declared here
-// rather than beside their other callers below because resolveSourcePath needs
-// them too.
+// Cleanup that must never itself become the reason a job fails.
 const safeUnlink = (p) => fs.promises.unlink(p).catch(() => {});
 const safeRmDir = (p) => fs.promises.rm(p, { recursive: true, force: true }).catch(() => {});
 
 // Get a local filesystem path for the source media. Local uploads are already
-// on disk; S3 objects are streamed down to a temp file first. Returns
-// { path, isTemp } so the caller knows whether to delete it afterwards.
-//
-// STREAMED to disk, never buffered. This used to collect the whole object into
-// an array of chunks and Buffer.concat it, which holds the entire file in the
-// heap twice at the moment of the concat — for the multi-hour lectures this
-// pipeline exists to serve, that is gigabytes, and Node's default heap limit
-// kills the process before ffmpeg is ever reached. The failure mode was the
-// worst kind: the worker dies without running its own catch, so nothing writes
-// status='error' and the row sits at 'processing' forever while the page polls
-// it for two hours. lib/storage.js already says buffering "would not be [fine]
-// for media"; controllersMedia.resolveSeekablePath already streams. This is now
-// the third place that agrees.
+// on disk; an S3 object is downloaded to a temp file in WORK_DIR first —
+// streamed, never buffered, and never left half-written (see downloadToTemp).
+// Returns { path, isTemp } so the caller knows whether to delete it afterwards.
+// The S3 error is kept as the cause, which the job's failure log prints.
 const resolveSourcePath = async (s3Key) => {
   if (isLocalKey(s3Key)) {
     return { path: localPathOf(s3Key), isTemp: false };
@@ -71,22 +56,11 @@ const resolveSourcePath = async (s3Key) => {
   if (!s3Configured()) {
     throw new Error(`S3 not configured but s3_key is remote: ${s3Key}`);
   }
-  const { Body } = await s3.send(
-    new GetObjectCommand({ Bucket: env.s3Bucket, Key: s3Key })
-  );
-  await fs.promises.mkdir(WORK_DIR, { recursive: true });
-  const tmpPath = path.join(WORK_DIR, `src-${randomUUID()}${path.extname(s3Key)}`);
   try {
-    await pipeline(/** @type {import("stream").Readable} */ (Body), fs.createWriteStream(tmpPath));
+    return { path: await downloadToTemp(s3Key, { dir: WORK_DIR, prefix: "src-" }), isTemp: true };
   } catch (err) {
-    // A download cut off half-way leaves a partial file the caller never learns
-    // about — it only receives a path on success, so nothing else would remove
-    // it. Truncated media is also worse than none: ffmpeg would happily segment
-    // whatever arrived and we would transcribe half a lecture and call it done.
-    await safeUnlink(tmpPath);
-    throw new Error(`could not download ${s3Key} from S3: ${err.message}`);
+    throw new Error(`could not download ${s3Key} from S3: ${err.message}`, { cause: err });
   }
-  return { path: tmpPath, isTemp: true };
 };
 
 // Where each produced segment actually STARTS on the original recording.

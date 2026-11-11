@@ -3,12 +3,8 @@ import "dotenv/config";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { randomUUID } from "crypto";
-import { pipeline } from "stream/promises";
-import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { pool } from "./pool.js";
-import { s3, s3Configured, isLocalKey, localPathOf } from "../lib/storage.js";
-import { env } from "../lib/env.js";
+import { s3Configured, isLocalKey, localPathOf, downloadToTemp } from "../lib/storage.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { setDurationIfMissing } from "../services/servicesMedia.js";
 
@@ -74,16 +70,11 @@ const localCopyOf = async (s3Key) => {
   if (!s3Configured()) {
     return { filePath: null, why: "it is in S3 and S3 is not configured here", cleanup: async () => {} };
   }
-  await fs.promises.mkdir(WORK_DIR, { recursive: true });
-  const tmp = path.join(WORK_DIR, `probe-${randomUUID()}${path.extname(s3Key)}`);
-  const cleanup = () => fs.promises.rm(tmp, { force: true });
   try {
-    const { Body } = await s3.send(new GetObjectCommand({ Bucket: env.s3Bucket, Key: s3Key }));
-    // Same narrowing as lib/storage.js: on Node the SDK's Body is a Readable.
-    await pipeline(/** @type {import("stream").Readable} */ (Body), fs.createWriteStream(tmp));
-    return { filePath: tmp, why: null, cleanup };
+    // A failed download leaves nothing behind (downloadToTemp removes it).
+    const tmp = await downloadToTemp(s3Key, { dir: WORK_DIR, prefix: "probe-" });
+    return { filePath: tmp, why: null, cleanup: () => fs.promises.rm(tmp, { force: true }) };
   } catch (err) {
-    await cleanup();
     return { filePath: null, why: `could not fetch it from S3 (${err.message})`, cleanup: async () => {} };
   }
 };
