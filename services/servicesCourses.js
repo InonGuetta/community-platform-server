@@ -2,6 +2,7 @@
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { escapeLike } from "../lib/sqlLike.js";
+import { requireTitle } from "../lib/validate.js";
 
 const TITLE_MAX = 255; // matches VARCHAR(255)
 
@@ -53,16 +54,9 @@ export const assertValidLecturer = async (lecturerId) => {
   if (rows[0].role === "student") throw badRequest("A student cannot be a course lecturer");
 };
 
-const cleanTitle = (title) => {
-  const trimmed = typeof title === "string" ? title.trim() : "";
-  if (!trimmed) throw badRequest("Course title is required");
-  if (trimmed.length > TITLE_MAX) throw badRequest(`Title must be at most ${TITLE_MAX} characters`);
-  return trimmed;
-};
-
 export const createCourse = async (data) => {
   const { title, description, lecturerId } = data;
-  const cleanedTitle = cleanTitle(title);
+  const cleanedTitle = requireTitle(title, "Course", TITLE_MAX);
   await assertValidLecturer(lecturerId);
 
   const result = await pool.query(
@@ -78,7 +72,7 @@ export const updateCourse = async (id, data) => {
 
   // COALESCE means "leave it alone when the field wasn't sent", matching how
   // updateUser and updateMedia already behave.
-  const cleanedTitle = title === undefined || title === null ? null : cleanTitle(title);
+  const cleanedTitle = title === undefined || title === null ? null : requireTitle(title, "Course", TITLE_MAX);
   if (lecturerId !== undefined && lecturerId !== null) await assertValidLecturer(lecturerId);
   if (isActive !== undefined && isActive !== null && typeof isActive !== "boolean") {
     throw badRequest("isActive must be a boolean");

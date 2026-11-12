@@ -3,23 +3,16 @@ import * as servicesSessions from "../services/servicesSessions.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 import { notifySessionAudience, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { calendarForSession } from "../lib/ics.js";
-import { optionalId } from "../lib/validate.js";
+import { optionalId, optionalTitle, sessionTypeFilter, optionalIntInRange, optionalSessionStart } from "../lib/validate.js";
 import { assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
 import { afterSessionEnded } from "../sockets/socketManager.js";
 import * as servicesSessionRecordings from "../services/servicesSessionRecordings.js";
 
-// Mirrors the session_type enum from migration 003. Without this check an
-// unknown value reaches Postgres as "invalid input value for enum" and surfaces
-// as a 500 instead of a 400.
-const SESSION_TYPES = new Set(["1on1", "group", "webinar"]);
+// The type, the scheduled time and their bounds are lib/validate.js's
+// (SESSION_TYPES, optionalSessionStart); these two are this table's columns.
 const TITLE_MAX = 255; // matches VARCHAR(255)
 const MAX_PARTICIPANTS_CEILING = 100;
-
-// A session must be scheduled far enough ahead to be a plan rather than a
-// mistyped date, and not so far that it is a placeholder nobody will remember.
-const MIN_LEAD_MS = 60 * 1000;
-const MAX_LEAD_MS = 365 * 24 * 60 * 60 * 1000;
 
 // room_token and recording_s3_key never leave the server.
 //
@@ -37,30 +30,12 @@ export const createSession = async (req, res) => {
   // Title stays optional — the column is nullable and the sessions list already
   // renders "מפגש ללא כותרת" — so requiring it here would break a flow that
   // works today.
-  const trimmedTitle = typeof title === "string" ? title.trim() : "";
-  if (trimmedTitle.length > TITLE_MAX) throw badRequest(`Title must be at most ${TITLE_MAX} characters`);
-
-  if (!SESSION_TYPES.has(sessionType)) throw badRequest(`Invalid session type: "${sessionType}"`);
-
-  let participants = null;
-  if (maxParticipants !== undefined && maxParticipants !== null) {
-    participants = Number(maxParticipants);
-    if (!Number.isInteger(participants) || participants < 1 || participants > MAX_PARTICIPANTS_CEILING) {
-      throw badRequest(`maxParticipants must be a whole number between 1 and ${MAX_PARTICIPANTS_CEILING}`);
-    }
-  }
-
+  const trimmedTitle = optionalTitle(title, TITLE_MAX);
+  sessionTypeFilter(sessionType);
+  const participants = optionalIntInRange(maxParticipants, "maxParticipants", 1, MAX_PARTICIPANTS_CEILING);
   // Absent means "start it now", which is what this endpoint has always done and
   // what every existing session is.
-  let scheduled = null;
-  if (scheduledAt !== undefined && scheduledAt !== null && scheduledAt !== "") {
-    const when = new Date(scheduledAt);
-    if (Number.isNaN(when.getTime())) throw badRequest("scheduledAt must be a valid date");
-    const lead = when.getTime() - Date.now();
-    if (lead < MIN_LEAD_MS) throw badRequest("A scheduled session must be at least a minute away");
-    if (lead > MAX_LEAD_MS) throw badRequest("A session cannot be scheduled more than a year ahead");
-    scheduled = when.toISOString();
-  }
+  const scheduled = optionalSessionStart(scheduledAt);
 
   // D8: the course a session is held for decides who is told about it. The
   // same rule as filing a lesson into a course: an admin any course, a lecturer

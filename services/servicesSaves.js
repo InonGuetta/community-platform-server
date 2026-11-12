@@ -2,10 +2,12 @@
 import { pool } from "../db/pool.js";
 import { withTransaction } from "../db/transaction.js";
 import { visibleMediaSql } from "../lib/permissions.js";
-import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { notFound, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { requireTitle } from "../lib/validate.js";
 
 // The server's word on how long a list's name may be, and the only place this
-// side states it: cleanTitle below is what every write goes through.
+// side states it: requireTitle(title, "List", TITLE_MAX) is what every write
+// goes through.
 //
 // The column is VARCHAR(120) to match. SQL cannot import this, so the migration
 // carries a comment naming this constant — the pair has to be changed together,
@@ -113,13 +115,6 @@ export const removeSave = async (userId, mediaId) => {
 };
 
 // ── The user's own lists ────────────────────────────────────────────────────
-
-const cleanTitle = (title) => {
-  const trimmed = typeof title === "string" ? title.trim() : "";
-  if (!trimmed) throw badRequest("List title is required");
-  if (trimmed.length > TITLE_MAX) throw badRequest(`Title must be at most ${TITLE_MAX} characters`);
-  return trimmed;
-};
 
 // How many of a list's lectures come back with the list itself.
 //
@@ -247,7 +242,7 @@ export const getPlaylistWithMedia = async (userId, playlistId, scope = { courses
 // the user can act on, and 23505 is not. It carries its own code because the
 // client can say something precise about this one — see ERROR_CODES.
 export const createPlaylist = async (userId, title, mediaId = null) => {
-  const cleanedTitle = cleanTitle(title);
+  const cleanedTitle = requireTitle(title, "List", TITLE_MAX);
   try {
     return await withTransaction(async (client) => {
       const result = await client.query(
@@ -293,7 +288,7 @@ export const createPlaylist = async (userId, title, mediaId = null) => {
 // called that"), and a driver error is not. Renaming a list to the name it
 // already has does NOT trip it — Postgres does not compare a row with itself.
 export const renamePlaylist = async (userId, playlistId, title) => {
-  const cleanedTitle = cleanTitle(title);
+  const cleanedTitle = requireTitle(title, "List", TITLE_MAX);
   try {
     const result = await pool.query(
       `UPDATE playlists SET title = $3
