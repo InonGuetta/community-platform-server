@@ -2,6 +2,7 @@
 import * as servicesNotifications from "../services/servicesNotifications.js";
 import { notFound, badRequest } from "../lib/AppError.js";
 import { readUnsubscribeToken } from "../lib/unsubscribe.js";
+import { isAdmin } from "../lib/permissions.js";
 
 // The bell. Every handler acts on req.user.id; the only id from the request is a
 // notification's, and the service only ever looks it up together with the
@@ -14,7 +15,7 @@ import { readUnsubscribeToken } from "../lib/unsubscribe.js";
 export const getNotifications = async (req, res) => {
   const { items, unread } = await servicesNotifications.listForUser(req.user.id);
   const body = { items, unread };
-  if (req.user.role === "admin") {
+  if (isAdmin(req.user)) {
     body.pendingRoleRequests = await servicesNotifications.countPendingRoleRequests();
   }
   res.status(200).json(body);

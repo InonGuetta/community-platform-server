@@ -8,6 +8,7 @@ import { conflict, unauthorized, notFound, badRequest, ERROR_CODES } from "../li
 import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
+import { isAdmin } from "../lib/permissions.js";
 
 const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8.U8nJ.JtbCmHkY2Z9Y6XYC8N7yL3a";
 
@@ -600,7 +601,7 @@ export const requestRole = async (userId, requestedRole) => {
   // it: approveUser would grant it, quietly removing their own admin rights
   // through a self-service form. Role reduction is an admin action on the users
   // tab.
-  if (user.role === "admin") {
+  if (isAdmin(user)) {
     throw badRequest("An admin cannot request a lesser role here");
   }
   if (user.approval_status === "pending") {

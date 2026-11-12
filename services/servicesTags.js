@@ -2,7 +2,7 @@
 import { pool } from "../db/pool.js";
 import { withTransaction } from "../db/transaction.js";
 import { badRequest, conflict, notFound, ERROR_CODES } from "../lib/AppError.js";
-import { visibleMediaSql, scopeParams } from "../lib/permissions.js";
+import { visibleMediaSql, scopeParams, isAdmin } from "../lib/permissions.js";
 
 // Tags — what kind of content an item is.
 //
@@ -331,7 +331,7 @@ export const proposeTag = ({ mediaId, name: rawName, parentId: rawParentId, user
       throw conflict("A tag with this name already exists under this parent", ERROR_CODES.TAG_EXISTS);
     }
 
-    if (user.role === "admin") {
+    if (isAdmin(user)) {
       const tagId = await ensureTag(client, parentId, name);
       await attachTag(client, tagId, [Number(mediaId)]);
       // Recorded all the same, already decided: the log of who added what to

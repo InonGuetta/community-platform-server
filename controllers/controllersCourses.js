@@ -10,7 +10,7 @@ import { forbidden, badRequest } from "../lib/AppError.js";
 // Managing a course follows the same shape as managing media: an admin may touch
 // any course, a lecturer only the ones they are responsible for. In
 // lib/permissions.js since uploads need the same rule — see canManageCourse.
-import { assertCanManageCourse, canManageCourse, isPrivileged } from "../lib/permissions.js";
+import { assertCanManageCourse, canManageCourse, isAdmin, isPrivileged } from "../lib/permissions.js";
 
 // What a reader who does not manage courses gets. student_count is withheld for
 // the reason getStudentCourses already gives — a student has no business knowing
@@ -48,7 +48,7 @@ export const createCourse = async (req, res) => {
   // course to somebody else, otherwise a lecturer could create courses in
   // another lecturer's name.
   const owner =
-    req.user.role === "admin" ? optionalId(lecturerId, "lecturerId") : req.user.id;
+    isAdmin(req.user) ? optionalId(lecturerId, "lecturerId") : req.user.id;
   const course = await servicesCourses.createCourse({ title, description, lecturerId: owner });
   res.status(201).json(course);
 };
@@ -61,7 +61,7 @@ export const updateCourse = async (req, res) => {
   // Reassigning a course to a different lecturer is an admin action: a lecturer
   // doing it to themselves would be a way to take over someone else's course,
   // and doing it away from themselves would be a way to abandon one.
-  if (lecturerId !== undefined && req.user.role !== "admin") {
+  if (lecturerId !== undefined && !isAdmin(req.user)) {
     throw forbidden("Only an admin may change a course's lecturer");
   }
 
@@ -109,7 +109,7 @@ export const getCourseStudents = async (req, res) => {
 // specific student is an admin action.
 export const getStudentCourses = async (req, res) => {
   const requested = Number(req.params.studentId);
-  if (requested !== Number(req.user.id) && req.user.role !== "admin") {
+  if (requested !== Number(req.user.id) && !isAdmin(req.user)) {
     throw forbidden("You may only view your own courses");
   }
   const courses = await servicesCourses.getStudentCourses(requested);

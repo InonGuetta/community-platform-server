@@ -15,7 +15,7 @@
 // servicesHealth. What both have in common is that they answer a question the
 // application asks rather than manage a thing it stores.
 import { pool } from "../db/pool.js";
-import { canSeeMediaRow, UNRESTRICTED } from "../lib/permissions.js";
+import { canSeeMediaRow, UNRESTRICTED, isAdmin, isLecturer } from "../lib/permissions.js";
 import { getEnrolledCourseIds } from "./servicesCourses.js";
 import { getMediaById } from "./servicesMedia.js";
 import { notFound, ERROR_CODES } from "../lib/AppError.js";
@@ -35,8 +35,8 @@ import { notFound, ERROR_CODES } from "../lib/AppError.js";
 //
 // Still one query per request for a student and none for anybody else.
 export const viewerScopeFor = async (user) => {
-  if (user?.role === "admin") return { courses: UNRESTRICTED, drafts: UNRESTRICTED };
-  if (user?.role === "lecturer") return { courses: UNRESTRICTED, drafts: [user.id] };
+  if (isAdmin(user)) return { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+  if (isLecturer(user)) return { courses: UNRESTRICTED, drafts: [user.id] };
   return { courses: await getEnrolledCourseIds(user.id), drafts: [] };
 };
 
@@ -51,13 +51,13 @@ export const viewerScopeFor = async (user) => {
 export const canUserSeeMedia = async (user, item) => {
   // An admin sees everything, and a lecturer sees anything they uploaded —
   // both settled without touching the database.
-  if (user?.role === "admin") return true;
-  if (user?.role === "lecturer" && Number(item?.uploader_id) === Number(user.id)) return true;
+  if (isAdmin(user)) return true;
+  if (isLecturer(user) && Number(item?.uploader_id) === Number(user.id)) return true;
 
   // Past that, only published material, and the general library is settled
   // without the enrolment lookup — which is most of the archive.
   if (!item?.is_published) return false;
-  if (user?.role === "lecturer") return true; // every published lesson, any course
+  if (isLecturer(user)) return true; // every published lesson, any course
   if (item.course_id === null || item.course_id === undefined) return true;
   return canSeeMediaRow(item, await getEnrolledCourseIds(user.id), []);
 };

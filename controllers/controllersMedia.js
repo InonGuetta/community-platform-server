@@ -7,7 +7,7 @@ import { isLocalKey, localKeyFor, removeStored, storeFile } from "../lib/storage
 import { MEDIA_TYPES, MEDIA_TYPE_BY_EXT, extensionOf, isViewableText } from "../lib/mediaFormats.js";
 import { probeDurationSeconds } from "../lib/mediaDuration.js";
 import { logger } from "../lib/logger.js";
-import { isPrivileged, assertCanManageMedia, assertCanManageCourse } from "../lib/permissions.js";
+import { isAdmin, isPrivileged, assertCanManageMedia, assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
 import { viewerScopeFor, assertUserCanSeeMediaId } from "../services/servicesVisibility.js";
 import {
@@ -254,7 +254,7 @@ export const createMedia = async (req, res) => {
     let created = item;
     if (chosenTags) {
       try {
-        await setMediaTags(item.id, chosenTags, { canCreate: req.user.role === "admin" });
+        await setMediaTags(item.id, chosenTags, { canCreate: isAdmin(req.user) });
         // Read again, for the same reason updateMedia does: the row above was
         // produced before the tags existed, and the client replaces its copy of
         // the item with whatever comes back. Returning the pre-tag row made an
@@ -332,7 +332,7 @@ export const updateMedia = async (req, res) => {
     // A typed name that is not a tag yet becomes one only for an admin; for
     // everybody else it is refused and the dialog offers "הוסף תגית", which
     // sends it for approval. See proposeTagForMedia below.
-    }, { canCreate: req.user.role === "admin" });
+    }, { canCreate: isAdmin(req.user) });
     // Read AGAIN, because the row above was read before the tags were written
     // and still carries the old ones. The client replaces its copy of the item
     // with whatever comes back here, so returning the stale row meant tags saved

@@ -5,6 +5,7 @@ import { withTransaction } from "../db/transaction.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
+import { isAdmin } from "../lib/permissions.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
 
@@ -74,7 +75,7 @@ export const createUser = async (data) => {
 // and the ORDER BY gives both transactions the same lock order so they queue
 // instead of deadlocking.
 const assertAdminRemains = async (client, id, current, { role, isActive }) => {
-  const wasActiveAdmin = current.role === "admin" && current.is_active;
+  const wasActiveAdmin = isAdmin(current) && current.is_active;
   if (!wasActiveAdmin) return;
 
   const staysAdmin = (role ?? "admin") === "admin" && (isActive ?? true) !== false;
