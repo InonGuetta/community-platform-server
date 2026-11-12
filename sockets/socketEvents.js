@@ -37,7 +37,6 @@ export const SOCKET_EVENTS = {
   SESSION_ENDED: "session-ended",
   JOIN_ERROR: "join-error",
   SESSION_ERROR: "session-error",
-  CHAT_HISTORY: "chat-history",
   // { active, recordingId, hostSocketId, consented: [socketId], declined: [socketId] }
   RECORDING_STATE: "recording-state",
 

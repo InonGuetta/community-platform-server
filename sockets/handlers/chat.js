@@ -46,10 +46,8 @@ export const registerChatHandlers = (io, socket) => {
   // session is a conversation, not a record: keeping it would mean a retention
   // decision, a deletion path and a place for it to be read back. The exception
   // is a room being recorded (PRD REC-3), where the lines of the people whose
-  // voices are in the recording become the lesson's appendix.
-  //
-  // CHAT_HISTORY is in the event list and the client listens for it, but the
-  // server sends none: a live room holds nothing to replay.
+  // voices are in the recording become the lesson's appendix. Nothing is
+  // replayed to someone who joins or reconnects: a live room holds no history.
   const allowChat = createChatBucket();
   onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, async ({ text }) => {
     const [room] = sessionRoomsOf(socket);
