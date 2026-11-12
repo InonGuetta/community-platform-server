@@ -1,10 +1,13 @@
 // @ts-check
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { visibleMediaSql } from "../lib/permissions.js";
-import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { notFound, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { requireTitle } from "../lib/validate.js";
 
 // The server's word on how long a list's name may be, and the only place this
-// side states it: cleanTitle below is what every write goes through.
+// side states it: requireTitle(title, "List", TITLE_MAX) is what every write
+// goes through.
 //
 // The column is VARCHAR(120) to match. SQL cannot import this, so the migration
 // carries a comment naming this constant — the pair has to be changed together,
@@ -14,7 +17,7 @@ const TITLE_MAX = 120;
 
 // ── The general save ────────────────────────────────────────────────────────
 
-// Both reads below take the SAME `visibleCourses`, and that is the point.
+// Both reads below take the SAME `scope`, and that is the point.
 //
 // They answer one question — "what has this user saved" — for two different
 // consumers: the page that lists the cards, and the button that lights up on a
@@ -22,7 +25,7 @@ const TITLE_MAX = 120;
 // said נשמר on an item the page refused to show, and nothing the user could do
 // reconciled them.
 //
-// The value is decided once, in the controller, by visibleCoursesFor(req.user) —
+// The value is decided once, in the controller, by viewerScopeFor(req.user) —
 // the same helper that governs what the archive, the media page and the stream
 // hand out. So a student sees the same items in both places, and a lecturer sees
 // their own draft in both, including a lit button on it.
@@ -97,9 +100,7 @@ export const addSave = async (userId, mediaId) => {
 // here to prevent. Other users' lists are untouched — the subquery is scoped to
 // this user's playlists.
 export const removeSave = async (userId, mediaId) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  await withTransaction(async (client) => {
     await client.query("DELETE FROM saved_items WHERE user_id=$1 AND media_id=$2", [userId, mediaId]);
     await client.query(
       `DELETE FROM playlist_items
@@ -107,26 +108,13 @@ export const removeSave = async (userId, mediaId) => {
          AND playlist_id IN (SELECT id FROM playlists WHERE user_id = $1)`,
       [userId, mediaId]
     );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
   // Deliberately not a 404 when there was nothing to delete: "unsave something I
   // have not saved" has already arrived at the state the caller wanted.
   return { saved: false, mediaId };
 };
 
 // ── The user's own lists ────────────────────────────────────────────────────
-
-const cleanTitle = (title) => {
-  const trimmed = typeof title === "string" ? title.trim() : "";
-  if (!trimmed) throw badRequest("List title is required");
-  if (trimmed.length > TITLE_MAX) throw badRequest(`Title must be at most ${TITLE_MAX} characters`);
-  return trimmed;
-};
 
 // How many of a list's lectures come back with the list itself.
 //
@@ -254,42 +242,37 @@ export const getPlaylistWithMedia = async (userId, playlistId, scope = { courses
 // the user can act on, and 23505 is not. It carries its own code because the
 // client can say something precise about this one — see ERROR_CODES.
 export const createPlaylist = async (userId, title, mediaId = null) => {
-  const cleanedTitle = cleanTitle(title);
-  const client = await pool.connect();
+  const cleanedTitle = requireTitle(title, "List", TITLE_MAX);
   try {
-    await client.query("BEGIN");
-
-    const result = await client.query(
-      "INSERT INTO playlists (user_id, title) VALUES ($1, $2) RETURNING *",
-      [userId, cleanedTitle]
-    );
-    const playlist = result.rows[0];
-
-    if (mediaId) {
-      // Same pair as addToPlaylist: filing a lecture also saves it, because the
-      // general save is the container every list is a grouping inside.
-      await client.query(
-        "INSERT INTO saved_items (user_id, media_id) VALUES ($1, $2) ON CONFLICT (user_id, media_id) DO NOTHING",
-        [userId, mediaId]
+    return await withTransaction(async (client) => {
+      const result = await client.query(
+        "INSERT INTO playlists (user_id, title) VALUES ($1, $2) RETURNING *",
+        [userId, cleanedTitle]
       );
-      await client.query(
-        "INSERT INTO playlist_items (playlist_id, media_id) VALUES ($1, $2)",
-        [playlist.id, mediaId]
-      );
-    }
+      const playlist = result.rows[0];
 
-    await client.query("COMMIT");
-    // Shaped like the rows getPlaylists returns, so the client can drop it
-    // straight into the same list without a refetch.
-    return { ...playlist, item_count: mediaId ? 1 : 0, contains: Boolean(mediaId) };
+      if (mediaId) {
+        // Same pair as addToPlaylist: filing a lecture also saves it, because the
+        // general save is the container every list is a grouping inside.
+        await client.query(
+          "INSERT INTO saved_items (user_id, media_id) VALUES ($1, $2) ON CONFLICT (user_id, media_id) DO NOTHING",
+          [userId, mediaId]
+        );
+        await client.query(
+          "INSERT INTO playlist_items (playlist_id, media_id) VALUES ($1, $2)",
+          [playlist.id, mediaId]
+        );
+      }
+
+      // Shaped like the rows getPlaylists returns, so the client can drop it
+      // straight into the same list without a refetch.
+      return { ...playlist, item_count: mediaId ? 1 : 0, contains: Boolean(mediaId) };
+    });
   } catch (err) {
-    await client.query("ROLLBACK");
     if (err.code === "23505") {
       throw conflict("A list with that name already exists", ERROR_CODES.PLAYLIST_TITLE_TAKEN);
     }
     throw err;
-  } finally {
-    client.release();
   }
 };
 
@@ -305,7 +288,7 @@ export const createPlaylist = async (userId, title, mediaId = null) => {
 // called that"), and a driver error is not. Renaming a list to the name it
 // already has does NOT trip it — Postgres does not compare a row with itself.
 export const renamePlaylist = async (userId, playlistId, title) => {
-  const cleanedTitle = cleanTitle(title);
+  const cleanedTitle = requireTitle(title, "List", TITLE_MAX);
   try {
     const result = await pool.query(
       `UPDATE playlists SET title = $3
@@ -354,9 +337,7 @@ export const deletePlaylist = async (userId, playlistId) => {
 // straight into a list would sit there while the save button showed unsaved —
 // the button would be lying about the only thing it says.
 export const addToPlaylist = async (userId, playlistId, mediaId) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  await withTransaction(async (client) => {
     await assertOwnedPlaylist(client, userId, playlistId);
     await client.query(
       "INSERT INTO saved_items (user_id, media_id) VALUES ($1, $2) ON CONFLICT (user_id, media_id) DO NOTHING",
@@ -366,13 +347,7 @@ export const addToPlaylist = async (userId, playlistId, mediaId) => {
       "INSERT INTO playlist_items (playlist_id, media_id) VALUES ($1, $2) ON CONFLICT (playlist_id, media_id) DO NOTHING",
       [playlistId, mediaId]
     );
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
   return { playlistId, mediaId, contains: true };
 };
 

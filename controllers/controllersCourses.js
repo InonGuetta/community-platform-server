@@ -1,21 +1,36 @@
 // @ts-check
 import * as servicesCourses from "../services/servicesCourses.js";
+import * as servicesCourseJoin from "../services/servicesCourseJoin.js";
+import * as servicesCourseTrack from "../services/servicesCourseTrack.js";
+import { viewerScopeFor } from "../services/servicesVisibility.js";
+import { requireIdList } from "../lib/validate.js";
+import { notify, notifyAdmins, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { optionalId } from "../lib/validate.js";
 import { forbidden, badRequest } from "../lib/AppError.js";
 // Managing a course follows the same shape as managing media: an admin may touch
 // any course, a lecturer only the ones they are responsible for. In
 // lib/permissions.js since uploads need the same rule — see canManageCourse.
-import { assertCanManageCourse, isPrivileged } from "../lib/permissions.js";
+import { assertCanManageCourse, canManageCourse, isAdmin, isPrivileged } from "../lib/permissions.js";
 
 // What a reader who does not manage courses gets. student_count is withheld for
 // the reason getStudentCourses already gives — a student has no business knowing
 // who else is enrolled — which the catalogue was quietly contradicting by
 // carrying it on every row. Same shape as publicMedia/publicSession.
+//
+// The join code and the queue behind it (PRD ROST-9) are narrower still: only
+// whoever manages THIS course sees them. A code shown in the catalogue would
+// hand every signed-in user — and every other lecturer — the way in.
 const publicCourse = (user) => (course) => {
-  if (isPrivileged(user)) return course;
-  const { student_count, ...rest } = course;
-  return rest;
+  const { join_code, pending_join_count, ...rest } = course;
+  const managed = canManageCourse(user, course) ? { join_code, pending_join_count } : {};
+  if (isPrivileged(user)) return { ...rest, ...managed };
+  const { student_count, ...publicRest } = rest;
+  return publicRest;
 };
+
+// A course seen as one of the caller's ENROLMENTS — never with its code, which
+// a student could otherwise pass on from the "my courses" screen.
+const withoutJoinCode = ({ join_code, pending_join_count, ...course }) => course;
 
 export const getAllCourses = async (req, res) => {
   const courses = await servicesCourses.getAllCourses({ activeOnly: !isPrivileged(req.user) });
@@ -33,7 +48,7 @@ export const createCourse = async (req, res) => {
   // course to somebody else, otherwise a lecturer could create courses in
   // another lecturer's name.
   const owner =
-    req.user.role === "admin" ? optionalId(lecturerId, "lecturerId") : req.user.id;
+    isAdmin(req.user) ? optionalId(lecturerId, "lecturerId") : req.user.id;
   const course = await servicesCourses.createCourse({ title, description, lecturerId: owner });
   res.status(201).json(course);
 };
@@ -46,7 +61,7 @@ export const updateCourse = async (req, res) => {
   // Reassigning a course to a different lecturer is an admin action: a lecturer
   // doing it to themselves would be a way to take over someone else's course,
   // and doing it away from themselves would be a way to abandon one.
-  if (lecturerId !== undefined && req.user.role !== "admin") {
+  if (lecturerId !== undefined && !isAdmin(req.user)) {
     throw forbidden("Only an admin may change a course's lecturer");
   }
 
@@ -94,16 +109,16 @@ export const getCourseStudents = async (req, res) => {
 // specific student is an admin action.
 export const getStudentCourses = async (req, res) => {
   const requested = Number(req.params.studentId);
-  if (requested !== Number(req.user.id) && req.user.role !== "admin") {
+  if (requested !== Number(req.user.id) && !isAdmin(req.user)) {
     throw forbidden("You may only view your own courses");
   }
   const courses = await servicesCourses.getStudentCourses(requested);
-  res.status(200).json(courses);
+  res.status(200).json(courses.map(withoutJoinCode));
 };
 
 export const getMyCourses = async (req, res) => {
   const courses = await servicesCourses.getStudentCourses(req.user.id);
-  res.status(200).json(courses);
+  res.status(200).json(courses.map(withoutJoinCode));
 };
 
 // Enrolment moved from admin-only to the lecturer who teaches the course.
@@ -152,4 +167,110 @@ export const getEnrollableStudents = async (req, res) => {
   assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
   const users = await servicesCourses.searchEnrollableUsers(req.params.id, req.query.q);
   res.status(200).json(users);
+};
+
+// ── Joining by code (PRD ROST-9) ────────────────────────────────────────────
+//
+// The lecturer's half is ownership-gated like the roster: requireRole on the
+// route says a lecturer may manage SOME course, assertCanManageCourse says this
+// one. The student's half needs no role — anybody signed in may ask to join —
+// and the code is the only thing that names the course.
+
+export const createJoinCode = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
+  const joinCode = await servicesCourseJoin.setJoinCode(req.params.id);
+  res.status(200).json({ joinCode });
+};
+
+export const removeJoinCode = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
+  await servicesCourseJoin.clearJoinCode(req.params.id);
+  res.status(200).json({ joinCode: null });
+};
+
+export const getJoinRequests = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
+  res.status(200).json(await servicesCourseJoin.getPendingJoinRequests(req.params.id));
+};
+
+// The answer is told to the person who asked. Not awaited: the decision is
+// saved, and notify never throws.
+const decide = (approve) => async (req, res) => {
+  const course = await servicesCourses.getCourseById(req.params.id);
+  assertCanManageCourse(req.user, course);
+  const { userId, status } = await servicesCourseJoin.decideJoinRequest(
+    req.params.id, req.params.requestId, approve, req.user.id
+  );
+  void notify(
+    userId,
+    approve ? NOTIFICATION_TYPES.COURSE_JOIN_APPROVED : NOTIFICATION_TYPES.COURSE_JOIN_REJECTED,
+    { courseId: course.id, courseTitle: course.title, lecturerName: course.lecturer_name }
+  );
+  res.status(200).json({ id: Number(req.params.requestId), status });
+};
+export const approveJoinRequest = decide(true);
+export const rejectJoinRequest = decide(false);
+
+// 202: a request was filed, nobody was enrolled yet. The course is named in
+// the answer so the screen can say whose approval is awaited.
+export const joinByCode = async (req, res) => {
+  const { course, created, requesterName } = await servicesCourseJoin.requestToJoin(req.user.id, req.body?.code);
+  if (created) {
+    const payload = { courseId: course.id, courseTitle: course.title, requesterName };
+    if (course.lecturer_id) void notify(course.lecturer_id, NOTIFICATION_TYPES.COURSE_JOIN_REQUEST, payload);
+    else void notifyAdmins(NOTIFICATION_TYPES.COURSE_JOIN_REQUEST, payload);
+  }
+  res.status(202).json({
+    status: "pending",
+    course: { id: course.id, title: course.title, lecturer_name: course.lecturer_name },
+  });
+};
+
+export const getMyJoinRequests = async (req, res) => {
+  res.status(200).json(await servicesCourseJoin.getMyJoinRequests(req.user.id));
+};
+
+export const cancelMyJoinRequest = async (req, res) => {
+  res.status(200).json(await servicesCourseJoin.cancelMyJoinRequest(req.user.id, req.params.requestId));
+};
+
+// ── The course as a track (PRD CRS-1, CRS-2, CRS-3) ─────────────────────────
+
+// Its lessons in order, with the caller's own progress through them. For whoever
+// may follow the course: a student enrolled in it, a lecturer or an admin. A
+// student who is not enrolled is told so (403) rather than shown an empty track
+// that would read as a course with no lessons — the catalogue already names it,
+// so there is nothing to hide by answering 404.
+export const getCourseLessons = async (req, res) => {
+  const course = await servicesCourses.getCourseById(req.params.id);
+  const scope = await viewerScopeFor(req.user);
+  const follows = isPrivileged(req.user) || (scope.courses ?? []).includes(Number(course.id));
+  if (!follows) throw forbidden("Join this course to follow its lessons");
+
+  const lessons = await servicesCourseTrack.getCourseLessons(course.id, req.user.id, scope);
+  res.status(200).json({
+    course: {
+      id: course.id, title: course.title, description: course.description,
+      lecturer_id: course.lecturer_id, lecturer_name: course.lecturer_name,
+    },
+    lessons,
+    summary: servicesCourseTrack.trackSummary(lessons),
+    canArrange: canManageCourse(req.user, course),
+  });
+};
+
+// The lecturer arranging the track. Ownership-gated like every course write.
+export const reorderCourseLessons = async (req, res) => {
+  assertCanManageCourse(req.user, await servicesCourses.getCourseById(req.params.id));
+  const mediaIds = requireIdList(req.body?.mediaIds, "mediaIds");
+  res.status(200).json(await servicesCourseTrack.reorderCourseLessons(req.params.id, mediaIds));
+};
+
+// The lecturer's report (PRD CRS-4): who of this course's students heard what.
+// The course's manager only — the same people who may read its roster, since
+// the report is the roster with listening attached.
+export const getCourseReport = async (req, res) => {
+  const course = await servicesCourses.getCourseById(req.params.id);
+  assertCanManageCourse(req.user, course);
+  res.status(200).json(await servicesCourseTrack.getCourseReport(course.id));
 };

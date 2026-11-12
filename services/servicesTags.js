@@ -1,7 +1,8 @@
 // @ts-check
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { badRequest, conflict, notFound, ERROR_CODES } from "../lib/AppError.js";
-import { visibleMediaSql } from "../lib/permissions.js";
+import { visibleMediaSql, scopeParams, isAdmin } from "../lib/permissions.js";
 
 // Tags — what kind of content an item is.
 //
@@ -150,9 +151,7 @@ const existingRootTags = async (client, names) => {
 export const setMediaTags = async (mediaId, selection = {}, { canCreate = false } = {}) => {
   const { ids: chosenIds, names: clean } = cleanTagSelection(selection);
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  return withTransaction(async (client) => {
     await client.query("DELETE FROM media_tags WHERE media_id=$1", [mediaId]);
 
     const ids2 = canCreate ? await upsertRootTags(client, clean) : await existingRootTags(client, clean);
@@ -166,14 +165,8 @@ export const setMediaTags = async (mediaId, selection = {}, { canCreate = false 
       );
     }
 
-    await client.query("COMMIT");
     return allIds;
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 };
 
 /**
@@ -223,10 +216,9 @@ export const getTagsInUse = async () => {
  * predicate, from the same place, so the two cannot drift.
  */
 /**
- * @param {{ visibleCourses?: number[]|null, visibleDrafts?: number[]|null }} [scope]
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} [scope]  from viewerScopeFor
  */
-export const getTagTree = async (scope = {}) => {
-  const { visibleCourses, visibleDrafts } = scope;
+export const getTagTree = async (scope) => {
   const { rows } = await pool.query(
     `WITH RECURSIVE descendants AS (
        SELECT id AS root_id, id AS tag_id FROM tags
@@ -252,7 +244,7 @@ export const getTagTree = async (scope = {}) => {
      ORDER BY t.parent_id NULLS FIRST, t.id`,
     // The same fail-closed rule as the listing: an ABSENT scope means nobody's
     // courses and nobody's drafts, never everybody's.
-    [visibleCourses === undefined ? [] : visibleCourses, visibleDrafts === undefined ? [] : visibleDrafts]
+    scopeParams(scope)
   );
   return rows;
 };
@@ -261,22 +253,6 @@ export const getTagTree = async (scope = {}) => {
 //
 // Migration 029 says why a proposal is not a tag with a status column. The
 // short version: every read of `tags` would have to remember to skip it.
-
-// The same BEGIN/COMMIT/ROLLBACK/release every write below needs.
-const inTransaction = async (work) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await work(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-};
 
 // A parent id from a request: absent/null means "a new root heading", anything
 // else must be a tag that exists. Checked rather than left to the foreign key,
@@ -348,14 +324,14 @@ const attachTag = async (db, tagId, mediaIds) => {
  */
 export const proposeTag = ({ mediaId, name: rawName, parentId: rawParentId, user }) => {
   const name = requireTagName(rawName);
-  return inTransaction(async (client) => {
+  return withTransaction(async (client) => {
     const parentId = await resolveParentId(client, rawParentId);
 
     if (await tagAt(client, parentId, name)) {
       throw conflict("A tag with this name already exists under this parent", ERROR_CODES.TAG_EXISTS);
     }
 
-    if (user.role === "admin") {
+    if (isAdmin(user)) {
       const tagId = await ensureTag(client, parentId, name);
       await attachTag(client, tagId, [Number(mediaId)]);
       // Recorded all the same, already decided: the log of who added what to
@@ -418,7 +394,7 @@ export const getPendingProposalsForMedia = async (mediaId) => {
  * admin should not be asked to approve a tag nobody wants any more.
  */
 export const withdrawProposal = (mediaId, proposalId) =>
-  inTransaction(async (client) => {
+  withTransaction(async (client) => {
     const { rowCount } = await client.query(
       `DELETE FROM tag_proposal_media pm
        USING tag_proposals p
@@ -486,7 +462,7 @@ const lockPending = async (client, id) => {
  *   keep the proposed place; null makes it a root.
  */
 export const approveTagProposal = (id, adminId, changes = {}) =>
-  inTransaction(async (client) => {
+  withTransaction(async (client) => {
     const proposal = await lockPending(client, id);
     const name = changes.name === undefined ? proposal.name : requireTagName(changes.name);
     const parentId =
@@ -511,7 +487,7 @@ export const approveTagProposal = (id, adminId, changes = {}) =>
 
 /** Refuses a proposal. The items keep every tag they had; only the request goes. */
 export const rejectTagProposal = (id, adminId, reason) =>
-  inTransaction(async (client) => {
+  withTransaction(async (client) => {
     await lockPending(client, id);
     const cleanReason = typeof reason === "string" && reason.trim() ? reason.trim().slice(0, 500) : null;
     await client.query(

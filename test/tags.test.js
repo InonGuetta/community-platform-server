@@ -69,7 +69,7 @@ test("duplicates do not count towards the cap", () => {
 const runList = async (filters) => {
   const stub = stubPoolQuery(pool, () => ({ rows: [] }));
   try {
-    await getAllMedia(filters);
+    await getAllMedia(undefined, filters);
     return stub.calls[0];
   } finally {
     stub.restore();
@@ -284,7 +284,7 @@ const runTree = async (scope) => {
 };
 
 test("the tree counts only what the viewer may see", async () => {
-  const call = await runTree({ visibleCourses: [3], visibleDrafts: [7] });
+  const call = await runTree({ courses: [3], drafts: [7] });
   assert.match(call.text, /is_published/, "the visibility rule is applied to the count");
   assert.deepEqual(call.params[0], [3], "the courses are bound");
   assert.deepEqual(call.params[1], [7], "and so are the drafts");
@@ -298,7 +298,7 @@ test("an absent scope counts nothing restricted, rather than everything", async 
 });
 
 test("an unrestricted viewer is passed through as unrestricted", async () => {
-  const call = await runTree({ visibleCourses: null, visibleDrafts: null });
+  const call = await runTree({ courses: null, drafts: null });
   assert.deepEqual(call.params, [null, null]);
 });
 

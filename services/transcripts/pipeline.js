@@ -8,8 +8,12 @@ import { transcriptionQueue } from "../../queue/transcriptionQueue.js";
 import { llmQueue } from "../../queue/llmQueue.js";
 import { isExtractableText } from "../../lib/mediaFormats.js";
 import { logger } from "../../lib/logger.js";
+import { env } from "../../lib/env.js";
 import { withExclusive } from "../../lib/inFlight.js";
+import { withTimeout } from "../../lib/timeout.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../../lib/AppError.js";
+import { assertWithinAiBudget } from "../servicesAiUsage.js";
+import { markPending } from "./status.js";
 
 // A fixed job id per media item, the same in both queues — see the comment in
 // triggerPipeline. Bull ignores an add() whose id already exists, which is what
@@ -66,6 +70,11 @@ export const triggerPipeline = async (mediaId) => {
     );
   }
 
+  // The monthly cap (PRD NFR-3): no NEW transcription or summary once this
+  // month's OpenAI spend has reached AI_MONTHLY_CAP_USD. After the checks that
+  // are the caller's mistake, before anything is written or queued.
+  await assertWithinAiBudget();
+
   const queue = isText ? llmQueue : transcriptionQueue;
   const label = isText ? "Summary" : "Transcription";
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} type=${mediaType} s3Key=${s3Key} queue=${isText ? "llm" : "transcription"}`);
@@ -103,13 +112,8 @@ export const triggerPipeline = async (mediaId) => {
     if (q === queue) await existing.remove();
   }
 
-  // error_message is cleared alongside the status: a stale "this file is a scan"
-  // must not sit next to a fresh run that is still in progress.
-  await pool.query(
-    `INSERT INTO transcripts (media_id, status) VALUES ($1, 'pending')
-     ON CONFLICT (media_id) DO UPDATE SET status='pending', error_message=NULL, updated_at=NOW()`,
-    [mediaId]
-  );
+  // Also clears the last run's error_message (see markPending).
+  await markPending(mediaId);
   logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✓ row set to 'pending'`);
 
   const job = await queue.add({ mediaId, s3Key }, { jobId });
@@ -152,25 +156,18 @@ const stranded = `
 // of work is far more likely to be a mistake (a restored backup, a bad
 // migration) than a genuine backlog. Queue a bounded batch and say what was
 // held back; the next reconnect picks up where this left off.
-const MAX_RECONCILE_PER_RUN = Number(process.env.MAX_RECONCILE_PER_RUN) || 10;
+// MAX_RECONCILE_PER_RUN, ten unless set.
+const MAX_RECONCILE_PER_RUN = env.maxReconcilePerRun;
 
 // getJob/add have no timeout of their own: if Redis disappears mid-sweep they
 // hang indefinitely instead of rejecting, which would strand the exclusive lock
 // and silently disable every future reconcile until the worker restarts — in a
 // feature whose whole point is surviving exactly that. Bound the wait so a queue
-// that dies underneath us costs one skipped item, not all of them. The abandoned
-// call is still observed by the race, so its late rejection is never unhandled.
+// that dies underneath us costs one skipped item, not all of them.
 const TRIGGER_TIMEOUT_MS = 10_000;
 
-const triggerWithTimeout = (mediaId) => {
-  let timer;
-  return Promise.race([
-    triggerPipeline(mediaId),
-    new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error("queue did not respond in time")), TRIGGER_TIMEOUT_MS);
-    }),
-  ]).finally(() => clearTimeout(timer));
-};
+const triggerWithTimeout = (mediaId) =>
+  withTimeout(triggerPipeline(mediaId), TRIGGER_TIMEOUT_MS, "queue did not respond in time");
 
 export const reconcileMissingTranscripts = () =>
   withExclusive(

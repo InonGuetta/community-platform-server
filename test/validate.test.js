@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import {
   requireSeconds, optionalSeconds, optionalId, optionalBoolean, mediaTypeFilter,
   mediaSortFilter, MEDIA_SORTS, DEFAULT_MEDIA_SORT, durationRangeFilter,
-  optionalDateFilter, optionalQueryString,
+  optionalDateFilter, optionalQueryString, requireTitle, optionalTitle, optionalIntInRange,
+  sessionTypeFilter, optionalSessionStart, MIN_SESSION_LEAD_MS, MAX_SESSION_LEAD_MS,
 } from "../lib/validate.js";
 import { MEDIA_ORDER } from "../services/servicesMedia.js";
 
@@ -149,4 +150,57 @@ test("a text filter must be one string of bounded length", () => {
   assert.equal(optionalQueryString(undefined, "creator"), undefined);
   assert.throws(() => optionalQueryString(["a", "b"], "creator"), { statusCode: 400 });
   assert.throws(() => optionalQueryString("x".repeat(301), "creator"), { statusCode: 400 });
+});
+
+const messageOf = (fn) => {
+  try {
+    fn();
+    return null;
+  } catch (err) {
+    return err.statusCode === 400 ? err.message : `not a 400: ${err.message}`;
+  }
+};
+
+test("requireTitle trims, names what is missing, and holds its column's length", () => {
+  assert.equal(requireTitle("  גמרא  ", "Course", 255), "גמרא");
+  assert.equal(messageOf(() => requireTitle("   ", "Course", 255)), "Course title is required");
+  assert.equal(messageOf(() => requireTitle(undefined, "List", 120)), "List title is required");
+  assert.equal(messageOf(() => requireTitle(42, "List", 120)), "List title is required");
+  assert.equal(requireTitle("x".repeat(120), "List", 120).length, 120);
+  assert.equal(messageOf(() => requireTitle("x".repeat(121), "List", 120)), "Title must be at most 120 characters");
+});
+
+test("optionalTitle answers an empty string for nothing, and holds the length", () => {
+  assert.equal(optionalTitle(undefined, 255), "");
+  assert.equal(optionalTitle("  שיעור ", 255), "שיעור");
+  assert.equal(messageOf(() => optionalTitle("x".repeat(256), 255)), "Title must be at most 255 characters");
+});
+
+test("optionalIntInRange reads numbers and numeric strings, and null as absent", () => {
+  assert.equal(optionalIntInRange(undefined, "n", 1, 100), null);
+  assert.equal(optionalIntInRange(null, "n", 1, 100), null);
+  assert.equal(optionalIntInRange("12", "n", 1, 100), 12);
+  assert.equal(optionalIntInRange(100, "n", 1, 100), 100);
+  for (const bad of [0, 101, 1.5, "abc", ""]) {
+    assert.equal(messageOf(() => optionalIntInRange(bad, "maxParticipants", 1, 100)), "maxParticipants must be a whole number between 1 and 100");
+  }
+});
+
+test("sessionTypeFilter accepts the enum's three and names anything else", () => {
+  for (const type of ["1on1", "group", "webinar"]) assert.equal(sessionTypeFilter(type), type);
+  assert.equal(messageOf(() => sessionTypeFilter("party")), 'Invalid session type: "party"');
+  assert.equal(messageOf(() => sessionTypeFilter(undefined)), 'Invalid session type: "undefined"');
+});
+
+test("optionalSessionStart is null for nothing, and a real date between a minute and a year ahead", () => {
+  const now = Date.parse("2026-11-12T10:00:00Z");
+  assert.equal(optionalSessionStart(undefined, now), null);
+  assert.equal(optionalSessionStart("", now), null);
+  // A time with a zone comes back as UTC ISO: 14:30 in Israel is 12:30Z.
+  assert.equal(optionalSessionStart("2026-11-12T14:30:00+02:00", now), "2026-11-12T12:30:00.000Z");
+  assert.equal(optionalSessionStart(new Date(now + MIN_SESSION_LEAD_MS).toISOString(), now), new Date(now + MIN_SESSION_LEAD_MS).toISOString());
+  assert.equal(optionalSessionStart(new Date(now + MAX_SESSION_LEAD_MS).toISOString(), now), new Date(now + MAX_SESSION_LEAD_MS).toISOString());
+  assert.equal(messageOf(() => optionalSessionStart("soon", now)), "scheduledAt must be a valid date");
+  assert.equal(messageOf(() => optionalSessionStart(new Date(now + MIN_SESSION_LEAD_MS - 1).toISOString(), now)), "A scheduled session must be at least a minute away");
+  assert.equal(messageOf(() => optionalSessionStart(new Date(now + MAX_SESSION_LEAD_MS + 1).toISOString(), now)), "A session cannot be scheduled more than a year ahead");
 });

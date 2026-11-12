@@ -9,11 +9,16 @@
 // stored key points are missing or too few for the transcript's length.
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
-import { withExclusive } from "../../lib/inFlight.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { notFound, badRequest, ERROR_CODES } from "../../lib/AppError.js";
 import { analyzeTranscript, keyPointRange } from "./analysis.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+import { markDoneUnlessAnalyzing } from "./status.js";
+import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "headings" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(baseOpenai, "headings");
 
 const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" של שיעור בעברית, ו-(2) קטעי התמלול עם חותמת הזמן (start_time בשניות) של כל קטע.
 לכל נקודת מפתח, מצא את חותמת הזמן (start_time) של הקטע שבו הנושא הזה מתחיל להידון.
@@ -22,14 +27,9 @@ const HEADINGS_PROMPT = `אתה מקבל (1) רשימת "נקודות מפתח" 
 
 const HEADING_PREVIEW_WORDS = 120;
 
-export const generateKeyPointHeadings = (mediaId) =>
-  withExclusive(
-    `key-point-headings:${mediaId}`,
-    () => runGenerateKeyPointHeadings(mediaId),
-    "Heading generation is already running for this media"
-  );
-
-const runGenerateKeyPointHeadings = async (mediaId) => {
+// Run by the LLM worker (PRD PIPE-5) — see fixHebrewTranscript in hebrew.js for
+// why, and aiActions.js for the claim that stops it running twice.
+export const generateKeyPointHeadings = async (mediaId) => {
   logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId}`);
   const transcript = await pool.query(
     "SELECT ai_key_points FROM transcripts WHERE media_id=$1",
@@ -63,15 +63,7 @@ const runGenerateKeyPointHeadings = async (mediaId) => {
     // own summary — reintroducing exactly the gap 'analyzing' was added to
     // close. Otherwise this call *is* what produced the analysis, so 'done' is
     // correct, including recovering a transcript left at 'error'.
-    await pool.query(
-      `UPDATE transcripts SET
-         ai_summary=$1,
-         ai_key_points=$2,
-         status = CASE WHEN status = 'analyzing' THEN status ELSE 'done' END,
-         updated_at=NOW()
-       WHERE media_id=$3`,
-      [analysis.summary, JSON.stringify(keyPoints), mediaId]
-    );
+    await markDoneUnlessAnalyzing(mediaId, { summary: analysis.summary, keyPoints });
     logger.debug(`[BE:svc] generateKeyPointHeadings mediaId=${mediaId} ✓ generated ${keyPoints.length} key points`);
   }
 

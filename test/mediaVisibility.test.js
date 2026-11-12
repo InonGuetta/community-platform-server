@@ -5,7 +5,7 @@ import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
 import { getAllMedia } from "../services/servicesMedia.js";
 import { canSeeMediaRow, visibleMediaSql, UNRESTRICTED } from "../lib/permissions.js";
-import { visibleCoursesFor, canUserSeeMedia } from "../services/servicesVisibility.js";
+import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
 
 // The rule that decides what anybody is shown. It has two dimensions now — is it
 // published, and is this lesson in a course you are in — and it is stated once.
@@ -115,8 +115,8 @@ test("a lecturer and an admin are unrestricted, and cost no query", async () => 
     throw new Error("looked up enrolments for someone who does not need them");
   });
   try {
-    assert.equal(await visibleCoursesFor(LECTURER), UNRESTRICTED);
-    assert.equal(await visibleCoursesFor(ADMIN), UNRESTRICTED);
+    assert.equal((await viewerScopeFor(LECTURER)).courses, UNRESTRICTED);
+    assert.equal((await viewerScopeFor(ADMIN)).courses, UNRESTRICTED);
   } finally {
     stub.restore();
   }
@@ -125,7 +125,7 @@ test("a lecturer and an admin are unrestricted, and cost no query", async () => 
 test("a student resolves to the courses they are enrolled in", async () => {
   const stub = stubPoolQuery(pool, () => ({ rows: [{ course_id: 5 }, { course_id: 8 }] }));
   try {
-    assert.deepEqual(await visibleCoursesFor(STUDENT), [5, 8]);
+    assert.deepEqual((await viewerScopeFor(STUDENT)).courses, [5, 8]);
   } finally {
     stub.restore();
   }
@@ -134,7 +134,7 @@ test("a student resolves to the courses they are enrolled in", async () => {
 test("a student enrolled in nothing gets an empty list, not unrestricted", async () => {
   const stub = stubPoolQuery(pool, () => ({ rows: [] }));
   try {
-    assert.deepEqual(await visibleCoursesFor(STUDENT), []);
+    assert.deepEqual((await viewerScopeFor(STUDENT)).courses, []);
   } finally {
     stub.restore();
   }
@@ -186,10 +186,10 @@ test("the SQL form honours the alias it is given", () => {
 
 // ── The listing applies it unconditionally ──────────────────────────────────
 
-const runList = async (filters) => {
+const runList = async (filters, scope) => {
   const stub = stubPoolQuery(pool, () => ({ rows: [] }));
   try {
-    await getAllMedia(filters);
+    await getAllMedia(scope, filters);
     return stub.calls[0];
   } finally {
     stub.restore();
@@ -206,17 +206,17 @@ test("the visibility predicate is always in the WHERE clause", async () => {
 });
 
 test("an unrestricted caller passes null", async () => {
-  const call = await runList({ visibleCourses: UNRESTRICTED });
+  const call = await runList({}, { courses: UNRESTRICTED });
   assert.equal(call.params[0], null);
 });
 
 test("a student's courses are passed as the array they are", async () => {
-  const call = await runList({ visibleCourses: [5, 8] });
+  const call = await runList({}, { courses: [5, 8] });
   assert.deepEqual(call.params[0], [5, 8]);
 });
 
 test("the caller's own published filter is separate from the rule", async () => {
-  const call = await runList({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED, published: false });
+  const call = await runList({ published: false }, { courses: UNRESTRICTED, drafts: UNRESTRICTED });
   // $1 and $2 are the two halves of the RULE; the caller's narrowing comes after.
   assert.match(call.text, /m\.is_published=\$3/);
   assert.deepEqual(call.params, [null, null, false], "the rule first, then the narrowing");

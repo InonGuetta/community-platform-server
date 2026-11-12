@@ -1,10 +1,24 @@
 // @ts-check
 import * as servicesDonations from "../services/servicesDonations.js";
-import { stripe, webhookVerifiable } from "../lib/stripeClient.js";
+import { stripe, webhookVerifiable, paymentsConfigured } from "../lib/stripeClient.js";
 import { sendDonationReceiptEmail } from "../lib/mailer.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
-import { badRequest, ERROR_CODES } from "../lib/AppError.js";
+import { AppError, badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
+
+// The thank-you mail, on the transition to completed only — from the webhook or
+// from a sync, whichever sees it first; the guarded UPDATE means the other one
+// updates nothing and sends nothing. Not awaited, failures swallowed: a mail
+// server being down must not fail an answer about money already received.
+const sendReceiptIfCompleted = (updated) => {
+  if (updated?.status !== "completed" || !updated.donor_email) return;
+  sendDonationReceiptEmail(updated.donor_email, {
+    amountCents: updated.amount_cents,
+    currency: updated.currency,
+    donationId: updated.id,
+    at: updated.created_at,
+  }).catch(() => {});
+};
 
 // Stripe caps a single charge well below this; the floor keeps out zero/negative
 // amounts and the ceiling rejects obviously bogus values before they hit Stripe.
@@ -53,8 +67,15 @@ export const createIntent = async (req, res) => {
   if (typeof currency !== "string" || !ALLOWED_CURRENCIES.has(currency.toUpperCase())) {
     throw badRequest(`Unsupported currency: ${currency}`);
   }
+  // After the request is known to be valid, before anything is written: with placeholder keys every intent would fail
+  // at Stripe, after a pending row had been recorded for nothing.
+  if (!paymentsConfigured()) {
+    throw new AppError("Payments are not set up on this server", 503, ERROR_CODES.PAYMENTS_NOT_CONFIGURED);
+  }
   const result = await servicesDonations.createPaymentIntent(req.user.id, amountCents, currency, type);
-  res.status(201).json(result);
+  // The publishable key rides along so Stripe.js can be started with it — one
+  // place to set both keys (the server's .env), never two that can disagree.
+  res.status(201).json({ ...result, publishableKey: env.stripePublishableKey });
 };
 
 export const handleWebhook = async (req, res) => {
@@ -94,20 +115,11 @@ export const handleWebhook = async (req, res) => {
       // succeed. Previously this threw and became a permanent retry storm.
       if (!updated) {
         logger.info(`[webhook] ${event.type} for ${event.data.object.id}: no update applied`);
-      } else if (status === "completed" && updated.donor_email) {
+      } else {
         // Sent only on the transition, which the `status <> 'completed'` in the
         // UPDATE guarantees: a redelivered success updates nothing and therefore
         // sends nothing, so a donor is not thanked three times for one gift.
-        //
-        // Not awaited, and failures are swallowed: a mail server being down must
-        // not make this answer 5xx, because Stripe would then retry an event that
-        // has already been recorded.
-        sendDonationReceiptEmail(updated.donor_email, {
-          amountCents: updated.amount_cents,
-          currency: updated.currency,
-          donationId: updated.id,
-          at: updated.created_at,
-        }).catch(() => {});
+        sendReceiptIfCompleted(updated);
       }
     }
     res.status(200).json({ received: true });
@@ -122,4 +134,15 @@ export const handleWebhook = async (req, res) => {
 export const getMyHistory = async (req, res) => {
   const donations = await servicesDonations.getDonationsByUser(req.user.id);
   res.status(200).json(donations);
+};
+
+// The donor's own donation, brought in line with Stripe (PRD PAY-1, PAY-2) —
+// asked by the page they return to after paying, and for pending rows in their
+// history. Only their own: another donor's id is a 404.
+export const syncDonation = async (req, res) => {
+  const donation = await servicesDonations.getOwnDonation(req.params.id, req.user.id);
+  if (!donation) throw notFound("Donation not found");
+  const { donation: current, updated } = await servicesDonations.syncDonationWithStripe(donation);
+  sendReceiptIfCompleted(updated);
+  res.status(200).json(current);
 };

@@ -3,7 +3,8 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
-import { canManageMedia, isPrivileged, canManageCourse } from "../lib/permissions.js";
+import { canManageMedia, isPrivileged, canManageCourse, isAdmin, isLecturer } from "../lib/permissions.js";
+import { serverSourceFiles } from "./sourceFiles.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
 import * as controllersTranscripts from "../controllers/controllersTranscripts.js";
 import { transcriptionQueue } from "../queue/transcriptionQueue.js";
@@ -221,3 +222,33 @@ for (const name of ["updateTranscript", "triggerPipeline", "fixHebrew", "generat
     }
   });
 }
+
+// ── One question per role ───────────────────────────────────────────────────
+
+test("isAdmin and isLecturer ask the role, and an absent user is neither", () => {
+  assert.equal(isAdmin({ role: "admin" }), true);
+  assert.equal(isAdmin({ role: "lecturer" }), false);
+  assert.equal(isLecturer({ role: "lecturer" }), true);
+  assert.equal(isLecturer({ role: "student" }), false);
+  for (const nobody of [undefined, null, {}]) {
+    assert.equal(isAdmin(nobody), false);
+    assert.equal(isLecturer(nobody), false);
+    assert.equal(isPrivileged(nobody), false);
+  }
+  assert.equal(isPrivileged({ role: "admin" }), true);
+  assert.equal(isPrivileged({ role: "lecturer" }), true);
+  assert.equal(isPrivileged({ role: "student" }), false);
+});
+
+// So "who may do this as an admin" is one search, and a role renamed is one
+// file. A role compared as a STRING (requested roles, SQL, NEEDS_APPROVAL) is
+// not a user being asked, and is not what this looks for.
+test("nothing outside lib/permissions.js compares a user's role to admin or lecturer inline", async () => {
+  const files = await serverSourceFiles();
+  assert.ok(files.length > 50, "the walk found the source tree");
+  const inline = files
+    .filter(({ file }) => file.split("\\").join("/") !== "lib/permissions.js")
+    .filter(({ source }) => /\.role\s*[!=]==?\s*["'](admin|lecturer)["']|["'](admin|lecturer)["']\s*[!=]==?\s*[\w.?]+\.role\b/.test(source))
+    .map(({ file }) => file);
+  assert.deepEqual(inline, []);
+});

@@ -5,10 +5,14 @@
 // here — it reads the transcript, rewrites it and saves it back to edited_text.
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
-import { withExclusive } from "../../lib/inFlight.js";
 import { completionText } from "../../lib/openaiClient.js";
 import { notFound, badRequest, ERROR_CODES } from "../../lib/AppError.js";
-import { openai, GPT_MODEL } from "./gpt.js";
+import { openai as baseOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "hebrew_fix" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(baseOpenai, "hebrew_fix");
 
 // Yiddish-accented Hebrew confuses Whisper (e.g. "תורה"→"תוירו",
 // "בית יוסף"→"בסייסף"). This prompt asks GPT to restore standard Hebrew
@@ -33,14 +37,11 @@ const correctTextBatch = async (text) => {
   return completionText(response, "fixHebrewTranscript");
 };
 
-export const fixHebrewTranscript = (mediaId) =>
-  withExclusive(
-    `fix-hebrew:${mediaId}`,
-    () => runFixHebrewTranscript(mediaId),
-    "Hebrew correction is already running for this media"
-  );
-
-const runFixHebrewTranscript = async (mediaId) => {
+// Run by the LLM worker (PRD PIPE-5), never inside a request: a long lecture is
+// minutes of sequential GPT calls. "Is it already running" is answered by the
+// claim in aiActions.js — a row in the database every process sees — not by a
+// lock in this process's memory, which a second server could not see.
+export const fixHebrewTranscript = async (mediaId) => {
   logger.debug(`[BE:svc] fixHebrewTranscript mediaId=${mediaId}`);
   const existing = await pool.query("SELECT edited_text FROM transcripts WHERE media_id=$1", [mediaId]);
   if (existing.rows.length === 0) throw notFound("Transcript not found", ERROR_CODES.TRANSCRIPT_NOT_FOUND);

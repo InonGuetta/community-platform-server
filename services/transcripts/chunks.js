@@ -5,8 +5,9 @@
 // only module that owns the storage shape, and it is what the two workers write
 // through.
 import { pool } from "../../db/pool.js";
+import { withTransaction } from "../../db/transaction.js";
 import { chunkTextByParagraph } from "../../lib/textChunks.js";
-import { canSeeMediaRow } from "../../lib/permissions.js";
+import { canScopeSeeMediaId } from "../servicesVisibility.js";
 import { logger } from "../../lib/logger.js";
 import { notFound, ERROR_CODES } from "../../lib/AppError.js";
 
@@ -65,6 +66,36 @@ const splitSegmentsToChunks = (segments) => {
   return chunks;
 };
 
+// When each word of a recording was said, compactly (PRD MOB-5, MOB-6,
+// migration 041): one [wordIndex, seconds] pair per Whisper segment that has
+// words, and a closing pair at the end of the last one. "The Nth word of the
+// transcript starts at second T" — the client interpolates between pairs.
+//
+// Counted with the SAME wordsOf the chunks are built with, so the word positions
+// here are positions in exactly the text the chunks hold. Times to a tenth of a
+// second: Whisper's own precision is not finer, and it halves the stored size.
+export const timingAnchors = (segments) => {
+  const anchors = [];
+  let words = 0;
+  let end = null;
+  for (const seg of segments) {
+    const count = wordsOf(seg.text).length;
+    if (count === 0) continue;
+    const start = Math.round(Number(seg.start) * 10) / 10;
+    // Out-of-order or overlapping times would make the client's interpolation
+    // run backwards; such a segment keeps its words but adds no anchor.
+    if (Number.isFinite(start) && (anchors.length === 0 || start >= anchors[anchors.length - 1][1])) {
+      anchors.push([words, start]);
+    }
+    words += count;
+    end = Math.round(Number(seg.end) * 10) / 10;
+  }
+  if (anchors.length > 0 && Number.isFinite(end) && end >= anchors[anchors.length - 1][1]) {
+    anchors.push([words, end]);
+  }
+  return anchors;
+};
+
 // Replace a media item's chunks atomically.
 //
 // DELETE + INSERT must be atomic: a failure mid-write previously left a media
@@ -82,10 +113,11 @@ const splitSegmentsToChunks = (segments) => {
 // audio path never came close and so never needed this.
 const INSERT_BATCH = 500;
 
-const writeChunks = async (mediaId, chunks) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+// `anchors` — a recording's timings (timingAnchors) — are replaced in the same
+// transaction, so the chunks and the timings always describe the same words.
+// Omitted for a document, which has none.
+const writeChunks = async (mediaId, chunks, anchors = null) => {
+  await withTransaction(async (client) => {
     await client.query("DELETE FROM transcript_chunks WHERE media_id=$1", [mediaId]);
 
     for (let offset = 0; offset < chunks.length; offset += INSERT_BATCH) {
@@ -116,20 +148,21 @@ const writeChunks = async (mediaId, chunks) => {
       );
     }
 
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+    if (anchors) {
+      await client.query(
+        `INSERT INTO transcript_timings (media_id, anchors) VALUES ($1, $2::jsonb)
+         ON CONFLICT (media_id) DO UPDATE SET anchors = EXCLUDED.anchors, created_at = NOW()`,
+        [mediaId, JSON.stringify(anchors)]
+      );
+    }
+  });
   return chunks.length;
 };
 
 export const saveChunks = async (mediaId, segments) => {
   const chunks = splitSegmentsToChunks(segments);
   logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} — ${segments.length} segments → ${chunks.length} chunks`);
-  await writeChunks(mediaId, chunks);
+  await writeChunks(mediaId, chunks, timingAnchors(segments));
   logger.debug(`[BE:svc] saveChunks mediaId=${mediaId} ✓ ${chunks.length} chunks written`);
   return chunks.length;
 };
@@ -210,23 +243,16 @@ export const saveTextChunks = async (mediaId, text, pageOffsets = null) => {
 export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], drafts: [] }, { content = true } = {}) => {
   logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} visible=${JSON.stringify(scope.courses)}`);
 
-  // uploader_id rides along because the visibility rule now has two dimensions:
-  // whose DRAFTS a caller may see is answered by who uploaded the item, and a
-  // SELECT that omits it silently made every lecturer fail the ownership half.
-  const media = await pool.query(
-    "SELECT is_published, course_id, uploader_id FROM media_items WHERE id=$1",
-    [mediaId]
-  );
-  // Same rule as the media reads and the search, from the same function. This is
-  // the site the shared predicate exists for: a transcript has no visibility of
-  // its own, it inherits the item's, so the two answering differently is the
-  // definition of a leak.
-  if (media.rows.length === 0 || !canSeeMediaRow(media.rows[0], scope.courses, scope.drafts)) {
+  // The lesson's own guard (servicesVisibility): a transcript has no visibility
+  // of its own, it inherits the item's. Refused in the transcript's words — the
+  // code this endpoint has always answered — and the same for a lesson that
+  // does not exist.
+  if (!(await canScopeSeeMediaId(mediaId, scope))) {
     logger.debug(`[BE:svc] getTranscriptByMediaId mediaId=${mediaId} ✗ not visible`);
     throw notFound("Transcript not found", ERROR_CODES.TRANSCRIPT_NOT_FOUND);
   }
 
-  const [transcript, chunks] = await Promise.all([
+  const [transcript, chunks, timing] = await Promise.all([
     pool.query("SELECT * FROM transcripts WHERE media_id=$1", [mediaId]),
     // Explicit columns (not SELECT *) so the embedding vector(1536) — added in
     // migration 010 — never ships to the client on every transcript load.
@@ -238,6 +264,13 @@ export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], dra
       `SELECT id, media_id, chunk_index, start_time, end_time, char_start, char_end, page_number${content ? ", content" : ""} FROM transcript_chunks WHERE media_id=$1 ORDER BY chunk_index`,
       [mediaId]
     ),
+    // When each word was said (migration 041) — for captions and the scrolling
+    // transcript. Only with the text, which is what it positions; a book has no
+    // row. A recording transcribed before 041 has none either, and the client
+    // estimates from the chunks' own times instead.
+    content
+      ? pool.query("SELECT anchors FROM transcript_timings WHERE media_id=$1", [mediaId])
+      : Promise.resolve({ rows: [] }),
   ]);
 
   if (transcript.rows.length === 0) {
@@ -249,6 +282,7 @@ export const getTranscriptByMediaId = async (mediaId, scope = { courses: [], dra
   return {
     ...transcript.rows[0],
     chunks: chunks.rows,
+    timing: timing.rows[0]?.anchors ?? null,
   };
 };
 
@@ -311,23 +345,25 @@ export const getTranscriptText = async (mediaId) => {
   return rows.map((r) => r.content).join("\n\n");
 };
 
+// A person's edit of the transcript and its analysis. Never the status: that is
+// the pipeline's contract with the page (status.js), and the controller's
+// allowlist (EDITABLE_FIELDS) never passes it — a hand-written 'done' on a row
+// still at 'pending' stopped the page polling before the summary existed.
 export const updateTranscript = async (mediaId, data) => {
-  const { editedText, aiSummary, aiChapters, aiKeyPoints, status } = data;
+  const { editedText, aiSummary, aiChapters, aiKeyPoints } = data;
   const result = await pool.query(
     `UPDATE transcripts SET
       edited_text   = COALESCE($1, edited_text),
       ai_summary    = COALESCE($2, ai_summary),
       ai_chapters   = COALESCE($3, ai_chapters),
       ai_key_points = COALESCE($4, ai_key_points),
-      status        = COALESCE($5, status),
       updated_at    = NOW()
-    WHERE media_id=$6 RETURNING *`,
+    WHERE media_id=$5 RETURNING *`,
     [
       editedText,
       aiSummary,
       aiChapters ? JSON.stringify(aiChapters) : null,
       aiKeyPoints ? JSON.stringify(aiKeyPoints) : null,
-      status,
       mediaId,
     ]
   );

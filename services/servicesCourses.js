@@ -1,6 +1,8 @@
 // @ts-check
 import { pool } from "../db/pool.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
+import { escapeLike } from "../lib/sqlLike.js";
+import { requireTitle } from "../lib/validate.js";
 
 const TITLE_MAX = 255; // matches VARCHAR(255)
 
@@ -11,7 +13,9 @@ const LIST_COLUMNS = `
   c.*,
   u.display_name AS lecturer_name,
   (SELECT COUNT(*)::int FROM enrollments e WHERE e.course_id = c.id) AS student_count,
-  (SELECT COUNT(*)::int FROM media_items m WHERE m.course_id = c.id) AS media_count`;
+  (SELECT COUNT(*)::int FROM media_items m WHERE m.course_id = c.id) AS media_count,
+  (SELECT COUNT(*)::int FROM course_join_requests r
+    WHERE r.course_id = c.id AND r.status = 'pending') AS pending_join_count`;
 
 // The catalogue. `activeOnly` is for a reader who does not manage courses: a
 // closed course is an administrative state, not something to browse. The
@@ -50,16 +54,9 @@ export const assertValidLecturer = async (lecturerId) => {
   if (rows[0].role === "student") throw badRequest("A student cannot be a course lecturer");
 };
 
-const cleanTitle = (title) => {
-  const trimmed = typeof title === "string" ? title.trim() : "";
-  if (!trimmed) throw badRequest("Course title is required");
-  if (trimmed.length > TITLE_MAX) throw badRequest(`Title must be at most ${TITLE_MAX} characters`);
-  return trimmed;
-};
-
 export const createCourse = async (data) => {
   const { title, description, lecturerId } = data;
-  const cleanedTitle = cleanTitle(title);
+  const cleanedTitle = requireTitle(title, "Course", TITLE_MAX);
   await assertValidLecturer(lecturerId);
 
   const result = await pool.query(
@@ -75,7 +72,7 @@ export const updateCourse = async (id, data) => {
 
   // COALESCE means "leave it alone when the field wasn't sent", matching how
   // updateUser and updateMedia already behave.
-  const cleanedTitle = title === undefined || title === null ? null : cleanTitle(title);
+  const cleanedTitle = title === undefined || title === null ? null : requireTitle(title, "Course", TITLE_MAX);
   if (lecturerId !== undefined && lecturerId !== null) await assertValidLecturer(lecturerId);
   if (isActive !== undefined && isActive !== null && typeof isActive !== "boolean") {
     throw badRequest("isActive must be a boolean");
@@ -235,11 +232,6 @@ const MIN_SEARCH_LENGTH = 2;
 // And a ceiling, so a two-character query that matches half the membership still
 // cannot be used to enumerate it.
 const SEARCH_LIMIT = 20;
-
-// Backslash is Postgres' default LIKE escape and has to escape itself first.
-// Same treatment, and the same reason, as escapeLike in servicesMedia: % and _
-// are wildcards to ILIKE and ordinary characters in a real name.
-const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
 
 /**
  * People this lecturer could add to this course.

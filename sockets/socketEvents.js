@@ -23,13 +23,22 @@ export const SOCKET_EVENTS = {
   // room. Text is small; this is not the reason the mesh exists.
   CHAT_MESSAGE: "chat-message",
 
+  // Recording (PRD REC-1). The host announces a recording it has started over
+  // REST, and its end; every participant answers whether they agree to be
+  // recorded; the server tells the room who is being recorded. The host's
+  // browser mixes in only the audio of those who said yes.
+  RECORDING_STARTED: "recording-started",
+  RECORDING_STOPPED: "recording-stopped",
+  RECORDING_CONSENT: "recording-consent",
+
   // Server → client
   USER_JOINED: "user-joined",
   USER_LEFT: "user-left",
   SESSION_ENDED: "session-ended",
   JOIN_ERROR: "join-error",
   SESSION_ERROR: "session-error",
-  CHAT_HISTORY: "chat-history",
+  // { active, recordingId, hostSocketId, consented: [socketId], declined: [socketId] }
+  RECORDING_STATE: "recording-state",
 
   // WebRTC signalling, relayed in both directions
   OFFER: "offer",

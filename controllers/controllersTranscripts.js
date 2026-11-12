@@ -70,16 +70,20 @@ export const triggerPipeline = async (req, res) => {
   res.status(200).json(result);
 };
 
+// The two AI actions are QUEUED, not run here (PRD PIPE-5): 202 Accepted with
+// the transcript row as it now stands — `hebrew_fix_status` / `headings_status`
+// at 'queued' — and the page polls that row until the LLM worker settles it.
+// They used to run inside this request, for minutes. See aiActions.js.
 export const fixHebrew = async (req, res) => {
   await assertMayEditTranscript(req);
-  const transcript = await servicesTranscripts.fixHebrewTranscript(req.params.mediaId);
-  res.status(200).json(transcript);
+  const transcript = await servicesTranscripts.requestAiAction(Number(req.params.mediaId), "hebrewFix");
+  res.status(202).json(transcript);
 };
 
 export const generateKeyPointHeadings = async (req, res) => {
   await assertMayEditTranscript(req);
-  const transcript = await servicesTranscripts.generateKeyPointHeadings(req.params.mediaId);
-  res.status(200).json(transcript);
+  const transcript = await servicesTranscripts.requestAiAction(Number(req.params.mediaId), "headings");
+  res.status(202).json(transcript);
 };
 
 const SEARCH_MODES = new Set(["keyword", "semantic", "hybrid"]);

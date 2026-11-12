@@ -1,5 +1,5 @@
 // @ts-check
-import { Router } from "express";
+import express, { Router } from "express";
 import { verifyToken } from "../middleware/auth.js";
 import { requireRole } from "../middleware/requireRole.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
@@ -24,6 +24,7 @@ router.get("/:id", validateIntParam("id"), controllersSessions.getSessionById);
 // only after the server has decided this caller may enter — see joinSession.
 // Open to every signed-in user, which is the rule that was already in force when
 // the token travelled on the public list; it is now enforced rather than implied.
+router.get("/:id/calendar.ics", validateIntParam("id"), controllersSessions.getSessionCalendar);
 router.post("/:id/join", validateIntParam("id"), controllersSessions.joinSession);
 
 // Opening a scheduled session. Host-only in the WHERE clause; canHost is the
@@ -35,6 +36,26 @@ router.post("/:id/start", canHost, validateIntParam("id"), controllersSessions.s
 // than only in a WHERE clause. Only lecturers and admins can create a session, so
 // nobody else can be a host in the first place.
 router.delete("/:id/end", canHost, validateIntParam("id"), controllersSessions.endSession);
+
+// Recording (PRD REC-1). The host's browser starts a recording, sends it in
+// numbered parts as it goes — a part sent again replaces itself, so a retry
+// after a dropped connection is safe — and finishes it. Host-only in the
+// service; canHost is the visible first layer. A part is raw bytes, read only
+// on its own route and capped at the part size.
+const rawPart = express.raw({ type: "application/octet-stream", limit: "8mb" });
+router.post("/:id/recordings", canHost, validateIntParam("id"), controllersSessions.startRecording);
+router.put(
+  "/:id/recordings/:recordingId/parts/:part",
+  // Not validateIntParam("part"): parts are numbered from 0, which it refuses.
+  // The service checks the number.
+  canHost, validateIntParam("id"), validateIntParam("recordingId"),
+  rawPart, controllersSessions.uploadRecordingPart
+);
+router.post(
+  "/:id/recordings/:recordingId/finish",
+  canHost, validateIntParam("id"), validateIntParam("recordingId"),
+  controllersSessions.finishRecording
+);
 
 // There was a POST /:id/recording here, and it was removed rather than left
 // waiting for the feature it belonged to. Nothing ever called it: the column and

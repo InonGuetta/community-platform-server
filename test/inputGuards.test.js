@@ -284,11 +284,16 @@ test("a tag both chosen and excluded is said out loud, not answered with nothing
 
 // ── The recording endpoint is gone, and stays gone ──────────────────────────
 
-test("no route accepts a recording key", () => {
+test("no route accepts a recording key — the only recording routes are the host's three", () => {
   // Asserted against the mounted routers rather than a file, so re-adding the
-  // handler anywhere — under any prefix — fails here. It was removed because
-  // nothing called it while it let any host write an arbitrary bucket key onto
-  // their own session; the column it wrote to is deliberately still in the schema.
+  // handler anywhere — under any prefix — fails here. The old POST
+  // /:id/recording was removed because nothing called it while it let any host
+  // write an arbitrary bucket key onto their own session.
+  //
+  // Recording now exists (PRD REC-1, migration 048), and none of its routes
+  // takes a key: the server names the file itself
+  // (lib/recordingFiles.js → assembleRecording). Pinned to exactly these three,
+  // so a route that DID take one would have to be added here on purpose.
   const paths = [];
   for (const [prefix, router] of API_ROUTERS) {
     for (const layer of router.stack ?? []) {
@@ -296,10 +301,13 @@ test("no route accepts a recording key", () => {
     }
   }
   assert.ok(paths.length > 40, "the inventory must actually be populated");
-  assert.equal(
-    paths.some((p) => /recording/i.test(p)),
-    false,
-    "recording has no client and no caller — see ARCHITECTURE.md's known-debt list"
+  assert.deepEqual(
+    paths.filter((p) => /recording/i.test(p)).sort(),
+    [
+      "/api/sessions/:id/recordings",
+      "/api/sessions/:id/recordings/:recordingId/finish",
+      "/api/sessions/:id/recordings/:recordingId/parts/:part",
+    ]
   );
 });
 
@@ -342,7 +350,11 @@ const listingOrder = async (query) => {
   let orderBy = null;
   const { token, stub } = authed((text) => {
     const at = text.lastIndexOf("ORDER BY");
-    if (/FROM media_items m/.test(text) && at !== -1) orderBy = text.slice(at + "ORDER BY".length).trim();
+    // The page query ends "ORDER BY … LIMIT … OFFSET …" (ARCH-1); the order is
+    // what sits between. The count query beside it has no ORDER BY at all.
+    if (/FROM media_items m/.test(text) && at !== -1) {
+      orderBy = text.slice(at + "ORDER BY".length).split(/\sLIMIT\s/)[0].trim();
+    }
     return { rows: [] };
   });
   try {
@@ -376,7 +388,7 @@ test("each sort reaches the query as its own ORDER BY", async () => {
 test("a sort combines with the filters rather than replacing them", async () => {
   let sent;
   const { token, stub } = authed((text) => {
-    if (/FROM media_items m/.test(text)) sent = text;
+    if (/FROM media_items m/.test(text) && /ORDER BY/.test(text)) sent = text;
     return { rows: [] };
   });
   try {

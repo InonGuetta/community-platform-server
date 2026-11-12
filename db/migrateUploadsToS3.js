@@ -1,12 +1,8 @@
 // @ts-check
 import "dotenv/config";
 import fs from "fs";
-import path from "path";
-import { Upload } from "@aws-sdk/lib-storage";
 import { pool } from "./pool.js";
-import { s3, s3Configured, LOCAL_UPLOAD_DIR } from "../lib/storage.js";
-import { getMimeType } from "../lib/mediaFormats.js";
-import { env } from "../lib/env.js";
+import { s3Configured, LOCAL_KEY_PREFIX, isLocalKey, localNameOf, localPathOf, storeFile } from "../lib/storage.js";
 
 // Moves media that predates S3 out of the local uploads directory.
 //
@@ -16,7 +12,7 @@ import { env } from "../lib/env.js";
 // disk indefinitely — which is the one thing here that cannot be regenerated.
 // Transcripts can be re-run; a lost recording is lost.
 //
-//   npm run migrate:uploads-to-s3 -- --dry            preview
+//   npm run migrate:uploads-to-s3 -- --dry            preview (works without S3)
 //   npm run migrate:uploads-to-s3                     copy, keep the local files
 //   npm run migrate:uploads-to-s3 -- --delete-local   copy, then remove them
 //
@@ -26,22 +22,11 @@ import { env } from "../lib/env.js";
 const dryRun = process.argv.includes("--dry");
 const deleteLocal = process.argv.includes("--delete-local");
 
-const uploadOne = async (filename, filePath) => {
-  const key = `uploads/${filename}`;
-  await new Upload({
-    client: s3,
-    params: {
-      Bucket: env.s3Bucket,
-      Key: key,
-      Body: fs.createReadStream(filePath),
-      ContentType: getMimeType(filename),
-    },
-  }).done();
-  return key;
-};
-
 const run = async () => {
-  if (!s3Configured()) {
+  // A dry run reads only the database and the disk, so it answers without S3 —
+  // "what would move, and is any of it already missing?" is the question to
+  // ask BEFORE the keys exist, not after (PRD NFR-2).
+  if (!s3Configured() && !dryRun) {
     console.error(
       "S3 is not configured — nothing to migrate to.\n" +
       "Set AWS_REGION, S3_BUCKET, AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY first."
@@ -50,8 +35,10 @@ const run = async () => {
     return;
   }
 
+  // The prefix has no LIKE wildcards in it, so it is matched as written.
   const { rows } = await pool.query(
-    "SELECT id, title, s3_key FROM media_items WHERE s3_key LIKE 'local/%' ORDER BY id"
+    "SELECT id, title, s3_key FROM media_items WHERE s3_key LIKE $1 ORDER BY id",
+    [`${LOCAL_KEY_PREFIX}%`]
   );
 
   if (rows.length === 0) {
@@ -66,8 +53,8 @@ const run = async () => {
   let failed = 0;
 
   for (const item of rows) {
-    const filename = item.s3_key.slice("local/".length);
-    const filePath = path.join(LOCAL_UPLOAD_DIR, filename);
+    const filename = localNameOf(item.s3_key);
+    const filePath = localPathOf(item.s3_key);
     const label = `#${item.id} ${item.title || "(untitled)"}`;
 
     if (!fs.existsSync(filePath)) {
@@ -85,7 +72,11 @@ const run = async () => {
     }
 
     try {
-      const key = await uploadOne(filename, filePath);
+      // Into the bucket exactly where an upload made today would go.
+      const key = await storeFile(item.s3_key, { folder: "uploads" });
+      // Unreachable while the check at the top of run() holds — here so a run
+      // can never record a file as moved when nothing left the disk.
+      if (isLocalKey(key)) throw new Error("S3 is not configured — nothing was uploaded");
       // Only after the upload resolves, so an interrupted run never leaves a
       // row pointing at an object that was never finished.
       await pool.query("UPDATE media_items SET s3_key=$1 WHERE id=$2", [key, item.id]);
@@ -99,7 +90,8 @@ const run = async () => {
   }
 
   if (dryRun) {
-    console.log(`\nDry run: nothing was uploaded or changed.`);
+    console.log(`\nDry run: nothing was uploaded or changed.${s3Configured() ? "" : " (S3 is not configured yet — set its four variables before the real run.)"}`);
+    if (missing > 0) console.log(`${missing} row(s) already point at a file that is not on disk — no backup can bring those back.`);
     return;
   }
 

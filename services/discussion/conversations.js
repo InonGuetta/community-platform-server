@@ -24,7 +24,7 @@
 import { pool } from "../../db/pool.js";
 import { logger } from "../../lib/logger.js";
 import { notFound, ERROR_CODES } from "../../lib/AppError.js";
-import { assertCanSeeLesson } from "./access.js";
+import { assertScopeCanSeeMediaId } from "../servicesVisibility.js";
 
 // How many messages the tab loads. A conversation longer than this shows its
 // most recent part — still in order, oldest of them first.
@@ -72,7 +72,7 @@ const messagesOf = async (conversationId, limit = MESSAGES_PAGE) => {
  * @param {{ courses: number[]|null, drafts: number[]|null }} scope
  */
 export const getLatestConversation = async (userId, mediaId, scope) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
   const conversation = await latestFor(userId, mediaId);
   if (!conversation) return { conversation: null, messages: [] };
   const messages = await messagesOf(conversation.id);
@@ -89,7 +89,7 @@ export const getLatestConversation = async (userId, mediaId, scope) => {
  * @param {{ courses: number[]|null, drafts: number[]|null }} scope
  */
 export const startConversation = async (userId, mediaId, scope) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
 
   const latest = await latestFor(userId, mediaId);
   if (latest) {
@@ -173,7 +173,7 @@ const TITLE_CHARS = 140;
  * @param {{ courses: number[]|null, drafts: number[]|null }} scope
  */
 export const listConversations = async (userId, mediaId, scope) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
   const { rows } = await pool.query(
     `SELECT c.id, c.created_at, c.updated_at,
        COUNT(m.id) FILTER (WHERE m.role = 'user')::int AS questions,
@@ -212,7 +212,7 @@ const ownedConversation = async (userId, mediaId, conversationId) => {
  * @param {{ courses: number[]|null, drafts: number[]|null }} scope
  */
 export const getConversationById = async (userId, mediaId, conversationId, scope) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
   const conversation = await ownedConversation(userId, mediaId, conversationId);
   return { conversation, messages: await messagesOf(conversation.id) };
 };
@@ -230,7 +230,7 @@ export const getConversationById = async (userId, mediaId, conversationId, scope
  * @param {{ courses: number[]|null, drafts: number[]|null }} scope
  */
 export const resumeConversation = async (userId, mediaId, conversationId, scope) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
   const { rows } = await pool.query(
     `UPDATE ai_conversations SET updated_at = NOW()
      WHERE id = $1 AND user_id = $2 AND media_id = $3 AND ${LIVE}
@@ -261,7 +261,7 @@ export const resumeConversation = async (userId, mediaId, conversationId, scope)
  * @param {{ courses: number[]|null, drafts: number[]|null }} scope
  */
 export const deleteConversation = async (userId, mediaId, conversationId, scope) => {
-  await assertCanSeeLesson(mediaId, scope);
+  await assertScopeCanSeeMediaId(mediaId, scope);
   const { rows } = await pool.query(
     `WITH gone AS (
        UPDATE ai_conversations SET deleted_at = NOW()

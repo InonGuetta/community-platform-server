@@ -1,5 +1,6 @@
 // @ts-check
 import { createQueue } from "./createQueue.js";
+import { env } from "../lib/env.js";
 
 // Retries ARE worth it here, unlike the transcription queue.
 //
@@ -12,7 +13,8 @@ import { createQueue } from "./createQueue.js";
 //
 // Exponential backoff starting at a minute so a rate limit or a brief upstream
 // outage resolves itself instead of burning all three attempts in seconds.
-const ATTEMPTS = Number(process.env.LLM_ATTEMPTS) || 3;
+// LLM_ATTEMPTS, three unless set.
+const ATTEMPTS = env.llmAttempts;
 
 export const llmQueue = createQueue("llm", {
   attempts: ATTEMPTS,

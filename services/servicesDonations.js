@@ -125,6 +125,43 @@ export const getDonationTotals = async () => {
   return result.rows.map((row) => ({ ...row, total_cents: Number(row.total_cents) }));
 };
 
+// What Stripe says became of a payment, in the ledger's words — or null while
+// it is still undecided. A fresh intent sits at requires_payment_method before
+// the donor has tried anything, so that state counts as a failure only once
+// Stripe records an attempt that failed (last_payment_error).
+export const statusFromIntent = (intent) => {
+  if (intent?.status === "succeeded") return "completed";
+  if (intent?.status === "canceled") return "failed";
+  if (intent?.status === "requires_payment_method" && intent.last_payment_error) return "failed";
+  return null;
+};
+
+// The donor's own donation, by id — another donor's id is the same null as one
+// that does not exist.
+export const getOwnDonation = async (donationId, donorId) => {
+  const result = await pool.query("SELECT * FROM donations WHERE id=$1 AND donor_id=$2", [donationId, donorId]);
+  return result.rows[0] || null;
+};
+
+/**
+ * Brings one donation in line with Stripe (PRD PAY-1, PAY-2), for the page the
+ * donor lands on after paying and for their history: the webhook is the
+ * authority, but it may not have arrived yet — or, on a machine with no
+ * webhook forwarding, at all. Asks Stripe for the intent and applies the same
+ * guarded update the webhook does, so the two can run in any order.
+ *
+ * @returns {Promise<{ donation: object, updated: object | null }>} `updated` is
+ *   the row only when this call moved it, for the receipt.
+ */
+export const syncDonationWithStripe = async (donation) => {
+  if (!donation.stripe_payment_intent || donation.status === "completed") return { donation, updated: null };
+  const intent = await stripe.paymentIntents.retrieve(donation.stripe_payment_intent);
+  const status = statusFromIntent(intent);
+  if (!status || status === donation.status) return { donation, updated: null };
+  const updated = await updateDonationStatus(donation.stripe_payment_intent, status);
+  return { donation: updated ?? donation, updated };
+};
+
 export const getDonationsByUser = async (userId) => {
   const result = await pool.query(
     "SELECT * FROM donations WHERE donor_id=$1 ORDER BY created_at DESC",

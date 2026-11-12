@@ -103,3 +103,22 @@ test("the exclusion list is spelled the same on both sides, once the client send
   );
   assert.deepEqual(nearMisses, [], `the client spells it ${nearMisses.join(", ")}`);
 });
+
+// ── Paging (ARCH-1) ─────────────────────────────────────────────────────────
+//
+// The next page is asked for with `cursor`, sent from the client's mediaApi —
+// not from the archive controller's filter block above, because a cursor is not
+// a filter. A misspelling there would not fail anything else: the server would
+// read no cursor and answer the FIRST page again, and the grid would fill with
+// the same 24 cards over and over.
+const CLIENT_MEDIA_API = new URL("../../community-platform-client/src/api/mediaApi.js", import.meta.url);
+
+test("the client asks for the next page by the name the server reads", async () => {
+  const source = await readFile(CLIENT_MEDIA_API, "utf8");
+  const getAll = source.slice(source.indexOf("getAll:"), source.indexOf("getOne:"));
+  assert.ok(getAll.length > 0, "found the client's getAll");
+  const sent = [...getAll.matchAll(/\{\s*(\w+)\s*\}\s*\)/g)].map((m) => m[1]);
+  assert.ok(sent.includes("cursor"), `the client's getAll sends ${sent.join(", ") || "no paging field"}`);
+  const server = await serverParams();
+  assert.ok(server.has("cursor"), "the listing reads `cursor`");
+});

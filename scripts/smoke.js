@@ -2,12 +2,13 @@
 import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById } from "../services/servicesAuth.js";
-import { getAllMedia, getContinueWatching } from "../services/servicesMedia.js";
+import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
+import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
-import { getNotesByUser } from "../services/servicesNotes.js";
+import { getNotesByUser, getNotesWithBodies, getNotesAboutMedia } from "../services/servicesNotes.js";
 import { getPendingApprovals } from "../services/servicesUsers.js";
-import { getStudentsOfLecturer, searchEnrollableUsers } from "../services/servicesCourses.js";
+import { getStudentsOfLecturer, searchEnrollableUsers, getAllCourses } from "../services/servicesCourses.js";
 import {
   getBookmarksByUser, createBookmark, deleteBookmark,
 } from "../services/servicesBookmarks.js";
@@ -18,7 +19,18 @@ import {
 import { getPlaylists, ITEMS_PER_LIST } from "../services/servicesSaves.js";
 import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
+import { searchArchive, getArchiveConversation, ARCHIVE_PASSAGES, PER_LESSON_MAX } from "../services/discussion/archive.js";
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
+import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
+import { getSessionSchedule } from "../services/servicesSessions.js";
+import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
+import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
+import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
+import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
+import { startRecording, savePart, finishRecording, recordConsent, consentsFor, openRecordingInRoom, saveChatMessage, getLessonChat, PARTS_DIR } from "../services/servicesSessionRecordings.js";
+import { isLocalKey as isLocalKeySmoke, removeStored as removeStoredSmoke } from "../lib/storage.js";
+import fsSmoke from "fs/promises";
+import pathSmoke from "path";
 
 // The check the test suite structurally cannot make: a real query, through the
 // real db/pool.js, against the real database.
@@ -65,6 +77,23 @@ const withDeadline = (promise, what) =>
   });
 
 const checks = [
+  {
+    // db/pool.js reads zoneless TIMESTAMP columns as UTC. Without that, on any
+    // machine set to Israel time, every created_at, scheduled_at and
+    // password_changed_at arrived two hours early — the sessions page showed the
+    // wrong hour, and a password change did not end recent sessions. The same
+    // instant, read once as TIMESTAMP and once as TIMESTAMPTZ, must agree.
+    name: "a zoneless TIMESTAMP reads as the same instant as a zoned one (db/pool.js)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT NOW()::timestamp AS naive, NOW() AS aware, current_setting('TimeZone') AS tz");
+      const drift = Math.abs(new Date(rows[0].naive).getTime() - new Date(rows[0].aware).getTime());
+      if (rows[0].tz !== "UTC") {
+        throw new Error(`the database's TimeZone is ${rows[0].tz}, not UTC — zoneless columns would no longer hold UTC`);
+      }
+      if (drift > 1000) throw new Error(`TIMESTAMP and TIMESTAMPTZ disagree by ${Math.round(drift / 60000)} minute(s)`);
+      return `agree to ${drift}ms; database TimeZone UTC; this process's offset ${-new Date().getTimezoneOffset()} min`;
+    },
+  },
   // Each step is a call shape the application actually makes, in the order that
   // matters. The transaction is third on purpose: it hands an instrumented
   // client back to the pool, and the step after it is where pg reuses that
@@ -142,8 +171,8 @@ const checks = [
       // array exercises the array branch, which is the one a student gets and
       // the one that casts to int[]. Both, because they are different SQL paths.
       // Both dimensions, as an admin gets them, then as a student in no course.
-      const all = await getAllMedia({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED });
-      const asStudent = await getAllMedia({ visibleCourses: [], visibleDrafts: [] });
+      const all = await getAllMedia({ courses: UNRESTRICTED, drafts: UNRESTRICTED });
+      const asStudent = await getAllMedia({ courses: [], drafts: [] });
       return `${all.length} visible unrestricted, ${asStudent.length} to an unenrolled student`;
     },
   },
@@ -152,10 +181,10 @@ const checks = [
     run: async () => {
       // `= ANY($n::media_type[])` is a cast the planner either accepts or does
       // not, and the suite only ever sees it as a string.
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const all = await getAllMedia(scope);
-      const two = await getAllMedia({ ...scope, types: ["video", "audio"] });
-      const one = await getAllMedia({ ...scope, types: ["video"] });
+      const two = await getAllMedia(scope, { types: ["video", "audio"] });
+      const one = await getAllMedia(scope, { types: ["video"] });
       if (one.length > two.length || two.length > all.length) {
         throw new Error("a wider type filter returned FEWER rows than a narrower one");
       }
@@ -169,10 +198,10 @@ const checks = [
       // can say whether it parses — `like_count` names an output column, which
       // ORDER BY accepts only as a bare name, and a reshuffle that wrapped it in
       // an expression would pass every stubbed test and fail here.
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const counts = [];
       for (const sort of MEDIA_SORTS) {
-        const rows = await getAllMedia({ ...scope, sort });
+        const rows = await getAllMedia(scope, { sort });
         counts.push(rows.length);
       }
       if (new Set(counts).size > 1) {
@@ -182,12 +211,40 @@ const checks = [
     },
   },
   {
+    // ARCH-1. Walk the archive a small page at a time, in every order, and
+    // require the pages to be the whole list in the same order, with no row
+    // twice and none missing — and the count to agree. LIMIT/OFFSET after an
+    // ORDER BY on an output column (like_count) is exactly what only a real
+    // planner can accept or refuse.
+    name: "the archive in pages, in every sort order (getMediaPage, countMedia)",
+    run: async () => {
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+      const size = 5;
+      let walked = 0;
+      for (const sort of MEDIA_SORTS) {
+        const all = (await getAllMedia(scope, { sort })).map((r) => r.id);
+        const total = await countMedia(scope, { sort });
+        if (total !== all.length) throw new Error(`${sort}: count ${total}, list ${all.length}`);
+        const paged = [];
+        for (let offset = 0, more = true; more; offset += size) {
+          const page = await getMediaPage(scope, { sort }, { limit: size, offset });
+          paged.push(...page.items.map((r) => r.id));
+          more = page.hasMore;
+          if (paged.length > all.length + size) throw new Error(`${sort}: paging did not stop`);
+        }
+        if (paged.join(",") !== all.join(",")) throw new Error(`${sort}: the pages differ from the list`);
+        walked += Math.ceil(all.length / size) || 1;
+      }
+      return `${MEDIA_SORTS.length} orders, ${walked} pages of ${size}, pages = list = count`;
+    },
+  },
+  {
     name: "getAllMedia by length (duration_seconds, documents left out)",
     run: async () => {
       // Real rows, real planner. The ranges are the client's buckets; together
       // they must account for every recording with a known length exactly once,
       // which is what min-inclusive / max-exclusive promises.
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
       const buckets = [
         { maxDuration: 900 },
         { minDuration: 900, maxDuration: 1800 },
@@ -196,7 +253,7 @@ const checks = [
       ];
       const counts = [];
       for (const range of buckets) {
-        const rows = await getAllMedia({ ...scope, ...range });
+        const rows = await getAllMedia(scope, range);
         if (rows.some((r) => r.media_type === "text" || r.duration_seconds === null)) {
           throw new Error("a length range returned a document or a recording of unknown length");
         }
@@ -227,14 +284,13 @@ const checks = [
         `SELECT id FROM tags WHERE parent_id IS NULL ORDER BY id LIMIT 2`
       );
       const [first, second] = rows.map((r) => r.id);
-      const scope = { visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED };
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
 
-      const chosen = await getAllMedia({ ...scope, tagIds: first ? [first] : [] });
+      const chosen = await getAllMedia(scope, { tagIds: first ? [first] : [] });
       // "Everything except X", with no positive choice — the standalone path.
-      const without = await getAllMedia({ ...scope, excludeTagIds: second ? [second] : [] });
+      const without = await getAllMedia(scope, { excludeTagIds: second ? [second] : [] });
       // And both at once, which is the arrangement the UI actually produces.
-      const both = await getAllMedia({
-        ...scope,
+      const both = await getAllMedia(scope, {
         tagIds: first ? [first] : [],
         excludeTagIds: second ? [second] : [],
       });
@@ -272,10 +328,25 @@ const checks = [
       // script exists: the notebook is the one screen that is ENTIRELY one
       // query, so a column the code selects and the schema does not have takes
       // the page from "a feature is missing" to "the page is a 500".
-      const { rows } = await pool.query("SELECT id FROM users LIMIT 1");
-      if (rows.length === 0) return "no users to read a notebook for";
-      const notes = await getNotesByUser(rows[0].id);
-      return `${notes.length} note(s)`;
+      // NOTE-17 (migration 038): the list must come back WITHOUT bodies, a
+      // word from a note's middle must find it, its body must come back by id,
+      // and a lesson's notes must be found by position() over the body.
+      const { rows } = await pool.query(
+        "SELECT user_id AS id, id AS note_id, media_id, split_part(body_text, ' ', 3) AS word FROM notes WHERE body_text <> '' ORDER BY id LIMIT 1"
+      );
+      const owner = rows[0] ?? (await pool.query("SELECT id FROM users LIMIT 1")).rows[0];
+      if (!owner) return "no users to read a notebook for";
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+      const notes = await getNotesByUser(owner.id, scope);
+      if (notes.some((n) => "body" in n)) throw new Error("the list returned bodies");
+      if (!rows[0]) return `${notes.length} note(s), none with text to search`;
+      const found = rows[0].word ? await getNotesByUser(owner.id, scope, { search: rows[0].word }) : notes;
+      if (!found.some((n) => n.id === rows[0].note_id)) throw new Error(`searching "${rows[0].word}" did not find note ${rows[0].note_id}`);
+      const [whole] = await getNotesWithBodies(owner.id, scope, [rows[0].note_id]);
+      if (typeof whole?.body !== "string") throw new Error("a note by id came back without its body");
+      const about = rows[0].media_id ? await getNotesAboutMedia(owner.id, scope, rows[0].media_id) : [];
+      if (rows[0].media_id && !about.some((n) => n.id === rows[0].note_id)) throw new Error("a note attached to a lesson was not among its notes");
+      return `${notes.length} note(s), light; search, by-id and by-lesson reads ok`;
     },
   },
   // ── The three most recent migrations ──────────────────────────────────────
@@ -293,7 +364,7 @@ const checks = [
   {
     name: "creator_name on the archive listing (migration 020)",
     run: async () => {
-      const items = await getAllMedia({ visibleCourses: UNRESTRICTED, visibleDrafts: UNRESTRICTED });
+      const items = await getAllMedia({ courses: UNRESTRICTED, drafts: UNRESTRICTED });
       // An empty library is a legitimate state and must not fail the check — but
       // it also proves nothing, so say so rather than reporting a pass.
       if (items.length === 0) return "no media to inspect (column not exercised)";
@@ -794,6 +865,39 @@ const checks = [
     },
   },
   {
+    // The archive chat's retrieval (PRD ASK-2), through its real SQL: the
+    // visibility predicate inside both ranking CTEs, the widened HNSW scan and
+    // the fusion. OpenAI is replaced. Read-only. Run twice: unrestricted, and
+    // as a student enrolled in nothing — who must get no lesson that belongs
+    // to a course, and no draft.
+    name: "the archive chat's search across lessons (migration 047)",
+    run: async () => {
+      const nullable = await pool.query(
+        `SELECT is_nullable FROM information_schema.columns
+         WHERE table_name = 'ai_conversations' AND column_name = 'media_id'`
+      );
+      if (nullable.rows[0]?.is_nullable !== "YES") throw new Error("ai_conversations.media_id is NOT NULL — migration 047 has not been applied");
+      const deps = { embed: async () => Array(1536).fill(0.01), rerank: async (_q, r, limit) => r.slice(0, limit) };
+      const all = await searchArchive("תורה", { courses: UNRESTRICTED, drafts: UNRESTRICTED }, deps);
+      if (all.length > ARCHIVE_PASSAGES) throw new Error(`${all.length} passages, more than ${ARCHIVE_PASSAGES}`);
+      const perLesson = new Map();
+      for (const p of all) perLesson.set(p.media_id, (perLesson.get(p.media_id) ?? 0) + 1);
+      if ([...perLesson.values()].some((n) => n > PER_LESSON_MAX)) throw new Error("one lesson has more than its share of passages");
+      const outsider = await searchArchive("תורה", { courses: [], drafts: [] }, deps);
+      if (outsider.length > 0) {
+        const ids = [...new Set(outsider.map((p) => p.media_id))];
+        const leaked = await pool.query(
+          "SELECT id FROM media_items WHERE id = ANY($1::int[]) AND (course_id IS NOT NULL OR NOT is_published)",
+          [ids]
+        );
+        if (leaked.rows.length > 0) throw new Error(`a student in no course was shown lesson(s) ${leaked.rows.map((r) => r.id).join(", ")}`);
+      }
+      const user = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
+      if (user.rows.length > 0) await getArchiveConversation(user.rows[0].id);
+      return `${all.length} passage(s) from ${perLesson.size} lesson(s); ${outsider.length} for a student in no course`;
+    },
+  },
+  {
     // Migration 032. Read-only: the latest-conversation read the tab makes on
     // open, for a real user and lesson, through the service — which is what
     // fails with "relation does not exist" when the schema is behind.
@@ -828,6 +932,385 @@ const checks = [
       return (result.conversation
         ? `conversation ${result.conversation.id}, ${result.messages.length} message(s)`
         : "tables present, no conversation yet") + `; ${today} question(s) today; ${history.length} in history; ${deletion}`;
+    },
+  },
+  {
+    // The bell's own queries, as the navbar runs them every minute (migration
+    // 035). markRead on id 0 matches no row — it exercises the statement and
+    // changes nothing.
+    name: "the notifications inbox and preferences (migrations 035, 036)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT id FROM users WHERE is_active=TRUE LIMIT 1");
+      if (rows.length === 0) return "skipped — no active user";
+      const inbox = await listForUser(rows[0].id);
+      const touched = await markRead(rows[0].id, 0);
+      if (touched) throw new Error("marking notification 0 matched a row");
+      const pending = await countPendingRoleRequests();
+      // 036: the opt-outs the preferences screen reads, and the reminder column.
+      // Existence only for the column — the reminder query CLAIMS sessions, and
+      // a smoke run must not send anybody a reminder.
+      const optOuts = await getEmailOptOuts(rows[0].id);
+      const column = await pool.query(
+        "SELECT 1 FROM information_schema.columns WHERE table_name='live_sessions' AND column_name='reminder_sent_at'"
+      );
+      if (column.rows.length === 0) throw new Error("live_sessions.reminder_sent_at is missing — migration 036 has not been applied");
+      // The one writer, for real: its INSERT is the statement every notification
+      // goes through, and its parameter typing is something only Postgres can
+      // judge — the stubbed suite passed a version Postgres refused outright.
+      // A type with no mail wording and no category, so this can never send
+      // mail even where SMTP is configured. Written twice with `onceBy`, which
+      // must write once; then removed.
+      const probe = { smokeProbe: String(Date.now()) };
+      const first = await deliver([rows[0].id], "smoke_probe", probe, { onceBy: "smokeProbe" });
+      const second = await deliver([rows[0].id], "smoke_probe", probe, { onceBy: "smokeProbe" });
+      await pool.query("DELETE FROM notifications WHERE type = 'smoke_probe'");
+      if (first !== 1 || second !== 0) throw new Error(`deliver wrote ${first} then ${second}; expected 1 then 0`);
+      // The SQL-side time conversion the notices and the calendar file rely on.
+      const schedule = await getSessionSchedule(0);
+      if (schedule !== null) throw new Error("session 0 exists?!");
+      return `${inbox.items.length} shown, ${inbox.unread} unread; ${pending} role request(s) waiting; ${optOuts.length} mail opt-out(s); deliver once-only ok`;
+    },
+  },
+  {
+    // ADM-1 / NFR-3 (migration 040): a call recorded now must be in this
+    // month's spend and in the report's by-purpose and by-day lines — the
+    // Israel-month window and the NUMERIC sums are what only a real database
+    // can judge. The probe row is removed afterwards.
+    name: "the AI cost meter (migration 040)",
+    run: async () => {
+      const before = await monthSpendUsd();
+      await recordAiUsage({ purpose: "smoke_probe", model: "gpt-4o", inputTokens: 1_000_000, outputTokens: 0 });
+      try {
+        const after = await monthSpendUsd();
+        if (Math.abs(after - before - 2.5) > 0.0001) throw new Error(`spend moved by ${after - before}, expected 2.5`);
+        const report = await monthUsageReport();
+        if (!report.byPurpose.some((p) => p.purpose === "smoke_probe")) throw new Error("the probe is missing from the by-purpose report");
+        if (report.byDay.length === 0) throw new Error("the by-day report is empty");
+        const real = report.byPurpose.filter((p) => p.purpose !== "smoke_probe");
+        return `this month so far: $${(before).toFixed(4)} over ${real.reduce((n, p) => n + p.calls, 0)} call(s); cap ${report.capUsd ?? "none"}`;
+      } finally {
+        await pool.query("DELETE FROM ai_usage WHERE purpose = 'smoke_probe'");
+      }
+    },
+  },
+  {
+    // MOB-5 / MOB-6 (migration 041): the transcript read now joins a third
+    // query, and the worker upserts the timings with a ::jsonb cast inside the
+    // chunks' transaction. The read runs for real on a recording; the upsert
+    // runs inside a transaction that is rolled back, so nothing is kept.
+    name: "a recording's word timings (migration 041)",
+    run: async () => {
+      const { rows } = await pool.query(
+        `SELECT m.id FROM media_items m JOIN transcripts t ON t.media_id = m.id
+          WHERE m.media_type <> 'text' AND t.status = 'done' ORDER BY m.id LIMIT 1`
+      );
+      if (rows.length === 0) return "skipped — no finished recording to read";
+      const mediaId = rows[0].id;
+      const transcript = await getTranscriptByMediaId(mediaId, { courses: UNRESTRICTED, drafts: UNRESTRICTED });
+      const stored = Array.isArray(transcript.timing) ? `${transcript.timing.length} anchors` : "none stored (estimated from chunks)";
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO transcript_timings (media_id, anchors) VALUES ($1, $2::jsonb)
+           ON CONFLICT (media_id) DO UPDATE SET anchors = EXCLUDED.anchors, created_at = NOW()`,
+          [mediaId, JSON.stringify([[0, 0], [1, 1.5]])]
+        );
+        const back = await client.query("SELECT anchors FROM transcript_timings WHERE media_id=$1", [mediaId]);
+        if (back.rows[0]?.anchors?.[1]?.[1] !== 1.5) throw new Error("the upserted anchors did not read back as JSON numbers");
+      } finally {
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+      return `media ${mediaId}: ${stored}; upsert ok (rolled back)`;
+    },
+  },
+  {
+    // ROST-9 (migration 042): a code made, typed (in lower case, with a dash),
+    // asked again, listed on both sides, approved into the roster — through the
+    // real SQL, on one client inside a transaction that is always rolled back
+    // (the same savepoint routing as the tag-proposal check above). The
+    // ON CONFLICT … WHERE upsert and the decide transaction are what only a real
+    // database can judge.
+    name: "joining a course by its code (migration 042)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_join");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_join");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_join");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        // A course of its own, made inside the transaction, so the check runs on
+        // a database with no courses yet and never touches a real one.
+        const { rows: [lecturer] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND role IN ('lecturer', 'admin') ORDER BY id LIMIT 1"
+        );
+        if (!lecturer) return "skipped — no lecturer or admin to own a course";
+        const { rows: [course] } = await client.query(
+          "INSERT INTO courses (title, lecturer_id) VALUES ('__smoke join', $1) RETURNING id, lecturer_id",
+          [lecturer.id]
+        );
+        const { rows: [joiner] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND id <> $1 ORDER BY id LIMIT 1",
+          [lecturer.id]
+        );
+        if (!joiner) return "skipped — nobody but the lecturer to join";
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const code = await setJoinCode(course.id);
+        const typed = `${code.slice(0, 3).toLowerCase()}-${code.slice(3)}`;
+        const first = await requestToJoin(joiner.id, typed);
+        if (!first.created || first.course.id !== course.id) throw new Error("the code did not file a request on its course");
+        const again = await requestToJoin(joiner.id, code);
+        if (again.created) throw new Error("asking twice filed two requests — the ON CONFLICT … WHERE is not matching");
+
+        const queue = await getPendingJoinRequests(course.id);
+        const waiting = queue.find((r) => Number(r.user_id) === Number(joiner.id));
+        if (!waiting) throw new Error("the lecturer's queue is missing the request");
+        if (!(await getMyJoinRequests(joiner.id)).some((r) => r.id === waiting.id)) throw new Error("the requester's list is missing it");
+
+        const listed = (await getAllCourses()).find((c) => c.id === course.id);
+        if (!(listed?.pending_join_count >= 1)) throw new Error("the course list does not count the waiting request");
+
+        await decideJoinRequest(course.id, waiting.id, true, lecturer.id);
+        const { rows: enrolled } = await client.query(
+          "SELECT 1 FROM enrollments WHERE course_id = $1 AND student_id = $2", [course.id, joiner.id]
+        );
+        if (enrolled.length !== 1) throw new Error("approving did not enrol");
+        return `code ${code.length} chars, request filed once, listed, approved into the roster (rolled back)`;
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // REC-1 (migration 048): a session recorded through the real SQL — the
+    // recording row and its partial unique index, two parts, a consent given
+    // and changed (the ON CONFLICT upsert), the room lookup, and the finish
+    // whose CTE also writes live_sessions.recording_s3_key. On one client in a
+    // transaction that is always rolled back; the files it wrote are removed.
+    //
+    // REC-2/REC-3 (migration 049) on the same run: the finish makes a draft
+    // lesson and copies the chat onto it (jsonb_agg, the offset arithmetic).
+    // The queue is replaced — a job for a lesson that is rolled back would
+    // wait in Redis for a row that never existed.
+    name: "recording a live session, and the lesson it becomes (migrations 048, 049)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      let recordingId = null;
+      let storedKey = null;
+      try {
+        await client.query("BEGIN");
+        const { rows: [host] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND role IN ('lecturer', 'admin') ORDER BY id LIMIT 1"
+        );
+        if (!host) return "skipped — no lecturer or admin to host";
+        const { rows: [guest] } = await client.query("SELECT id FROM users WHERE is_active AND id <> $1 ORDER BY id LIMIT 1", [host.id]);
+        const { rows: [session] } = await client.query(
+          `INSERT INTO live_sessions (host_id, title, session_type, room_token, started_at, is_active)
+           VALUES ($1, '__smoke recording', 'group', 'smoke-' || md5(random()::text), NOW(), TRUE)
+           RETURNING id, room_token`,
+          [host.id]
+        );
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+
+        const recording = await startRecording(session.id, host.id, "audio/webm;codecs=opus");
+        recordingId = recording.id;
+        await savePart({ sessionId: session.id, recordingId, hostId: host.id, partNumber: 0, body: Buffer.from("smoke-a") });
+        await savePart({ sessionId: session.id, recordingId, hostId: host.id, partNumber: 1, body: Buffer.from("smoke-b") });
+        if (!(await openRecordingInRoom(recordingId, session.room_token, host.id))) throw new Error("the room lookup did not find the open recording");
+        if (guest) {
+          await recordConsent(recordingId, guest.id, true);
+          await recordConsent(recordingId, guest.id, false);
+          const answers = await consentsFor(recordingId);
+          if (answers.get(Number(guest.id)) !== false) throw new Error("a changed answer did not replace the first");
+        }
+        await saveChatMessage(recordingId, { id: host.id, displayName: "smoke" }, "שורה בצ'אט");
+        let queued = null;
+        const done = await finishRecording(session.id, recordingId, host.id, { trigger: async (id) => { queued = id; } });
+        storedKey = done.s3_key;
+        if (done.status !== "finished" || done.parts !== 2 || Number(done.bytes) !== 14) {
+          throw new Error(`finished as ${done.status} with ${done.parts} part(s), ${done.bytes} bytes`);
+        }
+        const { rows: [after] } = await client.query("SELECT recording_s3_key FROM live_sessions WHERE id=$1", [session.id]);
+        if (after.recording_s3_key !== done.s3_key) throw new Error("the session does not point at its recording");
+        if (!done.media_id || queued !== done.media_id) throw new Error("the recording did not become a lesson queued for processing");
+        const { rows: [lesson] } = await client.query("SELECT media_type, is_published, session_id FROM media_items WHERE id=$1", [done.media_id]);
+        if (lesson.media_type !== "audio" || lesson.is_published || lesson.session_id !== session.id) {
+          throw new Error(`the lesson is ${JSON.stringify(lesson)}`);
+        }
+        const chat = await getLessonChat(done.media_id);
+        if (chat.length !== 1 || chat[0].text !== "שורה בצ'אט" || typeof chat[0].offset !== "number") {
+          throw new Error(`the appendix is ${JSON.stringify(chat)}`);
+        }
+        return `2 parts joined to ${isLocalKeySmoke(done.s3_key) ? "local disk" : "S3"}, consent upserted, session updated, draft lesson ${done.media_id} with its chat (rolled back)`;
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+        if (recordingId) await fsSmoke.rm(pathSmoke.join(PARTS_DIR, String(recordingId)), { recursive: true, force: true });
+        if (isLocalKeySmoke(storedKey)) await removeStoredSmoke(storedKey, { missingOk: true });
+      }
+    },
+  },
+  {
+    // ATTR-10 (a lecturer's page): the header's one-row summary — FILTERed
+    // counts, the SUM of lengths and json_agg(DISTINCT jsonb …) of courses — on
+    // the most-used real name. Read-only.
+    name: "a lecturer's page summary (getCreatorProfile)",
+    run: async () => {
+      const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+      const named = (await getCreators(scope)).filter((c) => c.name !== "כללי").sort((a, b) => b.media_count - a.media_count);
+      if (named.length === 0) return "skipped — every lesson is unattributed";
+      const profile = await getCreatorProfile(named[0].name, scope);
+      if (!profile || profile.media_count !== named[0].media_count) {
+        throw new Error(`the summary counts ${profile?.media_count} where the creator list says ${named[0].media_count}`);
+      }
+      if (!Array.isArray(profile.courses)) throw new Error("courses did not come back as a list");
+      return `${profile.media_count} item(s), ${Math.round(profile.total_seconds / 60)} min, ${profile.courses.length} course(s)`;
+    },
+  },
+  {
+    // CRS-1..3 (migration 043): arranging a course, reading it as a track with
+    // one reader's progress, and completion stamped at nine tenths and kept on
+    // listening again — the CTE upsert and the unnest … WITH ORDINALITY update
+    // are what only a real database judges. Everything runs on one client in
+    // a transaction that is always rolled back: a course of its own, two real
+    // recordings moved into it for the duration.
+    name: "a course as a track (migration 043)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      try {
+        await client.query("BEGIN");
+        const { rows: recordings } = await client.query(
+          "SELECT id, duration_seconds FROM media_items WHERE media_type <> 'text' AND duration_seconds > 0 ORDER BY id LIMIT 2"
+        );
+        const { rows: [user] } = await client.query("SELECT id FROM users WHERE is_active ORDER BY id LIMIT 1");
+        if (recordings.length < 2 || !user) return "skipped — needs two measured recordings and a user";
+        const { rows: [course] } = await client.query("INSERT INTO courses (title) VALUES ('__smoke track') RETURNING id");
+        await client.query("UPDATE media_items SET course_id = $1, is_published = TRUE WHERE id = ANY($2::int[])", [course.id, recordings.map((r) => r.id)]);
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+
+        const [first, second] = recordings;
+        await reorderCourseLessons(course.id, [second.id, first.id]);
+        const scope = { courses: UNRESTRICTED, drafts: UNRESTRICTED };
+        const ordered = await getCourseLessons(course.id, user.id, scope);
+        if (ordered.map((l) => l.id).join() !== [second.id, first.id].join()) throw new Error("the track is not in the arranged order");
+
+        const near = await saveWatchProgress(user.id, second.id, Math.ceil(second.duration_seconds * 0.95));
+        if (!near.completed_at) throw new Error("reaching 95% did not stamp completion");
+        const again = await saveWatchProgress(user.id, second.id, 0);
+        if (!again.completed_at) throw new Error("listening again from the start un-finished the lesson");
+        const early = await saveWatchProgress(user.id, first.id, 1);
+        if (early.completed_at) throw new Error("one second in already counted as finished");
+
+        const summary = trackSummary(await getCourseLessons(course.id, user.id, scope));
+        if (summary.completed !== 1 || summary.nextId !== first.id) throw new Error(`summary was ${JSON.stringify(summary)}`);
+
+        // CRS-4: the lecturer's report, once the listener is enrolled.
+        await client.query("INSERT INTO enrollments (student_id, course_id) VALUES ($1, $2)", [user.id, course.id]);
+        const report = await getCourseReport(course.id);
+        const row = report.students.find((s) => Number(s.id) === Number(user.id));
+        if (!row || row.cells[second.id]?.status !== "done" || row.cells[first.id]?.status !== "started") {
+          throw new Error(`the report did not show the listening: ${JSON.stringify(row?.cells)}`);
+        }
+        if (report.lessons.find((l) => l.id === second.id)?.completedBy !== 1) throw new Error("the per-lesson count is wrong");
+        return "arranged, read in order, finished at 90% and kept, next lesson found, reported (rolled back)";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // ARCH-4 (migration 044): proposals read with their paths (a recursive
+    // CTE), approved into the lesson's tags through setMediaTags, and the rest
+    // dismissed — all real SQL, no model call, on one client in a transaction
+    // that is always rolled back.
+    name: "tags the LLM proposed (migration 044)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_tags");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_tags");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_tags");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        const { rows: [item] } = await client.query("SELECT id FROM media_items ORDER BY id LIMIT 1");
+        const { rows: deep } = await client.query(
+          `SELECT t.id FROM tags t WHERE t.parent_id IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM media_tags mt WHERE mt.tag_id = t.id AND mt.media_id = $1)
+           ORDER BY t.id LIMIT 2`,
+          [item?.id ?? 0]
+        );
+        if (!item || deep.length < 2) return "skipped — needs a lesson and two nested tags";
+        await client.query(
+          `INSERT INTO media_ai_tag_suggestions (media_id, tag_id, reason)
+           SELECT $1, c.id, c.reason FROM unnest($2::int[], $3::text[]) AS c(id, reason)`,
+          [item.id, deep.map((t) => t.id), ["smoke", "smoke"]]
+        );
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const open = await getAiTagSuggestions(item.id);
+        if (open.length !== 2 || !open.every((s) => typeof s.path === "string" && s.path.includes(" > "))) {
+          throw new Error(`proposals did not come back with their paths: ${JSON.stringify(open)}`);
+        }
+        const afterApprove = await approveAiTags(item.id, [deep[0].id]);
+        const { rows: tagged } = await client.query("SELECT 1 FROM media_tags WHERE media_id = $1 AND tag_id = $2", [item.id, deep[0].id]);
+        if (tagged.length !== 1 || afterApprove.length !== 1) throw new Error("approving did not tag the lesson and close the proposal");
+        if ((await dismissAiTags(item.id)).length !== 0) throw new Error("dismissing all left proposals open");
+        return "proposals read with paths, one approved into the tags, the rest dismissed (rolled back)";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // COM-3b (migration 046): the guest read, through its real SQL — and that no
+    // lesson is public that should not be. Read-only.
+    name: "public lessons (migration 046)",
+    run: async () => {
+      const { rows } = await pool.query("SELECT id FROM media_items WHERE is_public ORDER BY id");
+      const { rows: [anyLesson] } = await pool.query("SELECT id FROM media_items ORDER BY id LIMIT 1");
+      if (anyLesson) await getPublicMedia(anyLesson.id);
+      return `${rows.length} public lesson(s)${rows.length ? `: ${rows.map((r) => r.id).join(", ")}` : ""}; guest read ok`;
     },
   },
   {

@@ -1,0 +1,13 @@
+-- A lesson its lecturer has chosen to open to anyone with the link (PRD COM-3b,
+-- COM-4; decided 2026-11-05 on PRD 9.3.2: the archive stays closed, and a
+-- single lesson may be made public by whoever manages it).
+--
+-- Public AND published, both: a guest sees a lesson only while it is published
+-- as well, so taking a lesson down takes it off the public link too without
+-- anybody remembering a second switch. FALSE for every existing lesson — no
+-- lesson becomes public by this migration.
+--
+-- What a guest gets is narrower than a reader's: the recording or the file,
+-- the summary and the key points (controllersMedia → getPublicLesson). Never the
+-- notebook, the chat, the transcript, likes or anything about other readers.
+ALTER TABLE media_items ADD COLUMN IF NOT EXISTS is_public BOOLEAN NOT NULL DEFAULT FALSE;

@@ -3,6 +3,8 @@ import "dotenv/config";
 // Must stay directly after dotenv/config and above every other import — see the
 // header of lib/checkEnv.js for why the position is load-bearing.
 import "./lib/checkEnv.js";
+import { env } from "./lib/env.js";
+import { initMonitoring, captureError, flushMonitoring } from "./lib/monitoring.js";
 import { createServer } from "http";
 import { createApp } from "./app.js";
 import { pool } from "./db/pool.js";
@@ -10,6 +12,11 @@ import { transcriptionQueue } from "./queue/transcriptionQueue.js";
 import { llmQueue } from "./queue/llmQueue.js";
 import { initSockets } from "./sockets/socketManager.js";
 import { logger } from "./lib/logger.js";
+import { startSessionReminders } from "./lib/sessionReminders.js";
+
+// Before anything can fail: external error reporting (PRD NFR-1), a no-op
+// without SENTRY_DSN.
+initMonitoring("api");
 
 // The application itself lives in app.js, so the tests can exercise the real
 // middleware chain without any of the process lifecycle below.
@@ -47,12 +54,15 @@ const shutdown = async (reason, exitCode) => {
     httpServer.closeIdleConnections?.();
     await closed;
 
+    stopReminders();
     io.close();
     // This process only ever *adds* jobs (it runs no processor), so there is
     // nothing in flight to drain — these are just the Redis connections the
     // admin queue-stats endpoint uses.
     await Promise.all([transcriptionQueue.close(), llmQueue.close()]);
     await pool.end();
+    // Whatever was reported in the last moments goes out before the exit.
+    await flushMonitoring();
     logger.info("Shutdown complete");
   } catch (err) {
     logger.error(`Error during shutdown: ${err.message}`);
@@ -73,9 +83,10 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
 // `instanceof Error` rather than `err?.stack || err`: a promise can be rejected
 // with anything — a string, undefined — and the old form printed "undefined" for
 // those, losing the only notice we get.
-process.on("unhandledRejection", (err) =>
-  logger.error("unhandledRejection:", err instanceof Error ? err.stack : err)
-);
+process.on("unhandledRejection", (err) => {
+  logger.error("unhandledRejection:", err instanceof Error ? err.stack : err);
+  captureError(err, { tags: { kind: "unhandledRejection" } });
+});
 
 // After an uncaughtException the process state is undefined, so the correct
 // move is to shut down and let a supervisor start a clean one. That is only an
@@ -83,9 +94,10 @@ process.on("unhandledRejection", (err) =>
 // stays dead — so it is opt-in: set EXIT_ON_UNCAUGHT=true once the app runs
 // under pm2 / systemd / Docker with a restart backoff. Until then we log and
 // keep running, exactly as before.
-const EXIT_ON_UNCAUGHT = process.env.EXIT_ON_UNCAUGHT === "true";
+const EXIT_ON_UNCAUGHT = env.exitOnUncaught;
 process.on("uncaughtException", (err) => {
   logger.error("uncaughtException:", err?.stack || err);
+  captureError(err, { tags: { kind: "uncaughtException" } });
   if (EXIT_ON_UNCAUGHT) shutdown("uncaughtException", 1);
 });
 
@@ -96,7 +108,7 @@ pool.query("SELECT 1").catch((err) =>
   logger.error("[pg pool] warmup failed:", err.message)
 );
 
-const PORT = process.env.PORT || 3001;
+const PORT = env.port;
 
 // On Windows, `node --watch` can start the new process before the previous
 // one has released the port, so the fresh process hits EADDRINUSE and (being
@@ -125,3 +137,7 @@ httpServer.keepAliveTimeout = 65000;
 httpServer.headersTimeout = 66000;
 
 httpServer.listen(PORT, () => logger.info(`Server on port ${PORT}`));
+
+// LIVE-6 — here, not in createApp(), so the test suite (which builds the app
+// without listening) never starts a timer.
+const stopReminders = startSessionReminders();

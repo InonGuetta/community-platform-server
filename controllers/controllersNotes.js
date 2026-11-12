@@ -1,14 +1,37 @@
 // @ts-check
 import * as servicesNotes from "../services/servicesNotes.js";
-import * as servicesMedia from "../services/servicesMedia.js";
-import { canUserSeeMedia, viewerScopeFor } from "../services/servicesVisibility.js";
-import { optionalId, optionalSeconds, requireIdList } from "../lib/validate.js";
-import { notFound, ERROR_CODES } from "../lib/AppError.js";
+import { assertUserCanSeeMediaId, viewerScopeFor } from "../services/servicesVisibility.js";
+import { optionalId, optionalSeconds, requireIdList, optionalQueryString } from "../lib/validate.js";
+import { badRequest } from "../lib/AppError.js";
 
+// One route, three answers (PRD NOTE-17) — see servicesNotes:
+//   GET /notes                  the list, light: a preview and no body
+//   GET /notes?q=…              the same list, searched over the whole text
+//   GET /notes?ids=1,2,3        those notes whole (the cards on screen, an export)
+//   GET /notes?aboutMediaId=7   one lesson's notes whole (the lesson page)
+// Asking for two at once is a 400: each answers a different question, and
+// silently preferring one would hide the mistake.
 export const getNotes = async (req, res) => {
-  const notes = await servicesNotes.getNotesByUser(req.user.id, await viewerScopeFor(req.user));
-  res.status(200).json(notes);
+  const { q, ids, aboutMediaId } = req.query;
+  const modes = [ids !== undefined, aboutMediaId !== undefined, q !== undefined].filter(Boolean).length;
+  if (modes > 1) throw badRequest("Ask for one of ids, aboutMediaId or q");
+
+  const scope = await viewerScopeFor(req.user);
+  let notes;
+  if (ids !== undefined) {
+    notes = await servicesNotes.getNotesWithBodies(req.user.id, scope, requireIdList(String(ids).split(","), "ids"));
+  } else if (aboutMediaId !== undefined) {
+    notes = await servicesNotes.getNotesAboutMedia(req.user.id, scope, optionalId(aboutMediaId, "aboutMediaId"));
+  } else {
+    notes = await servicesNotes.getNotesByUser(req.user.id, scope, { search: optionalQueryString(q, "q") });
+  }
+  res.status(200).json(notes.map(withoutBodyText));
 };
+
+// body_text (migration 038) is for the server's own preview and search. A whole
+// note already carries its body; sending the same words twice would only make
+// the response bigger.
+const withoutBodyText = ({ body_text, ...note }) => note;
 
 // A note may be attached to a lecture, and getNotesByUser joins that lecture back
 // in to show its title. Nothing checked that the caller was entitled to the
@@ -19,18 +42,10 @@ export const getNotes = async (req, res) => {
 // The same 404 the media and transcript endpoints answer, for the same reason:
 // an id that exists but is hidden must be indistinguishable from one that does
 // not, or the endpoint becomes a way to enumerate what is in the library.
-const assertMediaVisible = async (user, mediaId) => {
-  if (mediaId === null) return;
-  const item = await servicesMedia.getMediaById(mediaId);
-  if (!(await canUserSeeMedia(user, item))) {
-    throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
-  }
-};
-
 export const createNote = async (req, res) => {
   const { title, body, mediaId, timestampSeconds } = req.body ?? {};
   const linkedMediaId = optionalId(mediaId, "mediaId");
-  await assertMediaVisible(req.user, linkedMediaId);
+  if (linkedMediaId !== null) await assertUserCanSeeMediaId(req.user, linkedMediaId);
   const note = await servicesNotes.createNote(req.user.id, {
     title,
     body,

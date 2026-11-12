@@ -7,6 +7,8 @@ import { requireRole } from "../middleware/requireRole.js";
 import { userRateLimit } from "../middleware/userRateLimit.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
 import * as controllersMedia from "../controllers/controllersMedia.js";
+import * as controllersMediaFiles from "../controllers/controllersMediaFiles.js";
+import * as controllersMediaTags from "../controllers/controllersMediaTags.js";
 import { LOCAL_UPLOAD_DIR } from "../lib/storage.js";
 import { MEDIA_TYPE_BY_EXT, extensionOf } from "../lib/mediaFormats.js";
 import { logger } from "../lib/logger.js";
@@ -62,17 +64,29 @@ router.use(verifyToken);
 // is_published visibility on reads (students never see unpublished items).
 const canManage = requireRole("lecturer", "admin");
 
+// Asking the model for tag proposals (PRD ARCH-4) spends money on every press;
+// a handful a minute is more than a person tagging lessons by hand needs.
+const aiTagLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 6,
+  message: "Too many tag suggestion requests, please wait a minute",
+});
+
 router.get("/get-all", controllersMedia.getAllMedia);
 
 // Before "/:id" — validateIntParam would reject the literal "tags" as a
 // malformed id and this route would be unreachable. Same hazard as "/my" in
 // routersCourses and "/pending" in routersUsers.
-router.get("/tags", controllersMedia.getTags);
+router.get("/tags", controllersMediaTags.getTags);
 router.get("/creators", controllersMedia.getCreators);
+// One lecturer's page (PRD ATTR-10). Two segments, so "/:id" cannot take it.
+router.get("/creators/:name", controllersMedia.getCreatorProfile);
 // Before "/:id" — validateIntParam would otherwise reject the literal
 // "continue-watching" as a malformed id and this route would be unreachable.
 router.get("/continue-watching", controllersMedia.getContinueWatching);
 router.get("/:id", validateIntParam("id"), controllersMedia.getMediaById);
+// A lesson recorded in a live session: that session's chat (PRD REC-3).
+router.get("/:id/session-chat", validateIntParam("id"), controllersMedia.getSessionChat);
 // multer reports a rejected file (wrong type, over the size limit) through its
 // own callback rather than as an AppError, so it needs this wrapper to become a
 // 400 instead of falling through to the generic 500 handler.
@@ -93,22 +107,27 @@ router.get(
   "/:id/tag-suggestions",
   canManage,
   validateIntParam("id"),
-  controllersMedia.getTagSuggestions
+  controllersMediaTags.getTagSuggestions
 );
 // A tag that does not exist yet, proposed from this item's tagging dialog. It
 // waits for an admin (routersAdmin) and is attached to the item on approval.
-router.get("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.getMediaTagProposals);
-router.post("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMedia.proposeTagForMedia);
+router.get("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMediaTags.getMediaTagProposals);
+// Tags the LLM proposed (PRD ARCH-4). Asking spends, so it is limited per user.
+router.get("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMediaTags.getAiTagSuggestions);
+router.post("/:id/ai-tag-suggestions", canManage, aiTagLimiter, validateIntParam("id"), controllersMediaTags.requestAiTagSuggestions);
+router.post("/:id/ai-tag-suggestions/approve", canManage, validateIntParam("id"), controllersMediaTags.approveAiTagSuggestions);
+router.delete("/:id/ai-tag-suggestions", canManage, validateIntParam("id"), controllersMediaTags.dismissAiTagSuggestions);
+router.post("/:id/tag-proposals", canManage, validateIntParam("id"), controllersMediaTags.proposeTagForMedia);
 router.delete(
   "/:id/tag-proposals/:proposalId",
   canManage,
   validateIntParam("id"),
   validateIntParam("proposalId"),
-  controllersMedia.withdrawMediaTagProposal
+  controllersMediaTags.withdrawMediaTagProposal
 );
 router.delete("/delete/:id", canManage, validateIntParam("id"), controllersMedia.deleteMedia);
-router.get("/:id/stream", validateIntParam("id"), controllersMedia.streamMedia);
-router.get("/:id/download", validateIntParam("id"), controllersMedia.downloadMedia);
+router.get("/:id/stream", validateIntParam("id"), controllersMediaFiles.streamMedia);
+router.get("/:id/download", validateIntParam("id"), controllersMediaFiles.downloadMedia);
 // Each request here is a full ffmpeg transcode of a lecture on the API host, so
 // it is limited per user here and capped globally in the controller
 // (MAX_CONCURRENT_AUDIO_EXTRACTS). Nobody downloads ten lectures a minute.
@@ -117,7 +136,7 @@ const audioExtractLimiter = userRateLimit({
   max: 5,
   message: "Too many audio downloads, please try again in a minute",
 });
-router.get("/:id/download/audio", audioExtractLimiter, validateIntParam("id"), controllersMedia.downloadMediaAudio);
+router.get("/:id/download/audio", audioExtractLimiter, validateIntParam("id"), controllersMediaFiles.downloadMediaAudio);
 router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
 router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);
 

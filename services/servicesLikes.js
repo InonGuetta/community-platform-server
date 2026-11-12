@@ -2,9 +2,9 @@
 import { pool } from "../db/pool.js";
 import { visibleMediaSql } from "../lib/permissions.js";
 
-// Both reads below take the SAME `visibleCourses`, decided once in the
-// controller by visibleCoursesFor(req.user) — the helper that already governs
-// what the archive, the media page and the stream hand out.
+// Both reads below take the SAME `scope`, decided once in the controller by
+// viewerScopeFor(req.user) — the helper that already governs what the archive,
+// the media page and the stream hand out.
 //
 // Previously only the first of the two filtered drafts, so the two disagreed:
 // the button said אהבתי on an item the likes page refused to show, and a

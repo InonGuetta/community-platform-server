@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
 import { viewerScopeFor, canUserSeeMedia } from "../services/servicesVisibility.js";
-import { UNRESTRICTED } from "../lib/permissions.js";
+import path from "node:path";
+import { UNRESTRICTED, scopeParams } from "../lib/permissions.js";
+import { serverSourceFiles } from "./sourceFiles.js";
 
 // What each role is actually GIVEN — as opposed to what the rule does with it.
 //
@@ -117,4 +119,47 @@ test("a student may not open a draft, whoever uploaded it", async () => {
   } finally {
     db.restore();
   }
+});
+
+// ── One shape, all the way down ─────────────────────────────────────────────
+//
+// The scope above is handed to every read as it is — `{ courses, drafts }` —
+// and scopeParams turns it into visibleMediaSql's two parameters. The archive
+// listing and the tag tree used to take it unpacked, as visibleCourses and
+// visibleDrafts, which made two shapes of one value and two copies of the rule
+// for an absent half.
+
+test("scopeParams: null is unrestricted, an array is exactly those, absent is nothing", () => {
+  assert.deepEqual(scopeParams({ courses: null, drafts: null }), [null, null]);
+  assert.deepEqual(scopeParams({ courses: [5, 8], drafts: [] }), [[5, 8], []]);
+  assert.deepEqual(scopeParams({ courses: null, drafts: [10] }), [null, [10]]);
+  // Fails closed — and never by `??`, which would turn null into [] too.
+  assert.deepEqual(scopeParams(undefined), [[], []], "no scope at all");
+  assert.deepEqual(scopeParams(null), [[], []], "a null scope is not an unrestricted one");
+  assert.deepEqual(scopeParams({}), [[], []], "neither half");
+  assert.deepEqual(scopeParams({ courses: null }), [null, []], "an absent drafts half is nobody's drafts");
+  assert.deepEqual(scopeParams({ drafts: null }), [[], null], "an absent courses half is no course");
+});
+
+test("what viewerScopeFor resolves reaches the SQL unchanged, for every role", async () => {
+  assert.deepEqual(scopeParams(await viewerScopeFor({ id: 1, role: "admin" })), [null, null]);
+  assert.deepEqual(scopeParams(await viewerScopeFor({ id: 10, role: "lecturer" })), [null, [10]]);
+  const db = enrolledIn([5, 8]);
+  try {
+    assert.deepEqual(scopeParams(await viewerScopeFor({ id: 7, role: "student" })), [[5, 8], []]);
+  } finally {
+    db.restore();
+  }
+});
+
+test("no read takes the scope under another name", async () => {
+  const files = await serverSourceFiles();
+  assert.ok(files.length > 50, `only ${files.length} source files found`);
+  // lib/permissions.js names the two halves of the rule's own parameters this
+  // way; anywhere else, the names mean a second shape of the scope.
+  const permissions = path.join("lib", "permissions.js");
+  const renamed = files
+    .filter(({ file, source }) => file !== permissions && /\bvisible(Courses|Drafts)\b/.test(source))
+    .map(({ file }) => file);
+  assert.deepEqual(renamed, [], `pass the scope from viewerScopeFor as it is: ${renamed.join(", ")}`);
 });

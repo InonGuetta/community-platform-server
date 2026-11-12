@@ -3,14 +3,14 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { randomBytes, createHash } from "crypto";
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { conflict, unauthorized, notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
-import { assertUsableEmail } from "../lib/validate.js";
+import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
+import { isAdmin } from "../lib/permissions.js";
 
 const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8.U8nJ.JtbCmHkY2Z9Y6XYC8N7yL3a";
-
-const normalizeEmail = (email) => email.trim().toLowerCase();
 
 // The floor a chosen password has to clear. Deliberately a length and nothing
 // else: composition rules ("one capital, one symbol") push people towards
@@ -439,10 +439,7 @@ export const requestPasswordReset = async (email) => {
 // tokens still work, or sessions ended while the password did not change.
 export const resetPassword = async (token, newPassword) => {
   assertUsablePassword(newPassword);
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-
+  const { userId, user } = await withTransaction(async (client) => {
     // FOR UPDATE so two confirms of the same token serialise rather than both
     // seeing it unused. `purpose` keeps a verification link from working here.
     const { rows } = await client.query(
@@ -478,20 +475,15 @@ export const resetPassword = async (token, newPassword) => {
       [userId]
     );
 
-    await client.query("COMMIT");
-    logger.info(`[auth] password reset completed for user ${userId}`);
-    // The row is returned so the caller can open a session without looking the
-    // token up again — it has just been burned, and a second lookup would find
-    // nothing. Signing them straight in is also the point: sending someone back
-    // to the login form to type the password they chose four seconds ago is a
-    // step that exists only because the flow was built in two halves.
-    return { user: updated.rows[0] };
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+    return { userId, user: updated.rows[0] };
+  });
+  logger.info(`[auth] password reset completed for user ${userId}`);
+  // The row is returned so the caller can open a session without looking the
+  // token up again — it has just been burned, and a second lookup would find
+  // nothing. Signing them straight in is also the point: sending someone back
+  // to the login form to type the password they chose four seconds ago is a
+  // step that exists only because the flow was built in two halves.
+  return { user };
 };
 
 // ── The signed-in user changing their own details ───────────────────────────
@@ -609,7 +601,7 @@ export const requestRole = async (userId, requestedRole) => {
   // it: approveUser would grant it, quietly removing their own admin rights
   // through a self-service form. Role reduction is an admin action on the users
   // tab.
-  if (user.role === "admin") {
+  if (isAdmin(user)) {
     throw badRequest("An admin cannot request a lesser role here");
   }
   if (user.approval_status === "pending") {

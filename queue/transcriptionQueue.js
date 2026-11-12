@@ -1,5 +1,6 @@
 // @ts-check
 import { createQueue } from "./createQueue.js";
+import { env } from "../lib/env.js";
 
 // Deliberately NO automatic retry by default, unlike the LLM queue.
 //
@@ -19,7 +20,7 @@ import { createQueue } from "./createQueue.js";
 // Set TRANSCRIPTION_ATTEMPTS if you decide the convenience is worth the cost.
 // Making retries genuinely cheap needs per-segment checkpointing, which is a
 // redesign of the worker rather than a setting.
-const ATTEMPTS = Number(process.env.TRANSCRIPTION_ATTEMPTS) || 1;
+const ATTEMPTS = env.transcriptionAttempts;
 
 export const transcriptionQueue = createQueue("transcription", {
   attempts: ATTEMPTS,

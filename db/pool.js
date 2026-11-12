@@ -1,8 +1,39 @@
 // @ts-check
-import { Pool } from "pg";
+import pg from "pg";
 import { logger, debugEnabled } from "../lib/logger.js";
+import { env } from "../lib/env.js";
 
-if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
+const { Pool } = pg;
+
+if (!env.databaseUrl) throw new Error("Missing DATABASE_URL");
+
+// ── Zoneless TIMESTAMP columns are UTC ──────────────────────────────────────
+//
+// Most of the schema stores times as TIMESTAMP (no zone), and every one of them
+// holds UTC wall-clock time: they are written with NOW() on a database whose
+// TimeZone is UTC, or — scheduled_at — from an ISO string ending in Z, whose zone
+// Postgres drops on the cast. (Audited 2026-11-02: no write passes a JS Date.)
+//
+// node-postgres, by default, reads a zoneless value as the SERVER PROCESS's
+// local time. On a server running in UTC that is the same thing and nothing was
+// wrong; on any machine set to Israel time — every development machine here —
+// every one of those times arrived two hours early. The sessions page showed a
+// session at 16:55 that starts at 18:55, and a password change did not end
+// sessions created in the two hours before it (tokenPredatesPasswordChange
+// compares a JWT's true-UTC iat with password_changed_at).
+//
+// So, in the one module that touches pg:
+//   · a TIMESTAMP (OID 1114) is parsed as UTC — "2026-11-02 16:55:00" becomes
+//     that instant, whatever zone the process runs in;
+//   · a JS Date sent as a parameter is serialised in UTC, so a future write of a
+//     Date into one of these columns stores UTC like everything else, instead of
+//     the local wall-clock time (Postgres drops the offset on the cast).
+// TIMESTAMPTZ (1184) carries its own zone and is unaffected.
+const TIMESTAMP_OID = 1114;
+pg.types.setTypeParser(TIMESTAMP_OID, (value) =>
+  value === null ? null : new Date(`${value.replace(" ", "T")}Z`)
+);
+pg.defaults.parseInputDatesAsUTC = true;
 
 // Certificate verification on the database connection, and why it is off by
 // default.
@@ -22,10 +53,10 @@ if (!process.env.DATABASE_URL) throw new Error("Missing DATABASE_URL");
 // decision buried in a constructor. To tighten it: download the provider's root
 // certificate, point PGSSLROOTCERT at it (Node's TLS stack reads that), and set
 // DATABASE_SSL_STRICT=true.
-const sslStrict = process.env.DATABASE_SSL_STRICT === "true";
+const sslStrict = env.databaseSslStrict;
 
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: env.databaseUrl,
   ssl: { rejectUnauthorized: sslStrict },
   keepAlive: true,
   connectionTimeoutMillis: 10000,

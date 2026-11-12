@@ -1,7 +1,9 @@
 // @ts-check
 import * as servicesAuth from "../services/servicesAuth.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "../lib/mailer.js";
+import { notifyAdmins, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { badRequest } from "../lib/AppError.js";
+import { normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -16,6 +18,24 @@ const cookieOptions = () => ({
 
 const setAuthCookie = (res, token) => res.cookie("token", token, cookieOptions());
 const clearAuthCookie = (res) => res.clearCookie("token", { ...cookieOptions(), maxAge: undefined });
+
+// REG-11. An admin used to learn of a role request only by happening to open the
+// users page. Both doors to a request — signing up with one, and asking later
+// from the profile — come through here.
+//
+// Not awaited, like the verification mail: the request is already saved, and
+// mailing every admin must neither delay the answer nor fail it (notifyAdmins
+// never throws). Only for a request actually left waiting — a student signing
+// up asks for nothing.
+const tellAdminsIfPending = (user) => {
+  if (user?.approval_status !== "pending" || !user.requested_role) return;
+  void notifyAdmins(NOTIFICATION_TYPES.ROLE_REQUEST, {
+    userId: user.id,
+    displayName: user.display_name,
+    email: user.email,
+    requestedRole: user.requested_role,
+  });
+};
 
 export const register = async (req, res) => {
   const { email, password, displayName, requestedRole } = req.body;
@@ -35,6 +55,7 @@ export const register = async (req, res) => {
   // registration into an error that invites the user to register again, which
   // would then fail on the email being taken.
   sendVerificationEmail(user.email, verification).catch(() => {});
+  tellAdminsIfPending(user);
   res.status(201).json({ user });
 };
 
@@ -75,7 +96,7 @@ export const forgotPassword = async (req, res) => {
   if (!email || typeof email !== "string") throw badRequest("Email is required");
 
   const token = await servicesAuth.requestPasswordReset(email);
-  if (token) sendPasswordResetEmail(email.trim().toLowerCase(), token).catch(() => {});
+  if (token) sendPasswordResetEmail(normalizeEmail(email), token).catch(() => {});
 
   res.status(200).json({
     message: "If that address has an account, a reset link is on its way",
@@ -130,6 +151,7 @@ export const requestRole = async (req, res) => {
   const { requestedRole } = req.body ?? {};
   if (!requestedRole) throw badRequest("requestedRole is required");
   const user = await servicesAuth.requestRole(req.user.id, requestedRole);
+  tellAdminsIfPending(user);
   res.status(200).json(user);
 };
 

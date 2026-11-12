@@ -4,8 +4,11 @@
 // servicesTranscripts.js and for the same reason: the controller imports this
 // file and never needs to know how the folder is cut.
 //
-//   discussion/access.js         may the caller discuss this lesson at all —
-//                                asked first by every door below
+// Every door below asks first whether the caller may see the lesson at all —
+// servicesVisibility.assertScopeCanSeeMediaId, the guard every lesson read
+// shares — before any chunk is read, any message returned or any OpenAI call
+// made.
+//
 //   discussion/retrieval.js      search inside ONE lesson (keyword + exact
 //                                vector, RRF, GPT-4o rerank) — the smart-search
 //                                mode, and the retrieval the chat builds on
@@ -15,6 +18,8 @@
 //                                passages when it does not
 //   discussion/chat.js           the grounded answer, its checked citations,
 //                                and storing the exchange
+//   discussion/archive.js        the same chat over every lesson the caller
+//                                may see (PRD ASK-2)
 
 export { searchWithinMedia } from "./discussion/retrieval.js";
 
@@ -30,3 +35,8 @@ export {
 } from "./discussion/conversations.js";
 
 export { askInLesson, prepareAsk, streamAsk, questionQuota } from "./discussion/chat.js";
+
+// The same chat over the whole archive (PRD ASK-2): its retrieval, citations
+// and conversation; the answer itself is streamAsk above.
+//   discussion/archive.js
+export { getArchiveConversation, startArchiveConversation, prepareArchiveAsk } from "./discussion/archive.js";

@@ -1,8 +1,9 @@
 // @ts-check
 import { pool } from "../db/pool.js";
-import { visibleMediaSql } from "../lib/permissions.js";
+import { visibleMediaSql, scopeParams } from "../lib/permissions.js";
 import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { DEFAULT_MEDIA_SORT } from "../lib/validate.js";
+import { escapeLike } from "../lib/sqlLike.js";
 
 // ── Attribution ─────────────────────────────────────────────────────────────
 //
@@ -92,16 +93,6 @@ const MEDIA_JOINS = `
   LEFT JOIN users l ON m.lecturer_id = l.id
   LEFT JOIN courses c ON m.course_id = c.id`;
 
-// What the user typed is a phrase to find, not a pattern to match with.
-//
-// The value is a bound parameter, so this was never an injection — but ILIKE
-// reads % and _ as wildcards wherever they appear, and they appear in real
-// titles. A search for "100%" matched every title starting "100", and one for
-// "פרק_ב" matched "פרקאב". Backslash is Postgres' default LIKE escape, and it
-// has to escape itself first or a title containing one would consume the
-// character after it.
-const escapeLike = (value) => String(value).replace(/[\\%_]/g, (char) => `\\${char}`);
-
 // The zone the platform's days are measured in. See the date filter below.
 const DISPLAY_TIMEZONE = "Asia/Jerusalem";
 
@@ -132,132 +123,116 @@ export const MEDIA_ORDER = {
   liked: `like_count DESC, ${TIE_BREAK}`,
 };
 
-// TODO(CR): no LIMIT / pagination — every archive load returns the whole
-// visible library, each row running the correlated subqueries in MEDIA_COLUMNS.
-// Left open deliberately: paging changes what the archive screen IS (infinite
-// scroll vs numbered pages, what "N results" means, how a filter change resets
-// position), which is a product decision and a client change, not a server one.
-// The per-row cost is already reduced by 030_media_reference_indexes.sql, and
-// the date/text filters are validated in the controller (lib/validate.js).
-export const getAllMedia = async (filters = {}) => {
-  // The visibility rule opens the WHERE clause rather than being one more
-  // optional `if` below, and that is the point: it is not a filter the caller
-  // may or may not supply, it is the condition under which any of these rows may
-  // be returned at all. `WHERE 1=1` with the rule as an optional addition put it
-  // one forgotten argument away from listing the whole library.
-  // Annotated because the elements are of mixed type: without it the array
-  // infers from its first element and every push below is an error.
-  //
-  // `=== undefined` and NOT `??`, and the difference is the whole rule. null is a
-  // meaningful value here — it is how "unrestricted" is spelled — so `?? []`
-  // silently rewrote every lecturer and admin into someone enrolled in nothing,
-  // emptying the archive of every course lesson and every draft for exactly the
-  // people who are supposed to see them. Only an ABSENT argument may fail closed.
-  //
-  // The same distinction updateMedia draws with `"courseId" in body`, and
-  // optionalSeconds with zero: presence is not the same question as value.
-  /** @type {Array<string|number|boolean|number[]|string[]|null>} */
-  const params = [
-    filters.visibleCourses === undefined ? [] : filters.visibleCourses,
-    // The second dimension, and it fails closed the same way: an absent argument
-    // means nobody's drafts, never everybody's.
-    filters.visibleDrafts === undefined ? [] : filters.visibleDrafts,
-  ];
-  let query = `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE ${visibleMediaSql("$1", "m", "$2")}`;
+// ── The archive's filters, one function each ────────────────────────────────
+//
+// Each takes the filters the listing was asked for and `param`, which adds one
+// value to the statement's parameters and answers its placeholder ("$3"), and
+// returns the condition it adds — starting " AND " — or "" when it was not
+// asked for. mediaFilterSql applies them in the order of MEDIA_FILTERS, after
+// the visibility rule, so a new filter is one function and one entry there.
+//
+// Placeholders are numbered in the order param() is called, so a filter calls
+// it once per value, before it writes the value's placeholder anywhere.
+/**
+ * @typedef {(filters: Record<string, any>, param: (value: any) => string) => string} MediaFilter
+ */
 
-  // Any of the chosen types. An empty list is no filter, never "no types".
-  if (filters.types?.length) {
-    params.push(filters.types);
-    query += ` AND m.media_type = ANY($${params.length}::media_type[])`;
-  }
-  if (filters.courseId !== undefined) {
-    params.push(filters.courseId);
-    query += ` AND m.course_id=$${params.length}`;
-  }
-  if (filters.published !== undefined) {
-    params.push(filters.published);
-    query += ` AND m.is_published=$${params.length}`;
-  }
-  // The creator is a narrowing filter like the type, not part of the search: it
-  // is chosen from a list of exact values, so an exact match is what it means.
-  if (filters.creator) {
-    params.push(filters.creator);
-    query += ` AND m.creator_name = $${params.length}`;
-  }
-  // ── Search ────────────────────────────────────────────────────────────
-  //
-  // Over the title, the attribution AND the tags. It used to be the title alone,
-  // which made typing a tag name into the search box return nothing while the
-  // filter beside it found ten items — two controls answering the same question
-  // differently, with nothing on screen to explain why.
-  //
-  // By NAME here, deliberately, and it is not the ambiguity the tag filter
-  // avoids: a search is "find me anything that mentions this", so matching both
-  // שופטים the parasha and שופטים the book is the right answer. The filter is
-  // where the caller says which one they meant.
-  if (filters.search) {
-    params.push(`%${escapeLike(filters.search)}%`);
-    const term = params.length;
-    query += ` AND (
-      m.title ILIKE $${term}
-      OR m.creator_name ILIKE $${term}
+// Any of the chosen types. An empty list is no filter, never "no types".
+/** @type {MediaFilter} */
+const typesFilter = ({ types }, param) =>
+  (types?.length ? ` AND m.media_type = ANY(${param(types)}::media_type[])` : "");
+
+/** @type {MediaFilter} */
+const courseFilter = ({ courseId }, param) =>
+  (courseId !== undefined ? ` AND m.course_id=${param(courseId)}` : "");
+
+/** @type {MediaFilter} */
+const publishedFilter = ({ published }, param) =>
+  (published !== undefined ? ` AND m.is_published=${param(published)}` : "");
+
+// The creator is a narrowing filter like the type, not part of the search: it
+// is chosen from a list of exact values, so an exact match is what it means.
+/** @type {MediaFilter} */
+const creatorFilter = ({ creator }, param) =>
+  (creator ? ` AND m.creator_name = ${param(creator)}` : "");
+
+// ── Search ────────────────────────────────────────────────────────────
+//
+// Over the title, the attribution AND the tags. It used to be the title alone,
+// which made typing a tag name into the search box return nothing while the
+// filter beside it found ten items — two controls answering the same question
+// differently, with nothing on screen to explain why.
+//
+// By NAME here, deliberately, and it is not the ambiguity the tag filter
+// avoids: a search is "find me anything that mentions this", so matching both
+// שופטים the parasha and שופטים the book is the right answer. The filter is
+// where the caller says which one they meant.
+/** @type {MediaFilter} */
+const searchFilter = ({ search }, param) => {
+  if (!search) return "";
+  const term = param(`%${escapeLike(search)}%`);
+  return ` AND (
+      m.title ILIKE ${term}
+      OR m.creator_name ILIKE ${term}
       OR EXISTS (
         SELECT 1 FROM media_tags mt
         JOIN tags t ON t.id = mt.tag_id
-        WHERE mt.media_id = m.id AND t.name ILIKE $${term}
+        WHERE mt.media_id = m.id AND t.name ILIKE ${term}
       )
     )`;
-  }
-  // ── Tags ──────────────────────────────────────────────────────────────
-  //
-  // By ID, not by name. The taxonomy in migration 025 legitimately repeats five
-  // names in different branches — שופטים is both a parasha and a book — so a
-  // name filter would silently match both and there is no way for the caller to
-  // say which one it meant.
-  //
-  // Choosing a tag also chooses everything BENEATH it: picking "תורה" finds a
-  // shiur tagged "וירא", which is the whole point of a hierarchy.
-  //
-  // ── OR inside a heading, AND between headings ─────────────────────────
-  //
-  // Two chosen tags under the SAME top-level heading are alternatives; two under
-  // different headings are conditions. "בהר or בחוקותי" and "something in תנ"ך
-  // that is also about מוסר" are both ordinary requests, and this is the only
-  // arrangement that lets both be asked.
-  //
-  // It used to be AND across every chosen tag, and that made the commonest
-  // request in the archive impossible: choosing two parashot asked for a shiur
-  // that is simultaneously on both, of which there are almost none. The user saw
-  // an empty archive and concluded the filter was broken — which is exactly what
-  // it was.
-  //
-  // So the unit of AND is the HEADING (the root of the branch a choice sits in),
-  // not the choice. Each chosen id is walked UP to the root it belongs to and
-  // DOWN into its own subtree; an item satisfies a heading if it carries
-  // anything in any subtree chosen under it, and must satisfy every heading
-  // named. With one heading chosen this is a plain OR; with one tag it is what
-  // it always was.
-  if (Array.isArray(filters.tagIds) && filters.tagIds.length > 0) {
-    params.push(filters.tagIds);
-    const idsParam = params.length;
-    // The heading each chosen tag belongs to, and every tag underneath the
-    // choice. Written once as a string because the count below has to be
-    // measured against the same walk — a second, differently-written copy is how
-    // "matched every heading" and "how many headings were named" come to
-    // disagree.
-    const facets = `
+};
+
+// ── Tags ──────────────────────────────────────────────────────────────
+//
+// By ID, not by name. The taxonomy in migration 025 legitimately repeats five
+// names in different branches — שופטים is both a parasha and a book — so a
+// name filter would silently match both and there is no way for the caller to
+// say which one it meant.
+//
+// Choosing a tag also chooses everything BENEATH it: picking "תורה" finds a
+// shiur tagged "וירא", which is the whole point of a hierarchy.
+//
+// ── OR inside a heading, AND between headings ─────────────────────────
+//
+// Two chosen tags under the SAME top-level heading are alternatives; two under
+// different headings are conditions. "בהר or בחוקותי" and "something in תנ"ך
+// that is also about מוסר" are both ordinary requests, and this is the only
+// arrangement that lets both be asked.
+//
+// It used to be AND across every chosen tag, and that made the commonest
+// request in the archive impossible: choosing two parashot asked for a shiur
+// that is simultaneously on both, of which there are almost none. The user saw
+// an empty archive and concluded the filter was broken — which is exactly what
+// it was.
+//
+// So the unit of AND is the HEADING (the root of the branch a choice sits in),
+// not the choice. Each chosen id is walked UP to the root it belongs to and
+// DOWN into its own subtree; an item satisfies a heading if it carries
+// anything in any subtree chosen under it, and must satisfy every heading
+// named. With one heading chosen this is a plain OR; with one tag it is what
+// it always was.
+/** @type {MediaFilter} */
+const tagsFilter = ({ tagIds }, param) => {
+  if (!(Array.isArray(tagIds) && tagIds.length > 0)) return "";
+  const ids = param(tagIds);
+  // The heading each chosen tag belongs to, and every tag underneath the
+  // choice. Written once as a string because the count below has to be
+  // measured against the same walk — a second, differently-written copy is how
+  // "matched every heading" and "how many headings were named" come to
+  // disagree.
+  const facets = `
         WITH RECURSIVE up AS (
-          SELECT id AS chosen_id, id AS node_id, parent_id FROM tags WHERE id = ANY($${idsParam}::int[])
+          SELECT id AS chosen_id, id AS node_id, parent_id FROM tags WHERE id = ANY(${ids}::int[])
           UNION ALL
           SELECT u.chosen_id, t.id, t.parent_id FROM tags t JOIN up u ON t.id = u.parent_id
         ),
         heading AS (SELECT chosen_id, node_id AS facet_id FROM up WHERE parent_id IS NULL),
         down AS (
-          SELECT id AS chosen_id, id AS tag_id FROM tags WHERE id = ANY($${idsParam}::int[])
+          SELECT id AS chosen_id, id AS tag_id FROM tags WHERE id = ANY(${ids}::int[])
           UNION ALL
           SELECT d.chosen_id, t.id FROM tags t JOIN down d ON t.parent_id = d.tag_id
         )`;
-    query += ` AND (
+  return ` AND (
       SELECT COUNT(DISTINCT sub.facet_id)
       FROM media_tags mt
       JOIN (${facets}
@@ -267,31 +242,33 @@ export const getAllMedia = async (filters = {}) => {
     ) = (${facets}
       SELECT COUNT(DISTINCT facet_id) FROM heading
     )`;
-  }
-  // ── Tags taken back out ───────────────────────────────────────────────
-  //
-  // "Everything in תורה except שמות" — a request the filter above cannot express
-  // on its own, and the reason it cannot is worth stating so nobody tries the
-  // shortcut again. Chosen tags combine with AND, so naming the four books to
-  // keep asks for an item that is in בראשית and in שמות at once, and nothing is:
-  // the archive comes back empty. Removal has to be its own list.
-  //
-  // An exclusion removes the whole SUBTREE, exactly as a choice adds one — the
-  // hierarchy has to mean the same thing in both directions, or excluding שמות
-  // would leave every parasha inside it still showing.
-  //
-  // NOT EXISTS rather than a count: one excluded tag on the item is enough, and
-  // there is nothing to tally. It is also independent of the block above, which
-  // is what lets "everything except X" be asked with no positive choice at all —
-  // a legitimate request, and one that would otherwise have no way to be made.
-  if (Array.isArray(filters.excludeTagIds) && filters.excludeTagIds.length > 0) {
-    params.push(filters.excludeTagIds);
-    query += ` AND NOT EXISTS (
+};
+
+// ── Tags taken back out ───────────────────────────────────────────────
+//
+// "Everything in תורה except שמות" — a request the filter above cannot express
+// on its own, and the reason it cannot is worth stating so nobody tries the
+// shortcut again. Chosen tags combine with AND, so naming the four books to
+// keep asks for an item that is in בראשית and in שמות at once, and nothing is:
+// the archive comes back empty. Removal has to be its own list.
+//
+// An exclusion removes the whole SUBTREE, exactly as a choice adds one — the
+// hierarchy has to mean the same thing in both directions, or excluding שמות
+// would leave every parasha inside it still showing.
+//
+// NOT EXISTS rather than a count: one excluded tag on the item is enough, and
+// there is nothing to tally. It is also independent of the filter above, which
+// is what lets "everything except X" be asked with no positive choice at all —
+// a legitimate request, and one that would otherwise have no way to be made.
+/** @type {MediaFilter} */
+const excludedTagsFilter = ({ excludeTagIds }, param) => {
+  if (!(Array.isArray(excludeTagIds) && excludeTagIds.length > 0)) return "";
+  return ` AND NOT EXISTS (
       SELECT 1
       FROM media_tags mt
       JOIN (
         WITH RECURSIVE excluded_descendants AS (
-          SELECT id AS tag_id FROM tags WHERE id = ANY($${params.length}::int[])
+          SELECT id AS tag_id FROM tags WHERE id = ANY(${param(excludeTagIds)}::int[])
           UNION ALL
           SELECT t.id FROM tags t JOIN excluded_descendants e ON t.parent_id = e.tag_id
         )
@@ -299,59 +276,179 @@ export const getAllMedia = async (filters = {}) => {
       ) sub ON sub.tag_id = mt.tag_id
       WHERE mt.media_id = m.id
     )`;
-  }
-  // ── Upload date ───────────────────────────────────────────────────────
-  //
-  // Both ends optional and independent, so "everything since March" and
-  // "everything before March" are both expressible.
-  //
-  // Compared as a LOCAL date, not as a UTC one, and that is a correctness fix
-  // rather than a nicety. created_at is a TIMESTAMP stored in UTC; Israel is two
-  // or three hours ahead. A shiur uploaded at 00:30 on the 6th is stored as
-  // 21:30 or 22:30 on the FIFTH, so a plain comparison filed it under the wrong
-  // day — and only ever for uploads near midnight, which makes the symptom look
-  // random rather than systematic.
-  //
-  // The zone is named rather than taken from the request: this is a Hebrew,
-  // Israel-facing platform, and a filter that quietly changed meaning with the
-  // reader's laptop clock would be worse than one that is explicit. It is stated
-  // in one constant so a second audience is a one-line change.
-  if (filters.uploadedAfter) {
-    params.push(filters.uploadedAfter);
-    query += ` AND ${localDateSql("m.created_at")} >= $${params.length}::date`;
-  }
-  if (filters.uploadedBefore) {
-    params.push(filters.uploadedBefore);
-    // Inclusive of the chosen day. Comparing the local DATE rather than the
-    // timestamp is what makes that true without the "+ 1 day" arithmetic the
-    // previous version needed — and that arithmetic was in UTC too.
-    query += ` AND ${localDateSql("m.created_at")} <= $${params.length}::date`;
-  }
-  // The length of a recording, from duration_seconds (measured at upload — see
-  // lib/mediaDuration.js — and backfilled for older rows).
-  //
-  // Asking for a length at all means asking for something to listen to or
-  // watch, so a document — which has no length — is left out, and so is a
-  // recording whose length is not known: placing it in a range it might not
-  // belong to would be a guess shown as a fact. Min inclusive, max exclusive,
-  // so neighbouring ranges meet without overlapping.
-  const hasMin = Number.isInteger(filters.minDuration);
-  const hasMax = Number.isInteger(filters.maxDuration);
-  if (hasMin || hasMax) {
-    query += " AND m.media_type <> 'text' AND m.duration_seconds IS NOT NULL";
-    if (hasMin) {
-      params.push(filters.minDuration);
-      query += ` AND m.duration_seconds >= $${params.length}`;
-    }
-    if (hasMax) {
-      params.push(filters.maxDuration);
-      query += ` AND m.duration_seconds < $${params.length}`;
-    }
-  }
+};
 
-  query += ` ORDER BY ${MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT]}`;
-  const result = await pool.query(query, params);
+// ── Upload date ───────────────────────────────────────────────────────
+//
+// Both ends optional and independent, so "everything since March" and
+// "everything before March" are both expressible.
+//
+// Compared as a LOCAL date, not as a UTC one, and that is a correctness fix
+// rather than a nicety. created_at is a TIMESTAMP stored in UTC; Israel is two
+// or three hours ahead. A shiur uploaded at 00:30 on the 6th is stored as
+// 21:30 or 22:30 on the FIFTH, so a plain comparison filed it under the wrong
+// day — and only ever for uploads near midnight, which makes the symptom look
+// random rather than systematic.
+//
+// The zone is named rather than taken from the request: this is a Hebrew,
+// Israel-facing platform, and a filter that quietly changed meaning with the
+// reader's laptop clock would be worse than one that is explicit. It is stated
+// in one constant so a second audience is a one-line change.
+/** @type {MediaFilter} */
+const uploadedAfterFilter = ({ uploadedAfter }, param) =>
+  (uploadedAfter ? ` AND ${localDateSql("m.created_at")} >= ${param(uploadedAfter)}::date` : "");
+
+// Inclusive of the chosen day. Comparing the local DATE rather than the
+// timestamp is what makes that true without the "+ 1 day" arithmetic the
+// previous version needed — and that arithmetic was in UTC too.
+/** @type {MediaFilter} */
+const uploadedBeforeFilter = ({ uploadedBefore }, param) =>
+  (uploadedBefore ? ` AND ${localDateSql("m.created_at")} <= ${param(uploadedBefore)}::date` : "");
+
+// The length of a recording, from duration_seconds (measured at upload — see
+// lib/mediaDuration.js — and backfilled for older rows).
+//
+// Asking for a length at all means asking for something to listen to or
+// watch, so a document — which has no length — is left out, and so is a
+// recording whose length is not known: placing it in a range it might not
+// belong to would be a guess shown as a fact. Min inclusive, max exclusive,
+// so neighbouring ranges meet without overlapping.
+/** @type {MediaFilter} */
+const lengthFilter = ({ minDuration, maxDuration }, param) => {
+  const hasMin = Number.isInteger(minDuration);
+  const hasMax = Number.isInteger(maxDuration);
+  if (!hasMin && !hasMax) return "";
+  return " AND m.media_type <> 'text' AND m.duration_seconds IS NOT NULL"
+    + (hasMin ? ` AND m.duration_seconds >= ${param(minDuration)}` : "")
+    + (hasMax ? ` AND m.duration_seconds < ${param(maxDuration)}` : "");
+};
+
+// The order the conditions are written in, and so the order of their
+// placeholders — test/mediaFilterSql.test.js holds the statement to it.
+/** @type {MediaFilter[]} */
+const MEDIA_FILTERS = [
+  typesFilter,
+  courseFilter,
+  publishedFilter,
+  creatorFilter,
+  searchFilter,
+  tagsFilter,
+  excludedTagsFilter,
+  uploadedAfterFilter,
+  uploadedBeforeFilter,
+  lengthFilter,
+];
+
+// ── The archive's WHERE clause, built once ──────────────────────────────────
+//
+// Three readers share it: the whole list (getAllMedia — the smoke checks and
+// any caller that genuinely wants everything), one page of it (getMediaPage —
+// the archive screen, PRD ARCH-1), and how many rows it matches (countMedia —
+// the "N תוצאות" above the grid). One builder rather than three copies, so the
+// count can never disagree with the pages it is counting.
+//
+// Returns the clause (starting at WHERE) and its parameters; callers append
+// their own ORDER BY / LIMIT after it.
+//
+// `scope` is the viewer's { courses, drafts } from viewerScopeFor, and it is its
+// own argument rather than one more field among the filters: it is not a filter
+// the caller may or may not supply, it is the condition under which any of these
+// rows may be returned at all.
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null } | undefined} scope
+ * @param {Record<string, any>} [filters]
+ */
+const mediaFilterSql = (scope, filters = {}) => {
+  // The visibility rule opens the WHERE clause rather than being one more
+  // filter in the list, and that is the point. `WHERE 1=1` with the rule as an
+  // optional addition put it one forgotten argument away from listing the whole
+  // library.
+  //
+  // An ABSENT scope fails closed — published lessons in no course, nobody's
+  // drafts — while null, on either half, is "unrestricted". scopeParams
+  // (lib/permissions.js) is where that `=== undefined` distinction is drawn, the
+  // same one updateMedia draws with `"courseId" in body`, and optionalSeconds
+  // with zero: presence is not the same question as value.
+  //
+  // Annotated because the elements are of mixed type: without it the array
+  // infers from its first element and every push below is an error.
+  /** @type {Array<string|number|boolean|number[]|string[]|null>} */
+  const params = [...scopeParams(scope)];
+  const param = (value) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  const where = MEDIA_FILTERS.reduce(
+    (sql, filter) => sql + filter(filters, param),
+    `WHERE ${visibleMediaSql("$1", "m", "$2")}`
+  );
+  return { where, params };
+};
+
+const orderFor = (filters) => MEDIA_ORDER[filters.sort] ?? MEDIA_ORDER[DEFAULT_MEDIA_SORT];
+
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} scope  from viewerScopeFor
+ * @param {Record<string, any>} [filters]
+ */
+export const getAllMedia = async (scope, filters = {}) => {
+  const { where, params } = mediaFilterSql(scope, filters);
+  const result = await pool.query(
+    `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} ${where} ORDER BY ${orderFor(filters)}`,
+    params
+  );
   return result.rows;
+};
+
+// ── One page (ARCH-1) ───────────────────────────────────────────────────────
+//
+// The archive used to load the whole visible library in one request, every row
+// running MEDIA_COLUMNS' correlated subqueries — fine at forty items, a
+// multi-second first paint at a few thousand.
+//
+// OFFSET rather than keyset, deliberately. Keyset paging needs a WHERE on the
+// sort key, and two of the five orders sort by something that is not a column:
+// LOWER(title) is expressible, like_count is a subquery in the SELECT list that
+// a WHERE cannot see. Offset handles all five identically, and every order ends
+// on the same unique tie-break (TIE_BREAK), so a page boundary is stable.
+// What it gives up: an upload while somebody is scrolling shifts later rows by
+// one, so the next page can repeat a card — the client drops a repeated id —
+// and a deletion can skip one. The cursor the API hands out is opaque
+// (lib/validate.js → encodeMediaCursor), so moving to keyset later changes
+// nothing a client can see.
+//
+// LIMIT one more than asked: the extra row is how "is there a next page" is
+// answered without a second query.
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} scope  from viewerScopeFor
+ * @param {Record<string, any>} filters
+ * @param {{ limit: number, offset: number }} page
+ * @returns {Promise<{ items: any[], hasMore: boolean }>}
+ */
+export const getMediaPage = async (scope, filters, { limit, offset }) => {
+  const { where, params } = mediaFilterSql(scope, filters);
+  params.push(limit + 1, offset);
+  const result = await pool.query(
+    `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} ${where}
+     ORDER BY ${orderFor(filters)}
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params
+  );
+  return { items: result.rows.slice(0, limit), hasMore: result.rows.length > limit };
+};
+
+// How many rows the filter matches, for "N תוצאות". Cheap on purpose: the same
+// WHERE over media_items alone — none of MEDIA_COLUMNS' per-row subqueries and
+// none of its joins, which add nothing to a count — and asked only for the
+// first page, since scrolling does not change the answer.
+/**
+ * @param {{ courses?: number[]|null, drafts?: number[]|null }} scope  from viewerScopeFor
+ * @param {Record<string, any>} filters
+ */
+export const countMedia = async (scope, filters) => {
+  const { where, params } = mediaFilterSql(scope, filters);
+  const result = await pool.query(`SELECT COUNT(*)::int AS count FROM media_items m ${where}`, params);
+  return result.rows[0]?.count ?? 0;
 };
 
 // "Carry on where you left off" — the watch history, newest first.
@@ -385,6 +482,26 @@ export const getContinueWatching = async (userId, scope, limit = 12) => {
   return result.rows;
 };
 
+// A lesson as a guest may see it (PRD COM-3b, migration 046): only while it is
+// both public and published, and only what a guest page shows — the summary
+// and key points with it, never the transcript or anything about readers.
+// s3_key rides along for the stream and is stripped before anything is sent.
+// Null for every other lesson, so the caller answers a hidden lesson exactly
+// like a missing one.
+export const getPublicMedia = async (id) => {
+  const { rows } = await pool.query(
+    `SELECT m.id, m.title, m.description, m.media_type, m.duration_seconds, m.creator_name,
+            m.thumbnail_url, m.created_at, m.s3_key, c.title AS course_title,
+            t.ai_summary, t.ai_key_points
+       FROM media_items m
+       LEFT JOIN courses c ON c.id = m.course_id
+       LEFT JOIN transcripts t ON t.media_id = m.id
+      WHERE m.id = $1 AND m.is_public AND m.is_published`,
+    [id]
+  );
+  return rows[0] ?? null;
+};
+
 export const getMediaById = async (id) => {
   const result = await pool.query(
     `SELECT ${MEDIA_COLUMNS} ${MEDIA_JOINS} WHERE m.id=$1`,
@@ -392,6 +509,14 @@ export const getMediaById = async (id) => {
   );
   if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return result.rows[0];
+};
+
+// What kind of lesson it is and where its file is — all the LLM worker needs to
+// prepare its text, without getMediaById's joined card. null when the row is
+// gone (deleted while its job waited).
+export const getMediaSource = async (id) => {
+  const result = await pool.query("SELECT media_type, s3_key FROM media_items WHERE id=$1", [id]);
+  return result.rows[0] ?? null;
 };
 
 export const createMedia = async (data) => {
@@ -418,7 +543,7 @@ export const createMedia = async (data) => {
 export const updateMedia = async (id, data) => {
   const {
     title, description, isPublished, thumbnailUrl, durationSeconds,
-    courseId, lecturerId, setCourse = false, setLecturer = false, creatorName,
+    courseId, lecturerId, setCourse = false, setLecturer = false, creatorName, isPublic,
   } = data;
   // COALESCE, like title above it, and NOT the CASE treatment the two
   // associations get. The distinction those need — "set this to NULL" versus
@@ -436,10 +561,11 @@ export const updateMedia = async (id, data) => {
       duration_seconds = COALESCE($5, duration_seconds),
       course_id = CASE WHEN $6::boolean THEN $7::int ELSE course_id END,
       lecturer_id = CASE WHEN $8::boolean THEN $9::int ELSE lecturer_id END,
-      creator_name = COALESCE($11, creator_name)
+      creator_name = COALESCE($11, creator_name),
+      is_public = COALESCE($12, is_public)
     WHERE id=$10 RETURNING *`,
     [title, description, isPublished, thumbnailUrl, durationSeconds,
-      setCourse, courseId ?? null, setLecturer, lecturerId ?? null, id, nextCreator]
+      setCourse, courseId ?? null, setLecturer, lecturerId ?? null, id, nextCreator, isPublic ?? null]
   );
   if (result.rows.length === 0) throw notFound("Media not found", ERROR_CODES.MEDIA_NOT_FOUND);
   return getMediaById(id);
@@ -471,12 +597,22 @@ export const deleteMedia = async (id) => {
   return { deleted: true, id };
 };
 
+// completed_at (migration 043, PRD CRS-2): stamped the first time the position
+// reaches nine tenths of the lesson's length (COMPLETE_SHARE in
+// servicesCourseTrack.js — the same number is written here as SQL), and never
+// cleared — listening again from the start must not un-finish a lesson. A
+// lesson with no measured length cannot be judged and is never stamped.
 export const saveWatchProgress = async (userId, mediaId, positionSeconds) => {
   const result = await pool.query(
-    `INSERT INTO watch_progress (user_id, media_id, last_position_seconds, last_watched_at)
-     VALUES ($1, $2, $3, NOW())
+    `WITH reached AS (
+       SELECT CASE WHEN m.duration_seconds > 0 AND $3::int >= m.duration_seconds * 0.9 THEN NOW() END AS at
+         FROM media_items m WHERE m.id = $2
+     )
+     INSERT INTO watch_progress (user_id, media_id, last_position_seconds, last_watched_at, completed_at)
+     VALUES ($1, $2, $3, NOW(), (SELECT at FROM reached))
      ON CONFLICT (user_id, media_id)
-     DO UPDATE SET last_position_seconds=$3, last_watched_at=NOW()
+     DO UPDATE SET last_position_seconds = $3, last_watched_at = NOW(),
+                   completed_at = COALESCE(watch_progress.completed_at, (SELECT at FROM reached))
      RETURNING *`,
     [userId, mediaId, positionSeconds]
   );
@@ -503,6 +639,35 @@ export const getWatchProgress = async (userId, mediaId) => {
  * Scoped by the same visibility rule as the listing. A student must not learn
  * from a filter menu that a lecturer they cannot see exists.
  */
+// One lecturer's page (PRD ATTR-10): what the archive holds under this name,
+// in one row — how many of each kind, how many hours of recordings, when the
+// latest arrived, and the courses they appear in. Counted over what THIS caller
+// may see, through the same predicate as the listing below it on the page, so
+// the header can never promise lessons the grid will not show.
+//
+// Null when the caller can see nothing under the name — the controller answers
+// that with a 404, the same as a name that was never used.
+export const getCreatorProfile = async (name, scope) => {
+  const { rows } = await pool.query(
+    `SELECT m.creator_name AS name,
+            COUNT(*)::int AS media_count,
+            COUNT(*) FILTER (WHERE m.media_type = 'video')::int AS video_count,
+            COUNT(*) FILTER (WHERE m.media_type = 'audio')::int AS audio_count,
+            COUNT(*) FILTER (WHERE m.media_type = 'text')::int AS text_count,
+            COALESCE(SUM(m.duration_seconds) FILTER (WHERE m.media_type <> 'text'), 0)::int AS total_seconds,
+            MAX(m.created_at) AS latest_at,
+            COALESCE(
+              json_agg(DISTINCT jsonb_build_object('id', c.id, 'title', c.title)) FILTER (WHERE c.id IS NOT NULL),
+              '[]'
+            ) AS courses
+     ${MEDIA_JOINS}
+     WHERE ${visibleMediaSql("$1", "m", "$2")} AND m.creator_name = $3
+     GROUP BY m.creator_name`,
+    [scope.courses, scope.drafts, name]
+  );
+  return rows[0] ?? null;
+};
+
 export const getCreators = async (scope) => {
   const { rows } = await pool.query(
     `SELECT m.creator_name AS name, COUNT(*)::int AS media_count

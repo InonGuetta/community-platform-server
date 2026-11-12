@@ -1,12 +1,13 @@
 // @ts-check
 import bcrypt from "bcryptjs";
 import { pool } from "../db/pool.js";
+import { withTransaction } from "../db/transaction.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
-import { assertUsableEmail } from "../lib/validate.js";
+import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
+import { isAdmin } from "../lib/permissions.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
-const normalizeEmail = (email) => email.trim().toLowerCase();
 
 export const getAllUsers = async () => {
   // Admins manage every account here, including inactive ones — otherwise a
@@ -74,7 +75,7 @@ export const createUser = async (data) => {
 // and the ORDER BY gives both transactions the same lock order so they queue
 // instead of deadlocking.
 const assertAdminRemains = async (client, id, current, { role, isActive }) => {
-  const wasActiveAdmin = current.role === "admin" && current.is_active;
+  const wasActiveAdmin = isAdmin(current) && current.is_active;
   if (!wasActiveAdmin) return;
 
   const staysAdmin = (role ?? "admin") === "admin" && (isActive ?? true) !== false;
@@ -111,68 +112,63 @@ const assertAdminRemains = async (client, id, current, { role, isActive }) => {
  *   the decider when it settles a pending role request
  */
 const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive }, adminId = null) => {
-  const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-
-    const existing = await client.query(
-      "SELECT role, is_active, email, approval_status FROM users WHERE id=$1",
-      [id]
-    );
-    if (existing.rows.length === 0) throw notFound("User not found");
-
-    // createUser normalizes the email; without the same treatment here an admin
-    // could save "Admin@X.com", which login (which lowercases) would never match.
-    if (email !== undefined && email !== null) assertUsableEmail(email);
-    const normalizedEmail = email === undefined || email === null ? null : normalizeEmail(email);
-    if (normalizedEmail) {
-      const taken = await client.query(
-        "SELECT id FROM users WHERE email=$1 AND id<>$2",
-        [normalizedEmail, id]
+    return await withTransaction(async (client) => {
+      const existing = await client.query(
+        "SELECT role, is_active, email, approval_status FROM users WHERE id=$1",
+        [id]
       );
-      if (taken.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
-    }
+      if (existing.rows.length === 0) throw notFound("User not found");
 
-    await assertAdminRemains(client, id, existing.rows[0], { role, isActive });
+      // createUser normalizes the email; without the same treatment here an admin
+      // could save "Admin@X.com", which login (which lowercases) would never match.
+      if (email !== undefined && email !== null) assertUsableEmail(email);
+      const normalizedEmail = email === undefined || email === null ? null : normalizeEmail(email);
+      if (normalizedEmail) {
+        const taken = await client.query(
+          "SELECT id FROM users WHERE email=$1 AND id<>$2",
+          [normalizedEmail, id]
+        );
+        if (taken.rows.length > 0) throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
+      }
 
-    // A new address is an address nobody has proved, so it is unverified until
-    // its owner follows the link the controller mails to it. It used to keep
-    // email_verified = TRUE from the old one.
-    const emailChanged = Boolean(normalizedEmail) && normalizedEmail !== existing.rows[0].email;
+      await assertAdminRemains(client, id, existing.rows[0], { role, isActive });
 
-    // Setting a role here while a request is waiting DECIDES that request.
-    // Leaving it pending meant a later approveUser() overwrote the role just set
-    // with requested_role — an admin promoted directly could be demoted by
-    // somebody clearing the queue.
-    const settlesPending =
-      role !== undefined && role !== null && existing.rows[0].approval_status === "pending";
+      // A new address is an address nobody has proved, so it is unverified until
+      // its owner follows the link the controller mails to it. It used to keep
+      // email_verified = TRUE from the old one.
+      const emailChanged = Boolean(normalizedEmail) && normalizedEmail !== existing.rows[0].email;
 
-    const result = await client.query(
-      `UPDATE users SET
-        email = COALESCE($1, email),
-        role = COALESCE($2, role),
-        display_name = COALESCE($3, display_name),
-        avatar_url = COALESCE($4, avatar_url),
-        is_active = COALESCE($5, is_active),
-        email_verified = CASE WHEN $7::boolean THEN FALSE ELSE email_verified END,
-        approval_status = CASE WHEN $8::boolean THEN 'approved' ELSE approval_status END,
-        approved_by = CASE WHEN $8::boolean THEN $9::int ELSE approved_by END,
-        approved_at = CASE WHEN $8::boolean THEN NOW() ELSE approved_at END
-      WHERE id=$6
-      RETURNING id, email, role, display_name, avatar_url, is_active`,
-      [normalizedEmail, role, displayName, avatarUrl, isActive, id, emailChanged, settlesPending, adminId]
-    );
+      // Setting a role here while a request is waiting DECIDES that request.
+      // Leaving it pending meant a later approveUser() overwrote the role just set
+      // with requested_role — an admin promoted directly could be demoted by
+      // somebody clearing the queue.
+      const settlesPending =
+        role !== undefined && role !== null && existing.rows[0].approval_status === "pending";
 
-    await client.query("COMMIT");
-    return { ...result.rows[0], emailChanged };
+      const result = await client.query(
+        `UPDATE users SET
+          email = COALESCE($1, email),
+          role = COALESCE($2, role),
+          display_name = COALESCE($3, display_name),
+          avatar_url = COALESCE($4, avatar_url),
+          is_active = COALESCE($5, is_active),
+          email_verified = CASE WHEN $7::boolean THEN FALSE ELSE email_verified END,
+          approval_status = CASE WHEN $8::boolean THEN 'approved' ELSE approval_status END,
+          approved_by = CASE WHEN $8::boolean THEN $9::int ELSE approved_by END,
+          approved_at = CASE WHEN $8::boolean THEN NOW() ELSE approved_at END
+        WHERE id=$6
+        RETURNING id, email, role, display_name, avatar_url, is_active`,
+        [normalizedEmail, role, displayName, avatarUrl, isActive, id, emailChanged, settlesPending, adminId]
+      );
+
+      return { ...result.rows[0], emailChanged };
+    });
   } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
     // Backstop for a race the check above can't cover: two admins claiming the
     // same new email at once. Postgres' unique index is the real guarantee.
     if (err?.code === "23505") throw conflict("Email already in use", ERROR_CODES.EMAIL_TAKEN);
     throw err;
-  } finally {
-    client.release();
   }
 };
 
@@ -251,9 +247,7 @@ export const approveUser = async (id, adminId) => {
     throw badRequest("You cannot approve your own request");
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  return withTransaction(async (client) => {
     const user = await lockPending(client, id);
 
     // The role and the status move in ONE statement. Two statements would leave
@@ -271,14 +265,8 @@ export const approveUser = async (id, adminId) => {
       [user.requested_role, adminId, id]
     );
 
-    await client.query("COMMIT");
     return result.rows[0];
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 };
 
 /**
@@ -294,9 +282,7 @@ export const rejectUser = async (id, adminId, reason = null) => {
     throw badRequest("You cannot decide your own request");
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+  return withTransaction(async (client) => {
     await lockPending(client, id);
 
     const result = await client.query(
@@ -313,12 +299,6 @@ export const rejectUser = async (id, adminId, reason = null) => {
       [adminId, reason || null, id]
     );
 
-    await client.query("COMMIT");
     return result.rows[0];
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+  });
 };

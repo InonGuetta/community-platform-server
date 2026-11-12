@@ -2,7 +2,7 @@
 // ── Transcript search ────────────────────────────────────────────────────────
 // Three modes, all returning the SAME row shape so the client never needs to
 // branch on mode: { media_id, chunk_index, start_time, end_time, content,
-// media_title, headline }.
+// media_title, creator_name, media_type, headline }.
 //   keyword  — the original full-text search (FTS over to_tsvector('simple')).
 //   semantic — pure vector nearest-neighbour over the embeddings (meaning, not
 //              words). No FTS terms, so the snippet is the chunk's opening text.
@@ -10,12 +10,18 @@
 //              each result's score is Σ 1/(k + rank_in_each_list). This is the
 //              default; it catches both exact-word and meaning matches.
 import { pool } from "../../db/pool.js";
+import { withTransaction } from "../../db/transaction.js";
 import { visibleMediaSql } from "../../lib/permissions.js";
 import { logger } from "../../lib/logger.js";
 import { completionJson } from "../../lib/openaiClient.js";
 import { embedQuery, toVectorLiteral } from "../servicesEmbeddings.js";
 // The interactive client: a search is something a person is waiting on.
-import { interactiveOpenai as openai, GPT_MODEL } from "./gpt.js";
+import { interactiveOpenai, GPT_MODEL } from "./gpt.js";
+import { meterOpenAI } from "../../lib/openaiClient.js";
+
+// Metered as "search" — the line this module's calls appear on in the
+// admin's cost screen (PRD ADM-1; lib/openaiClient.js → meterOpenAI).
+const openai = meterOpenAI(interactiveOpenai, "search");
 
 // RRF_K and FUSE_DEPTH are exported for the search inside one lesson
 // (services/discussion/retrieval.js), which fuses the same two lists the same
@@ -121,9 +127,12 @@ const parseRerankScores = (parsed) => {
   return map;
 };
 
+// creator_name and media_type ride along so a result can say who said it — a
+// title alone does not tell "פרשת שופטים" by one rav from the same title by
+// another — and label the name מרצה or מחבר the way the archive card does.
 const SELECT_COLS = `
   c.media_id, c.chunk_index, c.start_time, c.end_time, c.content,
-  m.title AS media_title`;
+  m.title AS media_title, m.creator_name, m.media_type`;
 
 // Visibility predicate, shared by all three modes — and now with every other
 // read of media in the application, which is why it comes from lib/permissions.js
@@ -173,21 +182,11 @@ const searchKeyword = async (query, scope) => {
 // naming that setting on an older server is an error, not a no-op.
 const VECTOR_EF_SEARCH = 400;
 
-const withWideVectorScan = async (run) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
+export const withWideVectorScan = (run) =>
+  withTransaction(async (client) => {
     await client.query(`SET LOCAL hnsw.ef_search = ${VECTOR_EF_SEARCH}`);
-    const result = await run(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (err) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
-};
+    return run(client);
+  });
 
 const searchSemantic = async (query, scope) => {
   const queryVector = toVectorLiteral(await embedQuery(query));
@@ -207,15 +206,26 @@ const searchSemantic = async (query, scope) => {
   return result.rows;
 };
 
-const searchHybrid = async (query, scope) => {
-  const queryVector = toVectorLiteral(await embedQuery(query));
-  // $1 = query text (FTS), $2 = query embedding (vector), $3 = may see drafts.
-  // Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN unions the two id
-  // sets and RRF sums the reciprocal ranks. ts_headline highlights the FTS terms
-  // (semantic-only hits simply have no terms to highlight, which is fine).
-  // Both CTEs join media_items solely to apply the visibility predicate.
-  const result = await withWideVectorScan((client) => client.query(
-    `WITH kw AS (
+// ── The hybrid statement, across every lesson the caller may see ────────────
+//
+// Shared by this library-wide search and the archive chat's retrieval
+// (../discussion/archive.js): the same two rankings, the same visibility inside
+// each, the same fusion. Each caller chooses only what it reads back for each
+// fused chunk (`columns`, over `c` = transcript_chunks and `m` = media_items)
+// and how many (`limit`). The search inside ONE lesson
+// (../discussion/retrieval.js) is a different statement — it ranks a
+// materialized lesson rather than the vector index — and is not built here.
+//
+// $1 = query text (FTS), $2 = query embedding (vector), $3 = visible courses,
+// $4 = whose drafts. Each CTE ranks its own top FUSE_DEPTH; the FULL OUTER JOIN
+// unions the two id sets and RRF sums the reciprocal ranks. Both CTEs join
+// media_items solely to apply the visibility predicate — inside each ranking,
+// for the reason on VISIBLE above.
+/**
+ * @param {string} columns  the SELECT list for each fused chunk
+ * @param {number} limit    how many fused chunks, best first
+ */
+export const hybridSearchSql = (columns, limit) => `WITH kw AS (
        SELECT c.id,
          row_number() OVER (
            ORDER BY ts_rank(to_tsvector('simple', c.content), plainto_tsquery('simple', $1)) DESC
@@ -245,15 +255,24 @@ const searchHybrid = async (query, scope) => {
        FROM kw FULL OUTER JOIN vec ON kw.id = vec.id
      )
      SELECT
-       ${SELECT_COLS},
-       ts_headline('simple', c.content, plainto_tsquery('simple', $1),
-         'MaxWords=20, MinWords=5') AS headline,
-       1 - (c.embedding <=> $2::vector) AS similarity
+       ${columns}
      FROM fused f
      JOIN transcript_chunks c ON c.id = f.id
      JOIN media_items m ON c.media_id = m.id
      ORDER BY f.score DESC
-     LIMIT ${CANDIDATE_LIMIT}`,
+     LIMIT ${limit}`;
+
+// What a library search result carries. ts_headline highlights the FTS terms
+// (semantic-only hits simply have no terms to highlight, which is fine).
+const HYBRID_COLS = `${SELECT_COLS},
+       ts_headline('simple', c.content, plainto_tsquery('simple', $1),
+         'MaxWords=20, MinWords=5') AS headline,
+       1 - (c.embedding <=> $2::vector) AS similarity`;
+
+const searchHybrid = async (query, scope) => {
+  const queryVector = toVectorLiteral(await embedQuery(query));
+  const result = await withWideVectorScan((client) => client.query(
+    hybridSearchSql(HYBRID_COLS, CANDIDATE_LIMIT),
     [query, queryVector, scope.courses, scope.drafts]
   ));
 
