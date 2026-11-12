@@ -292,7 +292,7 @@ test("no route accepts a recording key — the only recording routes are the hos
   //
   // Recording now exists (PRD REC-1, migration 048), and none of its routes
   // takes a key: the server names the file itself
-  // (servicesSessionRecordings.js → assemble). Pinned to exactly these three,
+  // (lib/recordingFiles.js → assembleRecording). Pinned to exactly these three,
   // so a route that DID take one would have to be added here on purpose.
   const paths = [];
   for (const [prefix, router] of API_ROUTERS) {

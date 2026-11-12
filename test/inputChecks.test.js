@@ -9,8 +9,8 @@ import { createPlaylist, renamePlaylist } from "../services/servicesSaves.js";
 
 // The input checks on three writes — a live session, a course, a saved list —
 // with the exact 400 each answers, the order they are asked in, and what a
-// valid input becomes on its way to the database. Pinned before the checks
-// moved into lib/validate.js, so the move cannot reword one or reorder them.
+// valid input becomes on its way to the database — so none of the guards in
+// lib/validate.js that answer them can be reworded or reordered unnoticed.
 
 const res = () => {
   const out = { statusCode: null, body: null };

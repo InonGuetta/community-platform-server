@@ -18,7 +18,7 @@
 // here; a barrel keeps every one of those untouched, which is what made the
 // split a change with no behaviour in it and therefore reviewable by reading the
 // diff. It also keeps the servicesXxx.js-per-resource convention true from the
-// outside — a new reader still finds the transcripts service where the other ten
+// outside — a new reader still finds the transcripts service where the other
 // services are.
 //
 // Adding to this feature: put it in the module that owns the concern and export

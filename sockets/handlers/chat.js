@@ -42,11 +42,14 @@ export const registerChatHandlers = (io, socket) => {
   // for the same reason: a roomToken in a message body is a claim, and a
   // client that could name any room could speak into any room.
   //
-  // Nothing is stored. A session is a conversation, not a record: persisting
-  // it would mean a retention decision, a deletion path and a place for it to
-  // be read back, none of which anyone has asked for. CHAT_HISTORY exists so a
-  // reconnect is not silent about that — it replays what the server holds,
-  // which for now is nothing.
+  // Relayed, not kept — with one exception, at the end of this handler. A
+  // session is a conversation, not a record: keeping it would mean a retention
+  // decision, a deletion path and a place for it to be read back. The exception
+  // is a room being recorded (PRD REC-3), where the lines of the people whose
+  // voices are in the recording become the lesson's appendix.
+  //
+  // CHAT_HISTORY is in the event list and the client listens for it, but the
+  // server sends none: a live room holds nothing to replay.
   const allowChat = createChatBucket();
   onEvent(socket, SOCKET_EVENTS.CHAT_MESSAGE, async ({ text }) => {
     const [room] = sessionRoomsOf(socket);
