@@ -29,22 +29,15 @@
 // carries the container's header, and the parts joined in order are a valid
 // file. That is why a part is identified by its number and why only a gapless
 // run from part 0 is kept — a hole in the middle would make the rest unplayable.
-import fs from "fs";
-import fsp from "fs/promises";
-import path from "path";
-import { pipeline } from "stream/promises";
-import { execFile } from "child_process";
-import ffmpegPath from "ffmpeg-static";
 import { pool } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
-import { LOCAL_UPLOAD_DIR, isLocalKey, localKeyFor, localPathOf, storeFile } from "../lib/storage.js";
 import { AppError, notFound, forbidden, conflict, ERROR_CODES } from "../lib/AppError.js";
-import { probeDurationSeconds } from "../lib/mediaDuration.js";
+import { createPartsDir, writePart, removeParts, assembleRecording } from "../lib/recordingFiles.js";
 import { createMedia } from "./servicesMedia.js";
 
-// Where the parts wait until the recording is finished. Under the uploads
-// directory, so it is on the same volume as the final file.
-export const PARTS_DIR = path.join(LOCAL_UPLOAD_DIR, "recording-parts");
+// The parts directory and the run of parts on disk are lib/recordingFiles.js's;
+// re-exported, because the tests, smoke and backup:status ask this module.
+export { PARTS_DIR, contiguousParts } from "../lib/recordingFiles.js";
 
 // A part is ten seconds of Opus audio in practice (~20–40 KB); the ceiling is
 // for a browser that chooses a far higher bitrate, not a target.
@@ -56,47 +49,7 @@ export const MAX_PART_NUMBER = 5000;
 // transcribes audio, and the mixed audio is what every participant agreed to.
 const ALLOWED_MIME = /^audio\/(webm|ogg|mp4)(;\s*codecs=[\w.,"' -]+)?$/i;
 
-const extensionFor = (mimeType) => {
-  if (/ogg/i.test(mimeType)) return "ogg";
-  // .mp4, not .m4a: lib/mediaFormats.js serves what it lists, and m4a is not
-  // in it — Safari records audio/mp4, which plays from an .mp4 like any other.
-  if (/mp4/i.test(mimeType)) return "mp4";
-  return "webm";
-};
-
-// See lib/mediaDuration.js for why the default import is restated.
-const FFMPEG = /** @type {string | null} */ (/** @type {unknown} */ (ffmpegPath));
-const REMUX_TIMEOUT_MS = 10 * 60_000;
-
-/**
- * Rewrite the joined file's container without touching the audio (-c copy).
- * A MediaRecorder stream is written as it is recorded, so its header never
- * learns how long it became — ffprobe says "Duration: N/A", and so would the
- * lesson this recording turns into. Remuxing writes the length in. Best
- * effort: on any failure the joined file stands as it is, still playable.
- * @param {string} file
- */
-const remuxInPlace = async (file) => {
-  if (!FFMPEG) return false;
-  const fixed = `${file}.remux${path.extname(file)}`;
-  try {
-    await new Promise((resolve, reject) => {
-      execFile(FFMPEG, ["-hide_banner", "-loglevel", "error", "-y", "-i", file, "-c", "copy", fixed],
-        { timeout: REMUX_TIMEOUT_MS }, (err) => (err ? reject(err) : resolve(undefined)));
-    });
-    await fsp.rename(fixed, file);
-    return true;
-  } catch (err) {
-    logger.warn(`[BE:svc] recording remux failed, keeping the joined file — ${err.message}`);
-    await fsp.rm(fixed, { force: true });
-    return false;
-  }
-};
-
 const RECORDING_COLS = "id, session_id, host_id, status, mime_type, parts, bytes, s3_key, started_at, finished_at, media_id";
-
-const partsDirOf = (recordingId) => path.join(PARTS_DIR, String(recordingId));
-const partPath = (recordingId, n) => path.join(partsDirOf(recordingId), `${String(n).padStart(5, "0")}.part`);
 
 /**
  * The session, only if the caller hosts it and it is running now. 404 for a
@@ -158,7 +111,7 @@ export const startRecording = async (sessionId, hostId, mimeType) => {
      RETURNING ${RECORDING_COLS}`,
     [sessionId, hostId, mime]
   );
-  await fsp.mkdir(partsDirOf(rows[0].id), { recursive: true });
+  await createPartsDir(rows[0].id);
   logger.info(`[BE:svc] startRecording session=${sessionId} ✓ recording=${rows[0].id}`);
   return rows[0];
 };
@@ -188,63 +141,8 @@ export const savePart = async ({ sessionId, recordingId, hostId, partNumber, bod
     throw conflict("This recording is already finished", ERROR_CODES.RECORDING_CLOSED);
   }
 
-  // Written beside its final name and renamed into place, so a part is either
-  // all there or not there — a half-written one would be joined into the file.
-  const dir = partsDirOf(recording.id);
-  await fsp.mkdir(dir, { recursive: true });
-  const target = partPath(recording.id, partNumber);
-  const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
-  await fsp.writeFile(temp, body);
-  await fsp.rename(temp, target);
-};
-
-/**
- * The gapless run of parts from 0 that is on disk: [paths, bytes].
- * @param {number} recordingId
- */
-export const contiguousParts = async (recordingId) => {
-  let names;
-  try {
-    names = await fsp.readdir(partsDirOf(recordingId));
-  } catch {
-    return { files: [], bytes: 0 };
-  }
-  const present = new Set(names.filter((n) => /^\d{5}\.part$/.test(n)).map((n) => Number(n.slice(0, 5))));
-  const files = [];
-  let bytes = 0;
-  for (let n = 0; present.has(n); n += 1) {
-    const file = partPath(recordingId, n);
-    files.push(file);
-    bytes += (await fsp.stat(file)).size;
-  }
-  return { files, bytes };
-};
-
-// Join the parts into one file and put it where media lives. Returns the
-// stored key, or null when there was nothing to join.
-const assemble = async (recording) => {
-  const { files, bytes } = await contiguousParts(recording.id);
-  if (files.length === 0) return { s3Key: null, parts: 0, bytes: 0 };
-
-  const name = `session-${recording.session_id}-recording-${recording.id}.${extensionFor(recording.mime_type)}`;
-  const localKey = localKeyFor(name);
-  const joined = localPathOf(localKey);
-  const out = fs.createWriteStream(joined);
-  for (const file of files) {
-    await pipeline(fs.createReadStream(file), out, { end: false });
-  }
-  await new Promise((resolve, reject) => out.end((/** @type {any} */ err) => (err ? reject(err) : resolve(undefined))));
-  await remuxInPlace(joined);
-  const size = (await fsp.stat(joined)).size;
-  // Measured here, while the file is still on this disk: once it has gone to
-  // S3, reading its header means fetching it back. null when unreadable.
-  const durationSeconds = await probeDurationSeconds(joined);
-
-  // To the bucket when S3 is configured, and then nothing of it stays here;
-  // otherwise it is already where local media lives.
-  const s3Key = await storeFile(localKey, { folder: "recordings", contentType: recording.mime_type.split(";")[0] });
-  if (!isLocalKey(s3Key)) await fsp.rm(joined, { force: true });
-  return { s3Key, parts: files.length, bytes: size || bytes, durationSeconds };
+  // Atomically, by rename — see writePart (lib/recordingFiles.js).
+  await writePart(recording.id, partNumber, body);
 };
 
 /**
@@ -267,7 +165,7 @@ const closeRecording = async (recording, lessonDeps = undefined) => {
 
   let stored;
   try {
-    stored = await assemble(recording);
+    stored = await assembleRecording(recording);
   } catch (err) {
     // Left 'failed' with its parts still on disk — nothing deleted, so it can
     // be joined by hand. Logged without any content, only the ids.
@@ -276,7 +174,7 @@ const closeRecording = async (recording, lessonDeps = undefined) => {
   }
   if (!stored.s3Key) {
     logger.warn(`[BE:svc] recording=${recording.id} finished with no parts`);
-    await fsp.rm(partsDirOf(recording.id), { recursive: true, force: true });
+    await removeParts(recording.id);
     return claim.rows[0];
   }
 
@@ -292,7 +190,7 @@ const closeRecording = async (recording, lessonDeps = undefined) => {
      SELECT * FROM done`,
     [recording.id, stored.s3Key, stored.parts, stored.bytes]
   );
-  await fsp.rm(partsDirOf(recording.id), { recursive: true, force: true });
+  await removeParts(recording.id);
   logger.info(`[BE:svc] recording=${recording.id} ✓ finished, ${stored.parts} part(s), ${stored.bytes} bytes`);
   const mediaId = await lessonFromRecording(rows[0], stored.durationSeconds, lessonDeps);
   return { ...rows[0], media_id: mediaId ?? rows[0].media_id };
