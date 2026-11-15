@@ -1,5 +1,5 @@
 // @ts-check
-import { Router } from "express";
+import express, { Router } from "express";
 import rateLimit from "express-rate-limit";
 import passport from "../config/passport.js";
 import { verifyToken } from "../middleware/auth.js";
@@ -78,5 +78,17 @@ router.get("/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${env.clientUrl}/sign-in?error=google_failed` }),
   controllersAuth.googleCallback
 );
+
+// Apple and LinkedIn (lib/oauthProviders.js). Apple returns with a form POST —
+// the only way it will hand over the user's name and email — so that one
+// callback, and nothing else here, parses a urlencoded body. Small, because
+// all Apple sends is a code, a state, an id_token and the name.
+router.get("/apple", controllersAuth.oauthStart("apple"));
+router.post("/apple/callback",
+  express.urlencoded({ extended: false, limit: "20kb" }),
+  controllersAuth.oauthCallback("apple")
+);
+router.get("/linkedin", controllersAuth.oauthStart("linkedin"));
+router.get("/linkedin/callback", controllersAuth.oauthCallback("linkedin"));
 
 export default router;

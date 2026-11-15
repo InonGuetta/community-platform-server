@@ -62,6 +62,10 @@ const PUBLIC = new Set([
   "post /api/auth/logout",
   "get /api/auth/google",            // redirects the browser to Google
   "get /api/auth/google/callback",   // Google redirects back here
+  "get /api/auth/apple",             // the same, for Apple and LinkedIn
+  "post /api/auth/apple/callback",   // Apple returns with a form POST
+  "get /api/auth/linkedin",
+  "get /api/auth/linkedin/callback",
   // Recovery, for the one person who by definition cannot authenticate: someone
   // who has lost their password. Each answers identically whether or not the
   // address exists, so being open does not make them an enumeration oracle, and

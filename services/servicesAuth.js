@@ -239,57 +239,83 @@ export const login = async (email, password) => {
   return { user: safeUser, token };
 };
 
-// Google tells us whether it has verified the address it is handing over, and
-// the answer matters for exactly one branch below.
+// ── Signing in through a provider: Google, Apple, LinkedIn ──────────────────
 //
-// The shape differs across versions of passport-google-oauth20 — the OIDC claim
-// arrives on `_json`, older profile shapes put it on the email entry — so both
-// are read, and anything unrecognised counts as UNVERIFIED. Defaulting the other
-// way would make a future library change silently reopen the hole.
-const emailIsVerified = (profile) =>
-  profile?._json?.email_verified === true || profile?.emails?.[0]?.verified === true;
+// Each provider's identity lives in its own column (008, 050). The column name
+// is spliced into SQL below, so it comes ONLY from this map — never from a
+// request — and an unknown provider is a programming error, not a 400.
+const PROVIDER_COLUMNS = {
+  google: { column: "google_id", label: "Google" },
+  apple: { column: "apple_id", label: "Apple" },
+  linkedin: { column: "linkedin_id", label: "LinkedIn" },
+};
 
-export const googleOAuthLogin = async (profile) => {
-  const email = profile.emails?.[0]?.value ? normalizeEmail(profile.emails[0].value) : null;
-  const googleId = profile.id;
-  // Google's name is not ours to refuse, so it is cut to the column rather than
-  // checked — a longer one would otherwise fail the INSERT as a 500.
+// A provider's picture is shown to other users as an <img src>, so it passes
+// the same https-and-bounded check as one a user sets themselves. One that
+// fails costs the picture, never the sign-in.
+const providerAvatar = (value) => {
+  try {
+    return cleanAvatarUrl(value ?? null);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Sign in — or create, or link — the account behind one provider identity.
+ * The identity is already in neutral form (lib/oauthProviders.js for Apple and
+ * LinkedIn, googleProfileIdentity below for Google), so every rule here holds
+ * for all three alike.
+ *
+ * @param {"google"|"apple"|"linkedin"} provider
+ * @param {{ id: string, email: string|null, emailVerified: boolean, displayName?: string|null, avatarUrl?: string|null }} identity
+ */
+export const oauthLogin = async (provider, identity) => {
+  const known = PROVIDER_COLUMNS[provider];
+  if (!known) throw new Error(`unknown sign-in provider: ${provider}`);
+  const { column, label } = known;
+
+  const email = identity.email ? normalizeEmail(identity.email) : null;
+  const providerId = identity.id;
+  // The provider's name is not ours to refuse, so it is cut to the column rather
+  // than checked — a longer one would otherwise fail the INSERT as a 500.
   const displayName =
-    typeof profile.displayName === "string" ? profile.displayName.slice(0, DISPLAY_NAME_MAX) : null;
-  const avatarUrl = profile.photos?.[0]?.value;
+    typeof identity.displayName === "string" ? identity.displayName.slice(0, DISPLAY_NAME_MAX) : null;
+  const avatarUrl = providerAvatar(identity.avatarUrl);
 
-  // users.email is NOT NULL (001). A Google account that shares no address
-  // reached the INSERT below with NULL and answered 500.
+  // users.email is NOT NULL (001). An account that shares no address reached
+  // the INSERT below with NULL and answered 500.
   if (!email) {
-    throw unauthorized("Google did not share an email address for this account", ERROR_CODES.UNAUTHORIZED);
+    throw unauthorized(`${label} did not share an email address for this account`, ERROR_CODES.UNAUTHORIZED);
   }
 
-  // The google_id match first, explicitly. `google_id=$1 OR email=$2` can match
-  // TWO rows — this Google identity on one account, this address on another —
+  // The provider-id match first, explicitly. `google_id=$1 OR email=$2` can
+  // match TWO rows — this identity on one account, this address on another —
   // and without an order rows[0] was whichever the planner produced, which could
   // sign the caller into the wrong account.
   const existing = await pool.query(
-    `SELECT * FROM users WHERE google_id=$1 OR email=$2
-     ORDER BY (google_id IS NOT DISTINCT FROM $1) DESC
+    `SELECT * FROM users WHERE ${column}=$1 OR email=$2
+     ORDER BY (${column} IS NOT DISTINCT FROM $1) DESC
      LIMIT 1`,
-    [googleId, email]
+    [providerId, email]
   );
 
   if (existing.rows.length > 0) {
     const user = existing.rows[0];
 
-    // Matched by email, but the account is already linked to a DIFFERENT Google
-    // identity. Two Google accounts can claim one address over time (a recycled
-    // Workspace address, a renamed account); the one already linked is the one
-    // the owner proved, and the newcomer gets nothing by matching the string.
-    if (user.google_id && user.google_id !== googleId) {
+    // Matched by email, but the account is already linked to a DIFFERENT
+    // identity at this provider. Two accounts can claim one address over time (a
+    // recycled Workspace address, a renamed account); the one already linked is
+    // the one the owner proved, and the newcomer gets nothing by matching the
+    // string.
+    if (user[column] && user[column] !== providerId) {
       throw unauthorized(
-        "This email is already linked to a different Google account",
+        `This email is already linked to a different ${label} account`,
         ERROR_CODES.UNAUTHORIZED
       );
     }
 
-    // Deactivation has to mean the same thing on both ways in. login() filters on
+    // Deactivation has to mean the same thing on every way in. login() filters on
     // is_active in its WHERE clause; this path had no equivalent, so a deactivated
     // user signing in with Google was handed a fresh 7-day cookie. verifyToken
     // refused them on the next request, which made it look like a broken app
@@ -303,46 +329,47 @@ export const googleOAuthLogin = async (profile) => {
       throw unauthorized("This account has been deactivated", ERROR_CODES.UNAUTHORIZED);
     }
 
-    if (!user.google_id) {
-      // Attaching a Google identity to an account that already exists with a
-      // PASSWORD is the one moment this flow can hand over somebody else's
-      // account, and it is reached purely on a matching email address. If Google
-      // has not verified that address, the match proves nothing.
-      if (!emailIsVerified(profile)) {
+    if (!user[column]) {
+      // Attaching a provider identity to an account that already exists — with a
+      // password, or with ANOTHER provider — is the one moment this flow can hand
+      // over somebody else's account, and it is reached purely on a matching
+      // email address. If the provider has not verified that address, the match
+      // proves nothing.
+      if (identity.emailVerified !== true) {
         throw unauthorized(
-          "Google has not verified this email address, so it cannot be linked to an existing account",
+          `${label} has not verified this email address, so it cannot be linked to an existing account`,
           ERROR_CODES.UNAUTHORIZED
         );
       }
-      // Google has verified the address; this account has a password nobody ever
-      // proved anything about. That password is the danger — it was set by
-      // whoever typed the address into the registration form, which is not
-      // necessarily the person now signing in through Google — so it is cleared
-      // rather than left as a second, unproven way into an account the rightful
-      // owner has just claimed.
+      // The provider has verified the address; this account has a password
+      // nobody ever proved anything about. That password is the danger — it was
+      // set by whoever typed the address into the registration form, which is not
+      // necessarily the person now signing in — so it is cleared rather than left
+      // as a second, unproven way into an account the rightful owner has just
+      // claimed.
       //
       // Nobody is locked out: password reset issues a new one, to the address
-      // Google just confirmed. password_changed_at also ends any session that
-      // password had already opened.
+      // the provider just confirmed. password_changed_at also ends any session
+      // that password had already opened.
       const supersedesUnprovenPassword = user.password_hash && !user.email_verified;
       if (supersedesUnprovenPassword) {
         logger.warn(
-          `[auth] user ${user.id} linked a verified Google identity to an account whose ` +
+          `[auth] user ${user.id} linked a verified ${label} identity to an account whose ` +
           `email was never verified — the existing password has been cleared`
         );
       }
 
       await pool.query(
         `UPDATE users SET
-           google_id = $1,
+           ${column} = $1,
            avatar_url = COALESCE(avatar_url, $2),
            email_verified = TRUE,
            password_hash = CASE WHEN $4::boolean THEN NULL ELSE password_hash END,
            password_changed_at = CASE WHEN $4::boolean THEN NOW() ELSE password_changed_at END
          WHERE id = $3`,
-        [googleId, avatarUrl, user.id, Boolean(supersedesUnprovenPassword)]
+        [providerId, avatarUrl, user.id, Boolean(supersedesUnprovenPassword)]
       );
-      user.google_id = googleId;
+      user[column] = providerId;
       user.email_verified = true;
     }
     const { password_hash, ...safeUser } = user;
@@ -350,11 +377,30 @@ export const googleOAuthLogin = async (profile) => {
   }
 
   const result = await pool.query(
-    "INSERT INTO users (email, google_id, display_name, avatar_url) VALUES ($1, $2, $3, $4) RETURNING id, email, role, display_name, avatar_url",
-    [email, googleId, displayName, avatarUrl]
+    `INSERT INTO users (email, ${column}, display_name, avatar_url) VALUES ($1, $2, $3, $4)
+     RETURNING id, email, role, display_name, avatar_url`,
+    [email, providerId, displayName, avatarUrl]
   );
   return result.rows[0];
 };
+
+// Google tells us whether it has verified the address it is handing over, and
+// the answer matters for exactly one branch of oauthLogin.
+//
+// The shape differs across versions of passport-google-oauth20 — the OIDC claim
+// arrives on `_json`, older profile shapes put it on the email entry — so both
+// are read, and anything unrecognised counts as UNVERIFIED. Defaulting the other
+// way would make a future library change silently reopen the hole.
+const googleProfileIdentity = (profile) => ({
+  id: profile.id,
+  email: profile.emails?.[0]?.value ?? null,
+  emailVerified: profile?._json?.email_verified === true || profile?.emails?.[0]?.verified === true,
+  displayName: profile.displayName,
+  avatarUrl: profile.photos?.[0]?.value,
+});
+
+// passport's Google profile → the shared rules above.
+export const googleOAuthLogin = (profile) => oauthLogin("google", googleProfileIdentity(profile));
 
 // The identity behind a token, re-read at the moment it is used. Returns null
 // when there is no such user or the account has been deactivated.
@@ -409,9 +455,10 @@ export const tokenPredatesPasswordChange = (user, issuedAtSeconds) => {
 // outcome is identical for both, which is also the honest thing to say — "if
 // that address has an account, a message is on its way".
 //
-// A Google-only account gets no token either. It has no password to reset, and
+// An account that signs in only through a provider (Google, Apple, LinkedIn)
+// gets no token either. It has no password to reset, and
 // issuing one would create a way to attach a password to an account whose owner
-// only ever proved themselves through Google.
+// only ever proved themselves through that provider.
 export const requestPasswordReset = async (email) => {
   const normalizedEmail = normalizeEmail(email);
   const { rows } = await pool.query(
@@ -424,7 +471,7 @@ export const requestPasswordReset = async (email) => {
     return null;
   }
   if (!user.password_hash) {
-    logger.debug("[auth] password reset requested for an account that signs in with Google");
+    logger.debug("[auth] password reset requested for an account that signs in through a provider");
     return null;
   }
 
@@ -497,10 +544,10 @@ export const changePassword = async (userId, currentPassword, newPassword) => {
   const { rows } = await pool.query("SELECT password_hash FROM users WHERE id=$1", [userId]);
   const stored = rows[0]?.password_hash;
   if (!stored) {
-    // A Google-only account. Setting a first password this way would let anyone
+    // A provider-only account (Google, Apple, LinkedIn). Setting a first password this way would let anyone
     // with the open session add a second, permanent way in.
     throw badRequest(
-      "This account signs in with Google and has no password to change",
+      "This account signs in through Google, Apple or LinkedIn and has no password to change",
       ERROR_CODES.NO_PASSWORD_SET
     );
   }
