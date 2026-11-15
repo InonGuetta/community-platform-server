@@ -121,7 +121,10 @@ export const NEEDS_APPROVAL = (role) => role === "lecturer" || role === "admin";
 // test/roleApproval.test.js drives a real HTTP request with role=admin in the
 // body and asserts the created row is a student. If you change this function,
 // that test is the one that must still pass.
-export const register = async (email, password, displayName, requestedRole = "student") => {
+// `locale` is the interface language the visitor was already using (already
+// checked by optionalLocale), so a new account starts in it rather than in
+// Hebrew; absent, the column's default applies.
+export const register = async (email, password, displayName, requestedRole = "student", locale = null) => {
   // Shape first, before anything is normalised or hashed: a malformed address
   // must not reach the uniqueness query, where it would occupy the "email taken"
   // branch and give a confusing answer.
@@ -141,9 +144,9 @@ export const register = async (email, password, displayName, requestedRole = "st
   try {
     result = await pool.query(
       // `role` is deliberately absent from the column list. See the block above.
-      `INSERT INTO users (email, password_hash, display_name, requested_role, approval_status)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, role, display_name, requested_role, approval_status`,
+      `INSERT INTO users (email, password_hash, display_name, requested_role, approval_status, locale)
+       VALUES ($1, $2, $3, $4, $5, COALESCE($6, 'he'))
+       RETURNING id, email, role, display_name, requested_role, approval_status, locale`,
       [
         normalizedEmail,
         password_hash,
@@ -153,6 +156,7 @@ export const register = async (email, password, displayName, requestedRole = "st
         // about later.
         requestedRole,
         pending ? "pending" : "approved",
+        locale,
       ]
     );
   } catch (err) {
@@ -569,17 +573,20 @@ export const changePassword = async (userId, currentPassword, newPassword) => {
 // row, and role, is_active and email must not be reachable from it. Changing an
 // email address is a re-verification flow, not a profile edit, and it is
 // deliberately not here.
-export const updateProfile = async (userId, { displayName, avatarUrl }) => {
+// `locale` arrives already checked (optionalLocale); null leaves it alone, as an
+// absent name or avatar does — so the language switcher can send it alone.
+export const updateProfile = async (userId, { displayName = undefined, avatarUrl = undefined, locale = null }) => {
   const trimmed = cleanDisplayName(displayName, { required: true });
   const avatar = cleanAvatarUrl(avatarUrl);
 
   const result = await pool.query(
     `UPDATE users SET
        display_name = COALESCE($1, display_name),
-       avatar_url   = COALESCE($2, avatar_url)
-     WHERE id = $3
-     RETURNING id, email, role, display_name, avatar_url, email_verified, created_at`,
-    [trimmed, avatar, userId]
+       avatar_url   = COALESCE($2, avatar_url),
+       locale       = COALESCE($3, locale)
+     WHERE id = $4
+     RETURNING id, email, role, display_name, avatar_url, email_verified, created_at, locale`,
+    [trimmed, avatar, locale, userId]
   );
   if (result.rows.length === 0) throw notFound("User not found");
   return result.rows[0];
@@ -591,7 +598,7 @@ export const getMe = async (userId) => {
     // "your request is waiting" banner without a second call. They are not
     // secrets — they are this user's own row.
     `SELECT id, email, role, display_name, avatar_url, created_at,
-            requested_role, approval_status, rejection_reason
+            requested_role, approval_status, rejection_reason, locale
      FROM users WHERE id=$1 AND is_active=TRUE`,
     [userId]
   );

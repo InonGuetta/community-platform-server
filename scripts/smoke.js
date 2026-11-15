@@ -1,7 +1,7 @@
 // @ts-check
 import "dotenv/config";
 import { pool } from "../db/pool.js";
-import { getActiveUserById } from "../services/servicesAuth.js";
+import { getActiveUserById, updateProfile, getMe } from "../services/servicesAuth.js";
 import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
 import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
@@ -1297,6 +1297,44 @@ const checks = [
       } finally {
         pool.query = original.query;
         pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // The interface language (migration 051), through the real service: the
+    // COALESCE leaves it alone when absent, getMe reads it, and the CHECK refuses
+    // a code we do not have. Inside a transaction that is always rolled back,
+    // with pool.query routed to its client as in the tag check above.
+    name: "a user's interface language (migration 051)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query };
+      try {
+        await client.query("BEGIN");
+        const { rows: [user] } = await client.query("SELECT id, locale FROM users WHERE is_active LIMIT 1");
+        if (!user) return "no active user to change";
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+
+        const changed = await updateProfile(user.id, { locale: "yi" });
+        if (changed.locale !== "yi") throw new Error(`updateProfile returned locale ${changed.locale}`);
+        const kept = await updateProfile(user.id, { avatarUrl: undefined });
+        if (kept.locale !== "yi") throw new Error("a profile edit without a language changed the language");
+        const me = await getMe(user.id);
+        if (me.locale !== "yi") throw new Error(`getMe read locale ${me.locale}`);
+
+        await client.query("SAVEPOINT bad_locale");
+        const refused = await client
+          .query("UPDATE users SET locale = 'de' WHERE id = $1", [user.id])
+          .then(() => false, (err) => err.code === "23514");
+        await client.query("ROLLBACK TO SAVEPOINT bad_locale");
+        if (!refused) throw new Error("the CHECK accepted a language we do not have");
+
+        return `default read as '${user.locale}'; set, kept, read back; 'de' refused`;
+      } finally {
+        pool.query = original.query;
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }

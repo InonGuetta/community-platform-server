@@ -3,7 +3,7 @@ import * as servicesAuth from "../services/servicesAuth.js";
 import { sendPasswordResetEmail, sendVerificationEmail } from "../lib/mailer.js";
 import { notifyAdmins, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { AppError, badRequest } from "../lib/AppError.js";
-import { normalizeEmail } from "../lib/validate.js";
+import { normalizeEmail, optionalLocale } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 import { captureError } from "../lib/monitoring.js";
@@ -41,7 +41,7 @@ const tellAdminsIfPending = (user) => {
 };
 
 export const register = async (req, res) => {
-  const { email, password, displayName, requestedRole } = req.body;
+  const { email, password, displayName, requestedRole, locale } = req.body;
   if (!email || !password) throw badRequest("Email and password are required");
   // Named `requestedRole` in the body, not `role`, and that is not cosmetic: a
   // field called `role` on a public endpoint invites the next reader to wire it
@@ -50,7 +50,8 @@ export const register = async (req, res) => {
     email,
     password,
     displayName,
-    requestedRole ?? "student"
+    requestedRole ?? "student",
+    optionalLocale(locale)
   );
   setAuthCookie(res, token);
   // Sent after the account exists and the session is open, and never awaited for
@@ -213,8 +214,12 @@ export const verifyEmail = async (req, res) => {
 // ── The signed-in user's own account ────────────────────────────────────────
 
 export const updateProfile = async (req, res) => {
-  const { displayName, avatarUrl } = req.body ?? {};
-  const user = await servicesAuth.updateProfile(req.user.id, { displayName, avatarUrl });
+  const { displayName, avatarUrl, locale } = req.body ?? {};
+  const user = await servicesAuth.updateProfile(req.user.id, {
+    displayName,
+    avatarUrl,
+    locale: optionalLocale(locale),
+  });
   res.status(200).json(user);
 };
 
