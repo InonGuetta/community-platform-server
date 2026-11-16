@@ -18,7 +18,7 @@ import { embedChunksForMedia } from "../../services/servicesEmbeddings.js";
 import { extractDocumentText } from "../../lib/textExtract.js";
 import { textQuality } from "../../lib/textQuality.js";
 import { readMediaBuffer } from "../../lib/storage.js";
-import { AppError } from "../../lib/AppError.js";
+import { AppError, ERROR_CODES, storedReason } from "../../lib/AppError.js";
 import { logger } from "../../lib/logger.js";
 import { notifyProcessingOutcome } from "../../services/servicesNotifications.js";
 import { suggestTagsForMedia } from "../../services/transcripts/tagging.js";
@@ -89,7 +89,7 @@ const prepareText = async (mediaId) => {
   // pageOffsets is null for a format with no pages; saveTextChunks stores NULL
   // page numbers in that case rather than inventing a page 1.
   const chunkCount = await saveTextChunks(mediaId, text, pageOffsets);
-  if (chunkCount === 0) throw new AppError("לא נמצא טקסט קריא בקובץ.", 400);
+  if (chunkCount === 0) throw new AppError("No readable text in the file", 400, ERROR_CODES.DOCUMENT_NO_TEXT);
 
   // How much of the text reads (migration 033) — measured here, the one place
   // the whole extracted text is in hand, and written with the status change so
@@ -188,11 +188,11 @@ llmQueue.process(async (job) => {
       );
       throw err;
     }
-    await markFailed(mediaId, { errorMessage: permanent ? err.message : null })
+    await markFailed(mediaId, { errorMessage: permanent ? storedReason(err) : null })
       .catch((dbErr) => logger.error(`[WORKER:llm]   could not set status='error':`, dbErr.message));
     // The same reason the row now carries, and only for that kind: see
     // notifyProcessingOutcome.
-    await notifyProcessingOutcome(mediaId, { ok: false, reason: permanent ? err.message : null });
+    await notifyProcessingOutcome(mediaId, { ok: false, reason: permanent ? storedReason(err) : null });
     // Reported outside only when it is ours to fix (PRD NFR-1): a permanent
     // AppError is the file's problem — a scan with no text — and the lecturer
     // has already been told.

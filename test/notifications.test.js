@@ -121,10 +121,11 @@ test("a finished pipeline notifies the uploader", async () => {
 test("a failure carries the reason only when there is one to give", async () => {
   let stub = pipelineStub();
   try {
-    await notifyProcessingOutcome(9, { ok: false, reason: "לא נמצא טקסט קריא בקובץ." });
+    const reason = JSON.stringify({ code: "DOCUMENT_NO_TEXT" });
+    await notifyProcessingOutcome(9, { ok: false, reason });
     const insert = stub.calls.find((c) => INSERT.test(c.text));
     assert.equal(insert.params[1], "processing_error");
-    assert.equal(JSON.parse(insert.params[2]).reason, "לא נמצא טקסט קריא בקובץ.");
+    assert.equal(JSON.parse(insert.params[2]).reason, reason);
   } finally {
     stub.restore();
   }

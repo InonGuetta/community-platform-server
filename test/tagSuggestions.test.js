@@ -146,7 +146,7 @@ test("every suggestion carries where it sits and why it was offered", () => {
   const [first] = suggestTags({ title: "פרשת ויחי" }, TAGS);
   assert.equal(first.name, "ויחי");
   assert.match(first.path, /תנ"ך ← תורה ← בראשית/, "the path disambiguates repeated names");
-  assert.ok(first.reason.length > 0, "a suggestion nobody can check is one nobody should accept");
+  assert.ok(first.reason.key, "a suggestion nobody can check is one nobody should accept");
 });
 
 // An item may carry eight tags in total; a list longer than a handful stops

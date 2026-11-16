@@ -59,11 +59,9 @@ export const triggerPipeline = async (mediaId) => {
   if (isText && !isExtractableText(s3Key)) {
     logger.debug(`[BE:svc] triggerPipeline mediaId=${mediaId} ✗ unsupported text format ${s3Key}`);
     // English, like every other message here: the code is what the client keys
-    // its Hebrew on, so the server has no reason to hold a translation. This one
-    // was the last Hebrew string on this path and predates the code contract.
-    // (The worker's "no readable text" AppError stays Hebrew on purpose — that
-    // one is stored in transcripts.error_message and rendered to the user
-    // verbatim from the database, with no code anywhere near it.)
+    // its text on, so the server has no reason to hold a translation. (The
+    // worker's refusals are codes too — stored in transcripts.error_message as
+    // storedReason(), lib/AppError.js.)
     throw badRequest(
       "Cannot summarise a file of this type. Supported: PDF, DOCX, TXT.",
       ERROR_CODES.UNSUPPORTED_TEXT_FORMAT

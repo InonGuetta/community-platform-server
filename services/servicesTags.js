@@ -30,7 +30,7 @@ const cleanTag = (value) => {
   const trimmed = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
   if (!trimmed) return null;
   if (trimmed.length > TAG_MAX) {
-    throw badRequest(`תגית יכולה להכיל עד ${TAG_MAX} תווים`);
+    throw badRequest(`A tag is at most ${TAG_MAX} characters`, ERROR_CODES.TAG_TOO_LONG, { max: TAG_MAX });
   }
   return trimmed;
 };
@@ -55,7 +55,7 @@ export const cleanTagNames = (names) => {
   }
   const list = [...seen.values()];
   if (list.length > TAGS_PER_ITEM_MAX) {
-    throw badRequest(`ניתן לשייך עד ${TAGS_PER_ITEM_MAX} תגיות לפריט`);
+    throw badRequest(`At most ${TAGS_PER_ITEM_MAX} tags per item`, ERROR_CODES.TAG_LIMIT, { max: TAGS_PER_ITEM_MAX });
   }
   return list;
 };
@@ -117,7 +117,7 @@ export const cleanTagSelection = ({ ids = [], names = [] } = {}) => {
   const clean = cleanTagNames(names);
 
   if (chosenIds.length + clean.length > TAGS_PER_ITEM_MAX) {
-    throw badRequest(`ניתן לשייך עד ${TAGS_PER_ITEM_MAX} תגיות לפריט`);
+    throw badRequest(`At most ${TAGS_PER_ITEM_MAX} tags per item`, ERROR_CODES.TAG_LIMIT, { max: TAGS_PER_ITEM_MAX });
   }
   return { ids: chosenIds, names: clean };
 };
@@ -135,7 +135,7 @@ const existingRootTags = async (client, names) => {
   const found = new Set(rows.map((r) => r.key));
   const missing = names.filter((n) => !found.has(n.toLowerCase()));
   if (missing.length > 0) {
-    throw badRequest(`תגית חדשה נכנסת למערכת רק באישור מנהל — יש להציע אותה דרך "הוסף תגית": ${missing.join(", ")}`);
+    throw badRequest("A new tag needs an admin's approval", ERROR_CODES.TAG_NOT_APPROVED, { names: missing.join(", ") });
   }
   return rows.map((r) => r.id);
 };
@@ -260,7 +260,7 @@ export const getTagTree = async (scope) => {
 const resolveParentId = async (db, parentId) => {
   if (parentId === null || parentId === undefined || parentId === "") return null;
   const id = Number(parentId);
-  if (!Number.isInteger(id) || id <= 0) throw badRequest("תגית האב אינה תקינה");
+  if (!Number.isInteger(id) || id <= 0) throw badRequest("Invalid parent tag", ERROR_CODES.TAG_PARENT_INVALID);
   const { rows } = await db.query("SELECT id FROM tags WHERE id=$1", [id]);
   if (rows.length === 0) throw badRequest("Parent tag not found", ERROR_CODES.TAG_PARENT_NOT_FOUND);
   return id;
@@ -268,7 +268,7 @@ const resolveParentId = async (db, parentId) => {
 
 const requireTagName = (value) => {
   const name = cleanTag(value);
-  if (!name) throw badRequest("יש להזין שם לתגית");
+  if (!name) throw badRequest("A tag name is required", ERROR_CODES.TAG_NAME_REQUIRED);
   return name;
 };
 
@@ -354,7 +354,9 @@ export const proposeTag = ({ mediaId, name: rawName, parentId: rawParentId, user
       [mediaId]
     );
     if (Number(count) >= TAGS_PER_ITEM_MAX) {
-      throw badRequest(`ניתן לשייך עד ${TAGS_PER_ITEM_MAX} תגיות לפריט, כולל תגיות שממתינות לאישור`);
+      throw badRequest(`At most ${TAGS_PER_ITEM_MAX} tags per item, pending ones included`, ERROR_CODES.TAG_LIMIT_WITH_PENDING, {
+        max: TAGS_PER_ITEM_MAX,
+      });
     }
 
     // DO UPDATE rather than DO NOTHING so RETURNING gives back the existing
@@ -402,7 +404,7 @@ export const withdrawProposal = (mediaId, proposalId) =>
          AND pm.proposal_id = $1 AND pm.media_id = $2`,
       [proposalId, mediaId]
     );
-    if (rowCount === 0) throw notFound("ההצעה לא נמצאה, או שכבר הוכרעה");
+    if (rowCount === 0) throw notFound("Proposal not found or already decided", ERROR_CODES.TAG_PROPOSAL_NOT_FOUND);
     await client.query(
       `DELETE FROM tag_proposals p
        WHERE p.id = $1 AND p.status = 'pending'
@@ -443,7 +445,7 @@ const lockPending = async (client, id) => {
     "SELECT id, name, parent_id, status FROM tag_proposals WHERE id=$1 FOR UPDATE",
     [id]
   );
-  if (rows.length === 0) throw notFound("ההצעה לא נמצאה");
+  if (rows.length === 0) throw notFound("Proposal not found", ERROR_CODES.TAG_PROPOSAL_NOT_FOUND);
   if (rows[0].status !== "pending") throw conflict("This proposal has already been decided", ERROR_CODES.TAG_PROPOSAL_DECIDED);
   return rows[0];
 };
