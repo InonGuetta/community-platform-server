@@ -5,6 +5,7 @@
 // (the public router's /media/:id/stream). Together because all four share how
 // stored media is sent — ranges, documents converted for the reader, failures
 // shown as a page — and the rest of the media resource needs none of it.
+import { forLocale, requestLocale } from "../lib/i18n.js";
 import fs from "fs";
 import os from "os";
 import ffmpegPath from "ffmpeg-static";
@@ -146,23 +147,22 @@ const streamS3Object = async (item, req, res) => {
 // application/json. Anything that is not a browser keeps the JSON it expects.
 const wantsAPage = (req) => req.accepts(["json", "html"]) === "html";
 
-// Hebrew, and rendered by the server rather than keyed by a code on the client
-// — because there is no client on this path. It is the same reasoning that keeps
-// lib/textExtract.js's refusals in Hebrew: they are stored and shown verbatim,
-// with no code anywhere near them.
+// Rendered by the server rather than keyed by a code on the client — because
+// there is no client on this path, only a frame. Worded in the reader's
+// language (the client adds ?lang= to the frame's URL; lib/i18n.js), keyed on
+// the error's code under documentPage.* in locales/<code>.json.
 const PAGE_MESSAGE = {
-  [ERROR_CODES.UNVIEWABLE_TEXT_FORMAT]:
-    "לא ניתן להציג כאן קובץ מסוג זה. אפשר להוריד אותו ולפתוח במחשב.",
-  [ERROR_CODES.DOCUMENT_UNREADABLE]:
-    "לא ניתן לקרוא את הקובץ — ייתכן שהוא פגום או מוגן בסיסמה.",
-  [ERROR_CODES.MEDIA_NOT_FOUND]: "הקובץ לא נמצא.",
+  [ERROR_CODES.UNVIEWABLE_TEXT_FORMAT]: "documentPage.unviewable",
+  [ERROR_CODES.DOCUMENT_UNREADABLE]: "documentPage.unreadable",
+  [ERROR_CODES.MEDIA_NOT_FOUND]: "documentPage.notFound",
 };
 
-const errorPage = (err) => {
-  const message = PAGE_MESSAGE[err?.code] || "לא ניתן להציג את המסמך.";
-  // The message is one of the fixed strings above, never anything from the
-  // request or the file, so there is nothing here to escape.
-  return `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">` +
+const errorPage = (err, req) => {
+  const { t, lang, dir } = forLocale(requestLocale(req));
+  const message = t(PAGE_MESSAGE[err?.code] || "documentPage.failed");
+  // The message is one of the fixed strings in the locale files, never anything
+  // from the request or the file, so there is nothing here to escape.
+  return `<!doctype html><html lang="${lang}" dir="${dir}"><head><meta charset="utf-8">` +
     `<style>body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;` +
     `padding:40px 24px;text-align:center;color:#43606d;background:#f3f5f7;line-height:1.7}</style>` +
     `</head><body>${message}</body></html>`;
@@ -207,7 +207,7 @@ export const streamMedia = async (req, res, next) => {
       : err;
 
     if (failure?.expose && wantsAPage(req)) {
-      return res.status(failure.statusCode).type("html").send(errorPage(failure));
+      return res.status(failure.statusCode).type("html").send(errorPage(failure, req));
     }
     next(failure);
   }

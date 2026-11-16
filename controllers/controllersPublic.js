@@ -6,6 +6,7 @@
 import * as servicesMedia from "../services/servicesMedia.js";
 import { escapeHtml } from "../lib/html.js";
 import { env } from "../lib/env.js";
+import { forLocale, requestLocale } from "../lib/i18n.js";
 import { notFound, ERROR_CODES } from "../lib/AppError.js";
 
 // ── A public lesson, for a guest with the link (PRD COM-3b, COM-4) ──────────
@@ -37,7 +38,11 @@ const excerpt = (text, max = 200) => {
 export const sharePage = async (req, res) => {
   const lesson = await servicesMedia.getPublicMedia(req.params.id);
   const target = `${env.clientUrl}/l/${encodeURIComponent(req.params.id)}`;
-  const title = lesson ? lesson.title : "שיעור בפלטפורמת הקהילה";
+  // The page's own words in the sharer's language (the client adds ?lang= to
+  // the link it copies) or the crawler's; the lesson's title and summary are
+  // content and stay as written.
+  const { t, lang, dir } = forLocale(requestLocale(req));
+  const title = lesson ? lesson.title : t("share.genericTitle");
   const by = lesson?.creator_name && lesson.creator_name !== servicesMedia.DEFAULT_CREATOR ? ` · ${lesson.creator_name}` : "";
   const description = lesson ? excerpt(lesson.ai_summary || lesson.description || "") : "";
   const image = lesson?.thumbnail_url && /^https?:\/\//.test(lesson.thumbnail_url)
@@ -45,23 +50,23 @@ export const sharePage = async (req, res) => {
     : `${env.clientUrl}/icons/icon-512.png`;
   const meta = [
     ["og:type", "article"],
-    ["og:site_name", "פלטפורמת הקהילה"],
+    ["og:site_name", t("appName")],
     ["og:title", `${title}${by}`],
     ["og:description", description],
     ["og:image", image],
     ["og:url", target],
-    ["og:locale", "he_IL"],
+    ["og:locale", t("share.ogLocale")],
   ].filter(([, v]) => v).map(([p, v]) => `<meta property="${p}" content="${escapeHtml(v)}">`).join("");
   res
     .status(200)
     .type("html")
     .set("Cache-Control", "public, max-age=300")
     .send(
-      `<!doctype html><html lang="he" dir="rtl"><head><meta charset="utf-8">` +
+      `<!doctype html><html lang="${lang}" dir="${dir}"><head><meta charset="utf-8">` +
       `<title>${escapeHtml(`${title}${by}`)}</title>` +
       `<meta name="description" content="${escapeHtml(description)}">${meta}` +
       `<meta name="twitter:card" content="summary">` +
       `<meta http-equiv="refresh" content="0; url=${escapeHtml(target)}">` +
-      `</head><body><a href="${escapeHtml(target)}">${escapeHtml(title)}</a></body></html>`
+      `</head><body><a href="${escapeHtml(target)}" dir="auto">${escapeHtml(title)}</a></body></html>`
     );
 };

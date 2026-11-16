@@ -92,7 +92,7 @@ export const LIST_LIMIT = 30;
  * @param {number[]} userIds
  * @param {string} type     one of NOTIFICATION_TYPES
  * @param {Record<string, unknown>} [payload] facts the client and the mailer word — ids, a title, a name
- * @param {{ onceBy?: string, attachments?: object[] }} [options]
+ * @param {{ onceBy?: string, attachments?: object[] | ((locale: string|null) => object[]) }} [options]
  * @returns {Promise<number>} how many in-app rows were written
  */
 export const deliver = async (userIds, type, payload = {}, { onceBy, attachments } = {}) => {
@@ -131,7 +131,7 @@ export const deliver = async (userIds, type, payload = {}, { onceBy, attachments
       if (!row.mail || !row.email || !category) continue;
       await sendNotificationEmail(row.email, type, payload, {
         unsubscribeToken: signUnsubscribeToken(row.user_id, category),
-        attachments,
+        attachments: typeof attachments === "function" ? attachments(row.locale) : attachments,
         // Each recipient's own language: one notification, as many languages
         // as there are readers.
         locale: row.locale,
@@ -308,7 +308,7 @@ const sessionPayload = (session) => ({
  *
  * @param {number} sessionId
  * @param {string} type  SESSION_SCHEDULED | SESSION_REMINDER | SESSION_STARTING
- * @param {{ calendar?: (session: any) => string }} [options]  builds the .ics, for SCHEDULED
+ * @param {{ calendar?: (session: any, locale?: string|null) => string }} [options]  builds the .ics, for SCHEDULED
  */
 export const notifySessionAudience = async (sessionId, type, { calendar } = {}) => {
   try {
@@ -316,8 +316,9 @@ export const notifySessionAudience = async (sessionId, type, { calendar } = {}) 
     if (!session?.host_id) return 0;
     const audience = await sessionAudience(session);
     if (audience.length === 0) return 0;
+    // Per recipient: the calendar's own labels are in each reader's language.
     const attachments = calendar && session.starts_at
-      ? [{ filename: "session.ics", content: calendar(session), contentType: "text/calendar; charset=utf-8; method=PUBLISH" }]
+      ? (locale) => [{ filename: "session.ics", content: calendar(session, locale), contentType: "text/calendar; charset=utf-8; method=PUBLISH" }]
       : undefined;
     return deliver(audience, type, sessionPayload(session), { attachments });
   } catch (err) {

@@ -3,6 +3,7 @@ import * as servicesSessions from "../services/servicesSessions.js";
 import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 import { notifySessionAudience, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { calendarForSession } from "../lib/ics.js";
+import { requestLocale } from "../lib/i18n.js";
 import { optionalId, optionalTitle, sessionTypeFilter, optionalIntInRange, optionalSessionStart } from "../lib/validate.js";
 import { assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
@@ -118,7 +119,7 @@ export const getSessionCalendar = async (req, res) => {
     .status(200)
     .type("text/calendar; charset=utf-8")
     .set("Content-Disposition", `attachment; filename="session-${session.id}.ics"`)
-    .send(calendarForSession(session));
+    .send(calendarForSession(session, requestLocale(req)));
 };
 
 // Ending over REST closes the live room too. It used to update the row and tell
