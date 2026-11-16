@@ -17,6 +17,7 @@ const sendReceiptIfCompleted = (updated) => {
     currency: updated.currency,
     donationId: updated.id,
     at: updated.created_at,
+    locale: updated.donor_locale,
   }).catch(() => {});
 };
 

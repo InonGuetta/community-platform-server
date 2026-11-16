@@ -67,6 +67,7 @@ export const updateDonationStatus = async (stripePaymentIntent, status) => {
      WHERE d.stripe_payment_intent=$2 AND d.status <> 'completed'
      RETURNING d.*,
        (SELECT u.email FROM users u WHERE u.id = d.donor_id) AS donor_email,
+       (SELECT u.locale FROM users u WHERE u.id = d.donor_id) AS donor_locale,
        (SELECT u.display_name FROM users u WHERE u.id = d.donor_id) AS donor_name`,
     [status, stripePaymentIntent]
   );

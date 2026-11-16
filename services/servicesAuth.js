@@ -466,7 +466,7 @@ export const tokenPredatesPasswordChange = (user, issuedAtSeconds) => {
 export const requestPasswordReset = async (email) => {
   const normalizedEmail = normalizeEmail(email);
   const { rows } = await pool.query(
-    "SELECT id, password_hash FROM users WHERE email=$1 AND is_active=TRUE",
+    "SELECT id, password_hash, locale FROM users WHERE email=$1 AND is_active=TRUE",
     [normalizedEmail]
   );
   const user = rows[0];
@@ -479,7 +479,9 @@ export const requestPasswordReset = async (email) => {
     return null;
   }
 
-  return insertMailedToken(user.id, TOKEN_PURPOSE.RESET, RESET_TTL_MS);
+  // The locale rides back with the token: the mail is written in the reader's
+  // language, and this is the one query that knows who the reader is.
+  return { token: await insertMailedToken(user.id, TOKEN_PURPOSE.RESET, RESET_TTL_MS), locale: user.locale };
 };
 
 // Spending a token: set the new password, burn every outstanding token for that

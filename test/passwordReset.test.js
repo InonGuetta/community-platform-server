@@ -18,7 +18,7 @@ import {
 // possible at all — and the two properties that decide whether it is a recovery
 // feature or a second way in for whoever else can read the inbox.
 
-const ACTIVE = { id: 4, password_hash: "$2a$12$hash" };
+const ACTIVE = { id: 4, password_hash: "$2a$12$hash", locale: "en" };
 
 // ── Asking for a link ───────────────────────────────────────────────────────
 
@@ -27,8 +27,9 @@ test("a token is issued for an account that can use one", async () => {
     /FROM users/i.test(text) ? { rows: [ACTIVE] } : { rows: [] }
   );
   try {
-    const token = await requestPasswordReset("a@example.com");
+    const { token, locale } = await requestPasswordReset("a@example.com");
     assert.match(token, /^[0-9a-f]{64}$/, "32 random bytes, hex");
+    assert.equal(locale, "en", "the mail is written in the account's language");
   } finally {
     stub.restore();
   }
@@ -41,7 +42,7 @@ test("only a hash of the token reaches the database", async () => {
     /FROM users/i.test(text) ? { rows: [ACTIVE] } : { rows: [] }
   );
   try {
-    const token = await requestPasswordReset("a@example.com");
+    const { token } = await requestPasswordReset("a@example.com");
     const insert = stub.calls.find((c) => /INSERT INTO password_resets/i.test(c.text));
 
     assert.equal(insert.params.includes(token), false, "the token must not be stored");

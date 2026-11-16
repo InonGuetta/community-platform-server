@@ -58,7 +58,7 @@ export const register = async (req, res) => {
   // its outcome: a mail server being down must not turn a successful
   // registration into an error that invites the user to register again, which
   // would then fail on the email being taken.
-  sendVerificationEmail(user.email, verification).catch(() => {});
+  sendVerificationEmail(user.email, verification, user.locale).catch(() => {});
   tellAdminsIfPending(user);
   res.status(201).json({ user });
 };
@@ -183,8 +183,8 @@ export const forgotPassword = async (req, res) => {
   const { email } = req.body ?? {};
   if (!email || typeof email !== "string") throw badRequest("Email is required");
 
-  const token = await servicesAuth.requestPasswordReset(email);
-  if (token) sendPasswordResetEmail(normalizeEmail(email), token).catch(() => {});
+  const reset = await servicesAuth.requestPasswordReset(email);
+  if (reset) sendPasswordResetEmail(normalizeEmail(email), reset.token, reset.locale).catch(() => {});
 
   res.status(200).json({
     message: "If that address has an account, a reset link is on its way",

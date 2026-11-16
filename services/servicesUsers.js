@@ -158,7 +158,7 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
           approved_by = CASE WHEN $8::boolean THEN $9::int ELSE approved_by END,
           approved_at = CASE WHEN $8::boolean THEN NOW() ELSE approved_at END
         WHERE id=$6
-        RETURNING id, email, role, display_name, avatar_url, is_active`,
+        RETURNING id, email, role, display_name, avatar_url, is_active, locale`,
         [normalizedEmail, role, displayName, avatarUrl, isActive, id, emailChanged, settlesPending, adminId]
       );
 
@@ -261,7 +261,7 @@ export const approveUser = async (id, adminId) => {
          approved_at = NOW(),
          rejection_reason = NULL
        WHERE id = $3
-       RETURNING id, email, role, display_name, requested_role, approval_status, approved_at`,
+       RETURNING id, email, role, display_name, requested_role, approval_status, approved_at, locale`,
       [user.requested_role, adminId, id]
     );
 
@@ -295,7 +295,7 @@ export const rejectUser = async (id, adminId, reason = null) => {
          approved_at = NOW(),
          rejection_reason = $2
        WHERE id = $3
-       RETURNING id, email, role, display_name, requested_role, approval_status, rejection_reason`,
+       RETURNING id, email, role, display_name, requested_role, approval_status, rejection_reason, locale`,
       [adminId, reason || null, id]
     );
 
