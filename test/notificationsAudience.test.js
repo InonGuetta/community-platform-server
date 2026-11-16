@@ -79,10 +79,44 @@ test("every type has a category and a mail wording", () => {
     assert.ok(categoryOf(type), `${type} has no category, so its mail could never be turned off`);
     const message = notificationEmail(type, { title: "ש", mediaId: 1, requestedRole: "lecturer", startsAt: "2026-11-03T17:30:00Z" });
     assert.ok(message?.subject && message.text, `${type} has no wording`);
+    // Every key it asked for resolved: an unknown key comes back as itself.
+    assert.doesNotMatch(`${message.subject}${message.text}${message.html}`, /mail\./, `${type} leaked a key`);
   }
   for (const [key, category] of Object.entries(EMAIL_CATEGORIES)) {
     assert.ok(category.roles.length > 0, `${key} reaches nobody`);
   }
+});
+
+// Each recipient reads the mail in their own language (users.locale), read in
+// the same statement that writes the rows.
+test("deliver reads each recipient's language in its one statement", async () => {
+  const stub = stubPoolQuery(pool, (text, params) => (INSERT.test(text) ? inserted(params) : { rows: [] }));
+  try {
+    await deliver([1], NOTIFICATION_TYPES.NEW_LESSON, { mediaId: 3 });
+    const insert = stub.calls.find((c) => INSERT.test(c.text));
+    assert.match(insert.text, /SELECT locale FROM users WHERE id = user_id\) AS locale/);
+  } finally {
+    stub.restore();
+  }
+});
+
+test("a notification mail is framed in its reader's language", () => {
+  const payload = { title: "ש", mediaId: 1, startsAt: "2026-11-03T17:30:00Z" };
+  assert.match(notificationEmail("session_reminder", payload, "he").html, /<div lang="he" dir="rtl"/);
+  assert.match(notificationEmail("session_reminder", payload, "en").html, /<div lang="en" dir="ltr"/);
+  // The date follows the reader too.
+  assert.match(notificationEmail("session_reminder", payload, "en").text, /November/);
+  assert.match(notificationEmail("session_reminder", payload, "he").text, /נובמבר/);
+});
+
+// A failure reason is stored as a code (storedReason) and worded per reader; a
+// Hebrew sentence from an older row reaches Hebrew readers only.
+test("a processing failure's stored reason is worded for the reader", () => {
+  const coded = JSON.stringify({ code: "DOCUMENT_TOO_SHORT", params: { words: 12, min: 50 } });
+  assert.match(notificationEmail("processing_error", { title: "ש", mediaId: 1, reason: coded }, "he").text, /12 מילים/);
+  const legacy = "לא נמצא טקסט קריא בקובץ.";
+  assert.match(notificationEmail("processing_error", { title: "ש", mediaId: 1, reason: legacy }, "he").text, /לא נמצא טקסט/);
+  assert.doesNotMatch(notificationEmail("processing_error", { title: "ש", mediaId: 1, reason: legacy }, "en").text, /לא נמצא טקסט/);
 });
 
 // ── Sessions ────────────────────────────────────────────────────────────────
@@ -352,9 +386,9 @@ test("a preference is switched for the caller, and an unknown category is refuse
 test("a notification mail carries its unsubscribe link and header", async () => {
   const { withUnsubscribe } = await import("../lib/mailer.js");
   const message = withUnsubscribe(notificationEmail("new_lesson", { title: "ש", mediaId: 1 }), "a.b.c");
-  assert.match(message.text, /\/unsubscribe\?token=a\.b\.c/);
-  assert.match(message.html, /href="[^"]*\/unsubscribe\?token=a\.b\.c"/);
-  assert.match(message.headers["List-Unsubscribe"], /^<.*\/unsubscribe\?token=a\.b\.c>$/);
+  assert.match(message.text, /\/unsubscribe\?token=a\.b\.c&lang=he/);
+  assert.match(message.html, /href="[^"]*\/unsubscribe\?token=a\.b\.c&lang=he"/);
+  assert.match(message.headers["List-Unsubscribe"], /^<.*\/unsubscribe\?token=a\.b\.c&lang=he>$/);
   // It links to the client's confirmation page, never to the API's POST.
   assert.doesNotMatch(message.text, /\/api\//);
 });

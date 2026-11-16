@@ -37,6 +37,65 @@
       "stillStudent": "חשבונך פעיל וממשיך לעבוד כרגיל כתלמיד."
     },
     "reason": "סיבה: {{reason}}",
-    "enter": "כניסה לפלטפורמה"
+    "enter": "כניסה לפלטפורמה",
+    "reasons": {
+      "UNSUPPORTED_TEXT_FORMAT": "לא ניתן להפיק סיכום מקובץ מסוג זה. נתמכים: PDF, DOCX, TXT.",
+      "DOCUMENT_UNREADABLE": "לא ניתן לקרוא את הקובץ — ייתכן שהוא פגום או מוגן בסיסמה.",
+      "OLD_DOC_FORMAT": "פורמט .doc הישן אינו נתמך להפקת סיכום. שמור את הקובץ כ־.docx ונסה שוב.",
+      "DOCUMENT_SCANNED": "הקובץ נראה כמסמך סרוק — תמונות ללא שכבת טקסט. הפקת סיכום דורשת קובץ שניתן לחלץ ממנו טקסט.",
+      "DOCUMENT_TOO_SHORT": "לא נמצא מספיק טקסט קריא בקובץ ({{words}} מילים). נדרשות לפחות {{min}} מילים להפקת סיכום.",
+      "DOCUMENT_NO_TEXT": "לא נמצא טקסט קריא בקובץ."
+    },
+    "notify": {
+      "someone": "משתמש",
+      "decideLink": "לאישור או דחייה",
+      "inCourse": " בקורס \"{{course}}\"",
+      "roleRequest": {
+        "subject": "בקשת הרשאה חדשה — {{role}}",
+        "body": "התקבלה בקשה להרשאת {{role}} מאת {{who}}."
+      },
+      "processing": {
+        "lesson": "השיעור",
+        "doneSubject": "העיבוד הסתיים — {{title}}",
+        "errorSubject": "העיבוד נכשל — {{title}}",
+        "done": "העיבוד של \"{{title}}\" הסתיים: התמלול והסיכום מוכנים.",
+        "error": "העיבוד של \"{{title}}\" לא הושלם. אפשר לנסות שוב מעמוד השיעור.",
+        "link": "לעמוד השיעור"
+      },
+      "session": {
+        "defaultTitle": "מפגש חי",
+        "withHost": " עם {{name}}",
+        "scheduledSubject": "נקבע מפגש: {{title}}",
+        "reminderSubject": "המפגש \"{{title}}\" מתחיל בעוד כרבע שעה",
+        "startingSubject": "המפגש \"{{title}}\" התחיל",
+        "scheduled": "נקבע מפגש חי{{host}}: \"{{title}}\".",
+        "reminder": "המפגש החי{{host}}, \"{{title}}\", מתחיל בעוד כרבע שעה.",
+        "starting": "המפגש החי{{host}}, \"{{title}}\", התחיל עכשיו.",
+        "when": "מועד: {{when}}.",
+        "calendarAttached": "קובץ יומן מצורף.",
+        "link": "למפגשים"
+      },
+      "newLesson": {
+        "defaultTitle": "שיעור חדש",
+        "by": ", מאת {{name}}",
+        "subject": "שיעור חדש{{course}}: {{title}}",
+        "body": "עלה שיעור חדש{{course}}: \"{{title}}\"{{by}}.",
+        "link": "לשיעור"
+      },
+      "join": {
+        "course": "הקורס",
+        "requestSubject": "בקשת הצטרפות לקורס {{course}}",
+        "request": "{{who}} ביקש להצטרף לקורס \"{{course}}\" בעזרת קוד ההצטרפות.",
+        "approvedSubject": "התקבלת לקורס {{course}}",
+        "rejectedSubject": "הבקשה להצטרף לקורס {{course}} לא אושרה",
+        "approved": "הבקשה שלך להצטרף לקורס \"{{course}}\" אושרה. השיעורים שלו פתוחים לך עכשיו.",
+        "rejected": "הבקשה שלך להצטרף לקורס \"{{course}}\" לא אושרה. אם זו טעות, כדאי לפנות למרצה.",
+        "myCourses": "לקורסים שלי"
+      }
+    },
+    "unsubscribe": {
+      "text": "להפסקת מיילים מסוג זה: {{link}}",
+      "link": "הפסקת מיילים מסוג זה"
+    }
   }
 }

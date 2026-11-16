@@ -116,6 +116,7 @@ export const deliver = async (userIds, type, payload = {}, { onceBy, attachments
          ))
        RETURNING user_id,
          (SELECT email FROM users WHERE id = user_id) AS email,
+         (SELECT locale FROM users WHERE id = user_id) AS locale,
          NOT EXISTS (
            SELECT 1 FROM notification_email_optouts o
            WHERE o.user_id = notifications.user_id AND o.category IN ($4::text, '${ALL_CATEGORIES}')
@@ -131,6 +132,9 @@ export const deliver = async (userIds, type, payload = {}, { onceBy, attachments
       await sendNotificationEmail(row.email, type, payload, {
         unsubscribeToken: signUnsubscribeToken(row.user_id, category),
         attachments,
+        // Each recipient's own language: one notification, as many languages
+        // as there are readers.
+        locale: row.locale,
       });
     }
     return rows.length;
