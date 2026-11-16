@@ -1,0 +1,119 @@
+{
+  "appName": "Plateforme communautaire",
+  "share": {
+    "genericTitle": "Un cours sur la Plateforme communautaire",
+    "ogLocale": "fr_FR"
+  },
+  "documentPage": {
+    "unviewable": "Ce type de fichier ne peut pas être affiché ici. Vous pouvez le télécharger et l'ouvrir sur votre ordinateur.",
+    "unreadable": "Le fichier ne peut pas être lu — il est peut-être endommagé ou protégé par mot de passe.",
+    "notFound": "Le fichier est introuvable.",
+    "failed": "Le document ne peut pas être affiché."
+  },
+  "calendar": {
+    "defaultTitle": "Séance en direct",
+    "host": "Animateur : {{name}}"
+  },
+  "mail": {
+    "reset": {
+      "subject": "Réinitialisation du mot de passe",
+      "intro": "Nous avons reçu une demande de réinitialisation du mot de passe de votre compte.",
+      "open": "Pour le réinitialiser, ouvrez ce lien :",
+      "button": "Cliquez ici pour réinitialiser votre mot de passe",
+      "validity": "Le lien est valable une heure et ne peut servir qu'une fois.",
+      "ignore": "Si vous n'avez pas demandé de réinitialisation, vous pouvez ignorer ce message — rien n'a changé sur votre compte."
+    },
+    "verify": {
+      "subject": "Vérification de votre adresse e-mail",
+      "welcome": "Bienvenue.",
+      "open": "Pour vérifier votre adresse e-mail, ouvrez ce lien :",
+      "button": "Cliquez ici pour vérifier votre adresse e-mail",
+      "validity": "Le lien est valable 24 heures."
+    },
+    "donation": {
+      "subject": "Confirmation de votre don — {{amount}}",
+      "thanks": "Merci pour votre don.",
+      "amount": "Montant",
+      "date": "Date",
+      "reference": "Numéro de référence",
+      "referenceShort": "Référence",
+      "notTaxReceipt": "Ce message confirme la réception de votre don et ne constitue pas un reçu fiscal."
+    },
+    "role": {
+      "names": {
+        "lecturer": "enseignant",
+        "admin": "administrateur"
+      },
+      "approvedSubject": "Votre demande a été approuvée — autorisation {{role}}",
+      "approved": "Votre demande d'autorisation {{role}} a été approuvée.",
+      "active": "L'autorisation est déjà active sur votre compte — inutile de vous déconnecter et de vous reconnecter.",
+      "rejectedSubject": "Votre demande d'autorisation {{role}} n'a pas été approuvée",
+      "rejected": "Votre demande d'autorisation {{role}} n'a pas été approuvée.",
+      "stillStudent": "Votre compte est actif et continue de fonctionner normalement en tant qu'élève."
+    },
+    "reason": "Motif : {{reason}}",
+    "enter": "Accéder à la plateforme",
+    "reasons": {
+      "UNSUPPORTED_TEXT_FORMAT": "Un résumé ne peut pas être produit à partir de ce type de fichier. Formats pris en charge : PDF, DOCX, TXT.",
+      "DOCUMENT_UNREADABLE": "Le fichier ne peut pas être lu — il est peut-être endommagé ou protégé par mot de passe.",
+      "OLD_DOC_FORMAT": "L'ancien format .doc ne peut pas être résumé. Enregistrez le fichier en .docx et réessayez.",
+      "DOCUMENT_SCANNED": "Le fichier ressemble à un document numérisé — des images sans couche de texte. Un résumé nécessite un fichier dont le texte peut être extrait.",
+      "DOCUMENT_TOO_SHORT": "Pas assez de texte lisible dans le fichier ({{words}} mots). Il faut au moins {{min}} mots pour un résumé.",
+      "DOCUMENT_NO_TEXT": "Aucun texte lisible n'a été trouvé dans le fichier.",
+      "AI_BUDGET_EXCEEDED": "Le plafond mensuel de coût de l'IA est atteint. Un nouveau traitement sera possible le mois prochain, ou après qu'un administrateur aura relevé le plafond.",
+      "NO_KEY_POINTS": "L'analyse IA n'a produit aucun point clé.",
+      "MEDIA_NOT_FOUND": "Le fichier est introuvable."
+    },
+    "notify": {
+      "someone": "un utilisateur",
+      "decideLink": "Accepter ou refuser",
+      "inCourse": " dans le cours « {{course}} »",
+      "roleRequest": {
+        "subject": "Nouvelle demande d'autorisation — {{role}}",
+        "body": "Une demande d'autorisation {{role}} a été reçue de {{who}}."
+      },
+      "processing": {
+        "lesson": "le cours",
+        "doneSubject": "Traitement terminé — {{title}}",
+        "errorSubject": "Le traitement a échoué — {{title}}",
+        "done": "Le traitement de « {{title}} » est terminé : la transcription et le résumé sont prêts.",
+        "error": "Le traitement de « {{title}} » n'a pas abouti. Vous pouvez réessayer depuis la page du cours.",
+        "link": "Vers la page du cours"
+      },
+      "session": {
+        "defaultTitle": "Séance en direct",
+        "withHost": " avec {{name}}",
+        "scheduledSubject": "Séance programmée : {{title}}",
+        "reminderSubject": "La séance « {{title}} » commence dans un quart d'heure environ",
+        "startingSubject": "La séance « {{title}} » a commencé",
+        "scheduled": "Une séance en direct{{host}} a été programmée : « {{title}} ».",
+        "reminder": "La séance en direct{{host}}, « {{title}} », commence dans un quart d'heure environ.",
+        "starting": "La séance en direct{{host}}, « {{title}} », vient de commencer.",
+        "when": "Quand : {{when}}.",
+        "calendarAttached": "Un fichier de calendrier est joint.",
+        "link": "Vers les séances"
+      },
+      "newLesson": {
+        "defaultTitle": "Un nouveau cours",
+        "by": ", par {{name}}",
+        "subject": "Nouveau cours{{course}} : {{title}}",
+        "body": "Un nouveau cours a été mis en ligne{{course}} : « {{title}} »{{by}}.",
+        "link": "Vers le cours"
+      },
+      "join": {
+        "course": "le cours",
+        "requestSubject": "Demande d'inscription au cours {{course}}",
+        "request": "{{who}} a demandé à rejoindre le cours « {{course}} » avec son code d'inscription.",
+        "approvedSubject": "Vous avez été accepté dans le cours {{course}}",
+        "rejectedSubject": "Votre demande d'inscription au cours {{course}} n'a pas été acceptée",
+        "approved": "Votre demande d'inscription au cours « {{course}} » a été acceptée. Ses leçons vous sont maintenant ouvertes.",
+        "rejected": "Votre demande d'inscription au cours « {{course}} » n'a pas été acceptée. S'il s'agit d'une erreur, contactez l'enseignant.",
+        "myCourses": "Vers mes cours"
+      }
+    },
+    "unsubscribe": {
+      "text": "Pour ne plus recevoir d'e-mails de ce type : {{link}}",
+      "link": "Ne plus recevoir d'e-mails de ce type"
+    }
+  }
+}
