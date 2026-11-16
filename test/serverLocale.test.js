@@ -73,3 +73,16 @@ test("every key the server words exists in locales/he.json", () => {
   const known = new Set(hebrewKeys());
   for (const key of asked) assert.ok(known.has(key), `${key} is missing from locales/he.json`);
 });
+
+// A permanent failure is stored as its code and mailed as mail.reasons.<CODE>;
+// a code with no words there is mailed with no reason at all. Every code the
+// pipeline's workers can end on must be worded.
+test("every code a processing failure can store has mail words", () => {
+  const sources = ["lib/textExtract.js", "queue/workers/llmWorker.js", "services/servicesAiUsage.js"]
+    .map((f) => readFileSync(new URL(`../${f}`, import.meta.url), "utf8"))
+    .join("\n");
+  const codes = new Set([...sources.matchAll(/ERROR_CODES\.([A-Z_]+)/g)].map((m) => m[1]));
+  assert.ok(codes.size >= 6, "the workers' codes were not found");
+  const known = new Set(hebrewKeys());
+  for (const code of codes) assert.ok(known.has(`mail.reasons.${code}`), `mail.reasons.${code} is missing`);
+});
