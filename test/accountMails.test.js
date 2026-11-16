@@ -31,10 +31,12 @@ test("every account mail is Hebrew, framed rtl, for a Hebrew reader", () => {
   }
 });
 
-test("an English reader's mail is framed ltr", () => {
+test("an English reader's mail is in English, framed ltr", () => {
   const mail = passwordResetEmail("tok", "en");
+  assert.equal(mail.subject, "Reset your password");
   assert.match(mail.html, /<div lang="en" dir="ltr"/);
   assert.match(mail.html, /reset-password\?token=tok/);
+  assert.doesNotMatch(`${mail.text}${mail.html}`, /[֐-׿]/, "no Hebrew in an English mail");
 });
 
 // users.locale is CHECKed, but a mail must never fail on a value it does not know.
