@@ -65,6 +65,10 @@ const MATRIX = {
   "get /api/auth/linkedin/callback": PUBLIC,
   "get /api/auth/me": ANY,
   "patch /api/auth/me": ANY,
+  // One's own profile picture; anyone signed in sees anyone's (migration 052).
+  "post /api/auth/me/avatar": ANY,
+  "delete /api/auth/me/avatar": ANY,
+  "get /api/auth/avatar/:id": ANY,
   "post /api/auth/change-password": ANY,
   // Asking is open to everyone; granting is under /api/users, admin-only.
   "post /api/auth/request-role": ANY,

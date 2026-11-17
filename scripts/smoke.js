@@ -2,6 +2,7 @@
 import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById, updateProfile, getMe } from "../services/servicesAuth.js";
+import { removeAvatar, avatarKeyOf } from "../services/servicesAvatars.js";
 import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
 import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
@@ -1338,6 +1339,54 @@ const checks = [
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }
+    },
+  },
+  {
+    // A profile picture (migration 052), through the real SQL: the CTE that
+    // reads the previous key in the same UPDATE, on a user with no uploaded
+    // picture — so nothing on disk or in the bucket is touched — and the read
+    // the serving route makes. Rolled back, like the language check above.
+    name: "profile pictures (migration 052)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query };
+      try {
+        await client.query("BEGIN");
+        const { rows: [user] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND avatar_key IS NULL LIMIT 1"
+        );
+        const { rows: [{ uploaded }] } = await client.query(
+          "SELECT count(*)::int AS uploaded FROM users WHERE avatar_key IS NOT NULL"
+        );
+        if (!user) return `no user without a picture to try; ${uploaded} uploaded`;
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+        const cleared = await removeAvatar(user.id);
+        if (cleared.avatar_url !== null) throw new Error("removeAvatar left an avatar_url");
+        const served = await avatarKeyOf(user.id).then(() => true, (err) => err.statusCode !== 404 && Promise.reject(err));
+        if (served) throw new Error("avatarKeyOf served a user with no picture");
+        return `${uploaded} uploaded picture(s); remove and the serving read ok`;
+      } finally {
+        pool.query = original.query;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // The chat's starting questions are an object keyed by language (migration
+    // 053). An array left behind is a lesson whose questions no reader would be
+    // offered — the client reads arrays as Hebrew-only, but nothing writes them.
+    name: "suggested questions by language (migration 053)",
+    run: async () => {
+      const { rows: [counts] } = await pool.query(
+        `SELECT count(*) FILTER (WHERE jsonb_typeof(suggested_questions) = 'array')::int AS arrays,
+                count(*) FILTER (WHERE jsonb_typeof(suggested_questions) = 'object')::int AS objects,
+                count(*) FILTER (WHERE suggested_questions ?& ARRAY['he','yi','en','fr','es'])::int AS complete
+           FROM transcripts`
+      );
+      if (counts.arrays > 0) throw new Error(`${counts.arrays} lesson(s) still hold a plain list — migration 053 has not been applied`);
+      return `${counts.objects} lesson(s) with questions, ${counts.complete} in all five languages`;
     },
   },
   {

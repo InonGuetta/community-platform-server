@@ -10,9 +10,9 @@
 // Declared rather than cast at the call site, for the same reason
 // socket-io.d.ts is: this describes what the library actually is, once, instead
 // of silencing the symptom wherever it surfaces. It covers only what this
-// application uses — adding `memoryStorage` here would be describing a shape
-// nothing depends on, and the file's value is that everything in it is load-
-// bearing.
+// application uses — the file's value is that everything in it is load-
+// bearing. (`memoryStorage` joined when the profile picture upload began to
+// use it: routes/routersAuth.js.)
 //
 // Deliberately NOT `any`. The reason for typing routes/routersMedia.js at all is
 // that its storage callbacks are easy to get wrong — `cb(null, path)` versus
@@ -35,6 +35,8 @@ declare module "multer" {
       filename: string;
       /** Set by diskStorage: destination + filename. */
       path: string;
+      /** Set by memoryStorage: the whole file. */
+      buffer?: Buffer;
     }
 
     /**
@@ -70,6 +72,7 @@ declare module "multer" {
 
   namespace multer {
     function diskStorage(options: DiskStorageOptions): unknown;
+    function memoryStorage(): unknown;
     class MulterError extends Error {
       code: string;
       field?: string;

@@ -1,0 +1,14 @@
+-- A profile picture the user uploads (services/servicesAvatars.js).
+--
+-- avatar_url stays what every reader shows — an <img src> — and for an
+-- uploaded picture it is this API's own address for it,
+-- /api/auth/avatar/<id>?v=<when>, the ?v changing with each new picture so a
+-- browser never shows the previous one from its cache. avatar_key is where the
+-- file itself is stored (lib/storage.js: "local/…" on disk, "avatars/…" in the
+-- bucket), read only by the route that serves it and by the replace/remove
+-- that deletes the old file.
+--
+-- NULL for everyone who has not uploaded one, including a Google account whose
+-- avatar_url is Google's own https address. No index: the row is found by its
+-- id, never by its file.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_key TEXT;

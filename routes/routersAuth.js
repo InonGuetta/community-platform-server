@@ -4,6 +4,12 @@ import rateLimit from "express-rate-limit";
 import passport from "../config/passport.js";
 import { verifyToken } from "../middleware/auth.js";
 import * as controllersAuth from "../controllers/controllersAuth.js";
+import * as controllersAvatars from "../controllers/controllersAvatars.js";
+import multer from "multer";
+import { userRateLimit } from "../middleware/userRateLimit.js";
+import { validateIntParam } from "../middleware/validateIntParam.js";
+import { AVATAR_MAX_BYTES } from "../services/servicesAvatars.js";
+import { badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { env } from "../lib/env.js";
 
 const router = Router();
@@ -59,6 +65,33 @@ router.post("/verify-email", recoveryLimiter, controllersAuth.verifyEmail);
 
 // The signed-in user's own account.
 router.patch("/me", verifyToken, controllersAuth.updateProfile);
+
+// A profile picture (migration 052). Held in memory: it is at most
+// AVATAR_MAX_BYTES, and the client shrinks it to a few dozen kilobytes first.
+// What the file IS is decided from its bytes in the controller
+// (requireAvatarImage), not here from its name. multer reports a refused file
+// through its own callback, so it is turned into an AppError on the way.
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: AVATAR_MAX_BYTES, files: 1 } });
+const avatarLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Too many picture changes, please wait a minute",
+});
+const receiveAvatar = (req, res, next) => {
+  avatarUpload.single("avatar")(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return next(badRequest("The picture is too large", ERROR_CODES.AVATAR_TOO_LARGE, {
+        maxMb: AVATAR_MAX_BYTES / (1024 * 1024),
+      }));
+    }
+    return next(badRequest(`Picture upload refused: ${err.message}`, ERROR_CODES.AVATAR_NOT_IMAGE));
+  });
+};
+router.post("/me/avatar", verifyToken, avatarLimiter, receiveAvatar, controllersAvatars.uploadAvatar);
+router.delete("/me/avatar", verifyToken, avatarLimiter, controllersAvatars.removeAvatar);
+// Any signed-in user may see anyone's picture: it is shown beside their name.
+router.get("/avatar/:id", verifyToken, validateIntParam("id"), controllersAvatars.getAvatar);
 router.post("/change-password", verifyToken, authLimiter, controllersAuth.changePassword);
 
 // Asking for a lecturer or admin role after registration — the path a Google

@@ -13,7 +13,8 @@ import {
 } from "../services/transcripts/questions.js";
 
 // Three questions to start the chat with, about this lesson (PRD ASK-7,
-// migration 045).
+// migration 045) — in every interface language, since they are chips the
+// interface offers (migration 053).
 
 test("the prompt asks for questions about this lesson, from its summary", () => {
   const [system, user] = buildQuestionsPrompt({ title: "פרשת כי תבא", summary: "על הבאת ביכורים", keyPoints: ["שמחה"] });
@@ -21,14 +22,29 @@ test("the prompt asks for questions about this lesson, from its summary", () => 
   assert.match(system.content, new RegExp(`${QUESTION_COUNT} short questions`));
   assert.match(user.content, /Summary: על הבאת ביכורים/);
   assert.match(user.content, /- שמחה/);
+  // One call, every interface language, keyed by code.
+  for (const code of ["he", "yi", "en", "fr", "es"]) assert.match(system.content, new RegExp(`"${code}":\\[`));
 });
 
-test("the answer keeps short, distinct strings — three at most — and nothing for a bad answer", () => {
+test("each language keeps short, distinct strings — three at most — and nothing for a bad answer", () => {
   const long = "א".repeat(MAX_QUESTION_LENGTH + 1);
-  const raw = JSON.stringify({ questions: ["  מה הקשר בין ביכורים לשמחה?  ", 7, "מה הקשר בין ביכורים לשמחה?", long, "", "למה דווקא בארץ?", "מי מביא?", "עוד אחת?"] });
-  assert.deepEqual(parseQuestions(raw), ["מה הקשר בין ביכורים לשמחה?", "למה דווקא בארץ?", "מי מביא?"]);
-  assert.deepEqual(parseQuestions("not json"), []);
-  assert.deepEqual(parseQuestions('{"questions":"x"}'), []);
+  const raw = JSON.stringify({
+    questions: {
+      he: ["  מה הקשר בין ביכורים לשמחה?  ", 7, "מה הקשר בין ביכורים לשמחה?", long, "", "למה דווקא בארץ?", "מי מביא?", "עוד אחת?"],
+      en: ["Why bring first fruits?"],
+      fr: [],
+      de: ["Warum?"],
+    },
+  });
+  // A language with nothing usable, and one we do not offer, are left out.
+  assert.deepEqual(parseQuestions(raw), {
+    he: ["מה הקשר בין ביכורים לשמחה?", "למה דווקא בארץ?", "מי מביא?"],
+    en: ["Why bring first fruits?"],
+  });
+  assert.deepEqual(parseQuestions("not json"), {});
+  assert.deepEqual(parseQuestions('{"questions":"x"}'), {});
+  // The old shape — one Hebrew list — is not what is asked for any more.
+  assert.deepEqual(parseQuestions('{"questions":["מה?","למה דווקא?"]}'), {});
 });
 
 const withModel = async (content, fn) => {
@@ -50,14 +66,15 @@ test("writes the lesson's questions from its summary, and the call is metered", 
     /FROM media_items m JOIN transcripts/.test(text) ? { rows: [{ title: "ש", ai_summary: "סיכום", ai_key_points: [] }] } : { rows: [] }
   );
   try {
-    await withModel(JSON.stringify({ questions: ["א?", "מה נאמר על ביכורים?", "למה בשמחה?"] }), async (calls) => {
+    const answer = { he: ["א?", "מה נאמר על ביכורים?", "למה בשמחה?"], en: ["What is said about first fruits?"] };
+    await withModel(JSON.stringify({ questions: answer }), async (calls) => {
       const questions = await generateSuggestedQuestions(9);
       // "א?" is too short to be a question worth a chip.
-      assert.deepEqual(questions, ["מה נאמר על ביכורים?", "למה בשמחה?"]);
+      assert.deepEqual(questions, { he: ["מה נאמר על ביכורים?", "למה בשמחה?"], en: ["What is said about first fruits?"] });
       assert.deepEqual(calls[0].response_format, { type: "json_object" });
     });
     const update = db.calls.find((c) => /UPDATE transcripts SET suggested_questions/.test(c.text));
-    assert.deepEqual(JSON.parse(update.params[1]), ["מה נאמר על ביכורים?", "למה בשמחה?"]);
+    assert.deepEqual(JSON.parse(update.params[1]), { he: ["מה נאמר על ביכורים?", "למה בשמחה?"], en: ["What is said about first fruits?"] });
     await new Promise((resolve) => setImmediate(resolve));
     assert.ok(db.calls.some((c) => /INSERT INTO ai_usage/.test(c.text) && c.params.includes("suggested_questions")));
   } finally {

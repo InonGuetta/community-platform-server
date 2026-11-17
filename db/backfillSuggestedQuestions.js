@@ -2,18 +2,22 @@
 import "dotenv/config";
 import { pool } from "./pool.js";
 import { generateSuggestedQuestions } from "../services/transcripts/questions.js";
+import { LANGUAGE_CODES } from "../lib/languages.js";
 
-// One-off: write suggested chat questions (PRD ASK-7, migration 045) for every
-// lesson summarised before the worker started writing them. Run with:
+// One-off: write suggested chat questions (PRD ASK-7) for every lesson that
+// does not have them in every interface language — summarised before the
+// worker started writing them (migration 045), or before it wrote them in all
+// five languages (migration 053). Run with:
 //
 //     npm run backfill:questions -- --dry     # lists the lessons, no OpenAI call
 //     npm run backfill:questions              # writes
 //
 // One gpt-4o call per lesson, from its summary — about a quarter of a cent
 // each, recorded in the admin's cost panel like any other call. Only lessons
-// with a summary and no questions yet: a second run changes nothing, and a
-// lesson the worker has done since is left alone. One at a time, so a large
-// archive stays inside the per-minute token limit.
+// with a summary and questions missing in some language: a second run changes
+// nothing, and a lesson the worker has done since is left alone. A lesson's
+// Hebrew questions are written afresh with the rest, so all five say the same.
+// One at a time, so a large archive stays inside the per-minute token limit.
 
 const DRY = process.argv.includes("--dry");
 
@@ -21,10 +25,12 @@ async function backfill() {
   const { rows: lessons } = await pool.query(
     `SELECT m.id, m.title
        FROM media_items m JOIN transcripts t ON t.media_id = m.id
-      WHERE t.ai_summary IS NOT NULL AND t.suggested_questions IS NULL
-      ORDER BY m.id`
+      WHERE t.ai_summary IS NOT NULL
+        AND (t.suggested_questions IS NULL OR NOT (t.suggested_questions ?& $1::text[]))
+      ORDER BY m.id`,
+    [LANGUAGE_CODES]
   );
-  console.log(`${DRY ? "[dry run — no OpenAI call, nothing written] " : ""}${lessons.length} lesson(s) without suggested questions.`);
+  console.log(`${DRY ? "[dry run — no OpenAI call, nothing written] " : ""}${lessons.length} lesson(s) without suggested questions in every language.`);
 
   let written = 0;
   for (const { id, title } of lessons) {
@@ -34,8 +40,9 @@ async function backfill() {
     }
     try {
       const questions = await generateSuggestedQuestions(id);
-      if (questions?.length) written += 1;
-      console.log(`  ✓ media ${id} "${title}": ${(questions ?? []).join(" | ") || "(none)"}`);
+      const languages = Object.keys(questions ?? {});
+      if (languages.length) written += 1;
+      console.log(`  ✓ media ${id} "${title}": ${languages.join(", ") || "(none)"}`);
     } catch (err) {
       console.log(`  ✗ media ${id} "${title}": ${err.message}`);
     }
