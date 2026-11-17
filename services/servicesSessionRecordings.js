@@ -23,7 +23,8 @@
 //   lessonFromRecording
 //                    the finished recording as a DRAFT lesson in the session's
 //                    course, the host as its lecturer, the chat copied on as
-//                    an appendix, and the pipeline started (PRD REC-2, REC-3)
+//                    an appendix (PRD REC-2, REC-3) — not transcribed until
+//                    the host presses "הפעל תמלול" on it
 //
 // Parts of a MediaRecorder recording are pieces of ONE stream: only the first
 // carries the container's header, and the parts joined in order are a valid
@@ -150,7 +151,7 @@ export const savePart = async ({ sessionId, recordingId, hostId, partNumber, bod
  * UPDATE first, so two callers (the host's "stop" and the end of the session
  * arriving together) cannot both join and store it.
  */
-const closeRecording = async (recording, lessonDeps = undefined) => {
+const closeRecording = async (recording) => {
   const claim = await pool.query(
     `UPDATE session_recordings SET status='failed', finished_at=NOW()
      WHERE id=$1 AND status='recording'
@@ -192,7 +193,7 @@ const closeRecording = async (recording, lessonDeps = undefined) => {
   );
   await removeParts(recording.id);
   logger.info(`[BE:svc] recording=${recording.id} ✓ finished, ${stored.parts} part(s), ${stored.bytes} bytes`);
-  const mediaId = await lessonFromRecording(rows[0], stored.durationSeconds, lessonDeps);
+  const mediaId = await lessonFromRecording(rows[0], stored.durationSeconds);
   return { ...rows[0], media_id: mediaId ?? rows[0].media_id };
 };
 
@@ -219,13 +220,6 @@ export const lessonTitle = (sessionTitle, part, parts) => {
   return `${base.slice(0, TITLE_MAX - suffix.length)}${suffix}`;
 };
 
-// Loaded when used, not at import: the pipeline opens the Bull queues (Redis
-// connections) the moment it is imported, and this module is imported by the
-// socket manager and the media controller — every process and test that loads
-// them would otherwise hold Redis connections open for nothing.
-const triggerPipelineLazily = async (mediaId) =>
-  (await import("./transcripts/pipeline.js")).triggerPipeline(mediaId);
-
 /**
  * Make the finished recording a lesson. Never throws — the recording is
  * already saved, and a failure here leaves it saved (and logged) rather than
@@ -233,14 +227,13 @@ const triggerPipelineLazily = async (mediaId) =>
  *
  * A DRAFT: participants agreed to be recorded, and the host decides whether
  * the result is shown — publishing it (the lesson's edit dialog) is what tells
- * the course's students, through the existing new-lesson notice. The pipeline
- * starts at once, so the lesson is transcribed and summarised by the time the
- * host looks at it.
+ * the course's students, through the existing new-lesson notice. Nothing is
+ * transcribed on its own: the host presses "הפעל תמלול" on the lesson when
+ * they want it (each run is a Whisper bill).
  * @param {any} recording  a finished row
  * @param {number|null} durationSeconds
- * @param {{ trigger: (mediaId: number) => Promise<any> }} [deps]  the tests' stand-in for the queue
  */
-export const lessonFromRecording = async (recording, durationSeconds, deps = { trigger: triggerPipelineLazily }) => {
+export const lessonFromRecording = async (recording, durationSeconds) => {
   try {
     const { rows: [session] } = await pool.query(
       `SELECT s.id, s.title, s.course_id, s.started_at, u.display_name AS host_name,
@@ -289,14 +282,6 @@ export const lessonFromRecording = async (recording, durationSeconds, deps = { t
     );
     logger.info(`[BE:svc] recording=${recording.id} ✓ lesson media=${media.id} (draft)`);
 
-    // Transcription and summary. Its own failure (Redis down, the monthly AI
-    // cap reached) leaves the lesson without a transcript and the host can
-    // press "תמלל" on it later — the lesson itself stands.
-    try {
-      await deps.trigger(media.id);
-    } catch (err) {
-      logger.warn(`[BE:svc] recording lesson media=${media.id} not queued for processing — ${err.message}`);
-    }
     return media.id;
   } catch (err) {
     logger.error(`[BE:svc] recording=${recording.id} saved, but no lesson was made — ${err.message}`);
@@ -345,12 +330,11 @@ export const getLessonChat = async (mediaId) => {
  * @param {number|string} sessionId
  * @param {number|string} recordingId
  * @param {number} hostId
- * @param {{ trigger: (mediaId: number) => Promise<any> }} [lessonDeps]  the smoke check's stand-in for the queue
  */
-export const finishRecording = async (sessionId, recordingId, hostId, lessonDeps = undefined) => {
+export const finishRecording = async (sessionId, recordingId, hostId) => {
   const recording = await recordingOfHost(recordingId, sessionId, hostId);
   if (recording.status !== "recording") return recording;
-  return closeRecording(recording, lessonDeps);
+  return closeRecording(recording);
 };
 
 /**

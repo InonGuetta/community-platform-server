@@ -1,6 +1,7 @@
 import "./setup.js";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import request from "supertest";
 import jwt from "jsonwebtoken";
 import { createApp } from "../app.js";
@@ -40,9 +41,8 @@ const db = ({ session = SESSION, failInsert = false } = {}) => {
 
 test("a finished recording becomes a draft lesson in the session's course, the host as its lecturer", async () => {
   const { stub, seen } = db();
-  const triggered = [];
   try {
-    const id = await lessonFromRecording(RECORDING, 1834, { trigger: async (mediaId) => { triggered.push(mediaId); } });
+    const id = await lessonFromRecording(RECORDING, 1834);
     assert.equal(id, 55);
     const [uploader, title, description, mediaType, s3Key, duration, , courseId, lecturerId, creator] = seen.media.params;
     assert.equal(uploader, 3);
@@ -60,26 +60,22 @@ test("a finished recording becomes a draft lesson in the session's course, the h
     assert.deepEqual(seen.link.params, [55, 7, 12]);
     assert.match(seen.link.text, /FROM session_recording_chat c[\s\S]+WHERE c\.recording_id = \$3/);
     assert.match(seen.link.text, /'offset'/);
-    assert.deepEqual(triggered, [55]);
   } finally {
     stub.restore();
   }
 });
 
-test("a lesson is made even when processing cannot be queued", async () => {
-  const { stub } = db();
-  try {
-    const id = await lessonFromRecording(RECORDING, null, { trigger: async () => { throw new Error("Redis down"); } });
-    assert.equal(id, 55);
-  } finally {
-    stub.restore();
-  }
+// Transcription costs money and is the host's choice: the recording's lesson
+// is not sent to the pipeline on its own.
+test("the lesson is not transcribed until someone asks", async () => {
+  const source = fs.readFileSync(new URL("../services/servicesSessionRecordings.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /triggerPipeline|transcriptionQueue/);
 });
 
 test("a failure to make the lesson never fails the recording", async () => {
   const { stub } = db({ failInsert: true });
   try {
-    assert.equal(await lessonFromRecording(RECORDING, null, { trigger: async () => {} }), null);
+    assert.equal(await lessonFromRecording(RECORDING, null), null);
   } finally {
     stub.restore();
   }

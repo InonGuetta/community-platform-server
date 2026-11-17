@@ -1145,15 +1145,14 @@ const checks = [
           if (answers.get(Number(guest.id)) !== false) throw new Error("a changed answer did not replace the first");
         }
         await saveChatMessage(recordingId, { id: host.id, displayName: "smoke" }, "שורה בצ'אט");
-        let queued = null;
-        const done = await finishRecording(session.id, recordingId, host.id, { trigger: async (id) => { queued = id; } });
+        const done = await finishRecording(session.id, recordingId, host.id);
         storedKey = done.s3_key;
         if (done.status !== "finished" || done.parts !== 2 || Number(done.bytes) !== 14) {
           throw new Error(`finished as ${done.status} with ${done.parts} part(s), ${done.bytes} bytes`);
         }
         const { rows: [after] } = await client.query("SELECT recording_s3_key FROM live_sessions WHERE id=$1", [session.id]);
         if (after.recording_s3_key !== done.s3_key) throw new Error("the session does not point at its recording");
-        if (!done.media_id || queued !== done.media_id) throw new Error("the recording did not become a lesson queued for processing");
+        if (!done.media_id) throw new Error("the recording did not become a lesson");
         const { rows: [lesson] } = await client.query("SELECT media_type, is_published, session_id FROM media_items WHERE id=$1", [done.media_id]);
         if (lesson.media_type !== "audio" || lesson.is_published || lesson.session_id !== session.id) {
           throw new Error(`the lesson is ${JSON.stringify(lesson)}`);
