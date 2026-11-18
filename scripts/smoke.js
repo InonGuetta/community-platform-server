@@ -25,6 +25,7 @@ import { getLatestConversation, countQuestionsToday, listConversations, deleteCo
 import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
+import { monthSmsReport, smsCountToNumber } from "../services/servicesSms.js";
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
@@ -1393,7 +1394,12 @@ const checks = [
       const { rows: [counts] } = await pool.query(
         "SELECT count(*) FILTER (WHERE phone_verified_at IS NOT NULL)::int AS verified FROM users"
       );
-      return `present; ${counts.verified} verified number(s)`;
+      // The SMS service's own reads — the month's report and the per-number
+      // count the verification rate limit asks. Read only; nothing is sent.
+      const report = await monthSmsReport();
+      const toOne = await smsCountToNumber("+972545550000", 60);
+      if (!Number.isInteger(toOne)) throw new Error("smsCountToNumber did not return a count");
+      return `present; ${counts.verified} verified number(s); SMS this month $${report.spentUsd.toFixed(2)} over ${report.byPurpose.length} purpose(s)`;
     },
   },
   {
