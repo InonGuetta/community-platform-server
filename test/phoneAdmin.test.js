@@ -74,3 +74,21 @@ test("the month's SMS cost, for an admin only", async () => {
     s2.restore();
   }
 });
+
+test("signing in returns the phone as getMe gives it, so the account page needs no reload", async () => {
+  const bcrypt = (await import("bcryptjs")).default;
+  const row = {
+    id: 8, email: "p@example.com", role: "student", is_active: true, password_hash: bcrypt.hashSync("correct-horse", 4),
+    phone_e164: "+972545551234", phone_verified_at: new Date(),
+  };
+  const s = stubPoolQuery(pool, (text) => (/FROM users WHERE email=\$1/.test(text) ? { rows: [row] } : { rows: [] }));
+  try {
+    const res = await request(app).post("/api/auth/login").send({ email: row.email, password: "correct-horse" });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.user.phone, "+972545551234");
+    assert.equal(res.body.user.phone_pending, null);
+    assert.ok(!("phone_e164" in res.body.user) && !("password_hash" in res.body.user));
+  } finally {
+    s.restore();
+  }
+});

@@ -240,8 +240,10 @@ export const login = async (email, password) => {
   if (!user || !valid) throw unauthorized("Invalid credentials", ERROR_CODES.INVALID_CREDENTIALS);
 
   const token = issueSessionToken(user);
-  const { password_hash, ...safeUser } = user;
-  return { user: safeUser, token };
+  // The phone in the shape getMe gives it (migration 054) — the client reads
+  // `phone`, and a sign-in through the form does not reload the page to ask.
+  const { password_hash, phone_e164: _e164, phone_verified_at: _verified, ...safeUser } = user;
+  return { user: { ...safeUser, ...phoneStateOf(user) }, token };
 };
 
 // ── Signing in through a provider: Google, Apple, LinkedIn ──────────────────
@@ -517,7 +519,7 @@ export const resetPassword = async (token, newPassword) => {
       `UPDATE users
        SET password_hash = $1, password_changed_at = NOW(), email_verified = TRUE
        WHERE id = $2
-       RETURNING id, email, role, display_name`,
+       RETURNING id, email, role, display_name, phone_e164, phone_verified_at`,
       [await bcrypt.hash(newPassword, 12), userId]
     );
 
@@ -536,8 +538,10 @@ export const resetPassword = async (token, newPassword) => {
   // token up again — it has just been burned, and a second lookup would find
   // nothing. Signing them straight in is also the point: sending someone back
   // to the login form to type the password they chose four seconds ago is a
-  // step that exists only because the flow was built in two halves.
-  return { user };
+  // step that exists only because the flow was built in two halves. With the
+  // phone, as getMe gives it, since the client takes this as the signed-in user.
+  const { phone_e164: _e164, phone_verified_at: _verified, ...account } = user;
+  return { user: { ...account, ...phoneStateOf(user) } };
 };
 
 // ── The signed-in user changing their own details ───────────────────────────

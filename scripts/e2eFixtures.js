@@ -3,6 +3,11 @@
 //
 //   node scripts/e2eFixtures.js setup             → prints { runId, admin }
 //   node scripts/e2eFixtures.js teardown <runId>  → deletes that run's data
+//   node scripts/e2eFixtures.js phone <runId>     → prints { phone } — a mobile
+//        number for this run, refused if any account outside the run has it
+//   node scripts/e2eFixtures.js phone-code <runId> <email>
+//        → prints { code } — puts a known code in place of the one an e2e
+//          account is waiting for (the real one went to the server's log)
 //
 // The journey under test starts with a lecturer signing up and an ADMIN
 // approving them, and an admin cannot be made through the app. So each run
@@ -79,12 +84,51 @@ const teardown = async (runId) => {
   out({ runId, users: removed, courses, media: media.length, notices });
 };
 
+// A phone number for this run (PRD AUTH-13): 054-5 and six digits from the
+// run id — and refused when any account outside this run has it, verified or
+// waiting, since proving a number another account verified MOVES it here.
+const runPhone = (runId) => `+972545${String(parseInt(runId.slice(0, 8), 16) % 1_000_000).padStart(6, "0")}`;
+const phone = async (runId) => {
+  if (!RUN_ID.test(runId ?? "")) throw new Error(`not a run id: ${runId}`);
+  const number = runPhone(runId);
+  const pattern = `e2e-%-${runId}@example.test`;
+  const { rows } = await pool.query(
+    `SELECT 1 FROM users WHERE phone_e164 = $1 AND email NOT LIKE $2
+     UNION ALL
+     SELECT 1 FROM phone_verifications v JOIN users u ON u.id = v.user_id
+      WHERE v.phone_e164 = $1 AND u.email NOT LIKE $2`,
+    [number, pattern]
+  );
+  if (rows.length) throw new Error(`${number} belongs to an account outside this run — not using it`);
+  out({ phone: number });
+};
+
+// Only an account of this run, and only the code it is already waiting for.
+const phoneCode = async (runId, email) => {
+  if (!RUN_ID.test(runId ?? "")) throw new Error(`not a run id: ${runId}`);
+  if (!new RegExp(`^e2e-[a-z]+-${runId}@example\\.test$`).test(email ?? "")) throw new Error(`not this run's account: ${email}`);
+  const { hashCode } = await import("../services/servicesPhone.js");
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const { rows } = await pool.query(
+    "SELECT v.user_id, v.phone_e164 FROM phone_verifications v JOIN users u ON u.id = v.user_id WHERE u.email = $1",
+    [email]
+  );
+  if (!rows[0]) throw new Error(`${email} is not waiting for a code`);
+  await pool.query("UPDATE phone_verifications SET code_hash = $1 WHERE user_id = $2", [
+    hashCode(rows[0].user_id, rows[0].phone_e164, code),
+    rows[0].user_id,
+  ]);
+  out({ code });
+};
+
 const main = async () => {
   if (env.isProduction) throw new Error("e2e fixtures never run against production");
-  const [command, runId] = process.argv.slice(2);
+  const [command, runId, extra] = process.argv.slice(2);
   if (command === "setup") await setup();
   else if (command === "teardown") await teardown(runId);
-  else throw new Error("usage: e2eFixtures.js setup | teardown <runId>");
+  else if (command === "phone") await phone(runId);
+  else if (command === "phone-code") await phoneCode(runId, extra);
+  else throw new Error("usage: e2eFixtures.js setup | teardown <runId> | phone <runId> | phone-code <runId> <email>");
 };
 
 main()
