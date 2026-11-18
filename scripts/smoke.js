@@ -1373,6 +1373,30 @@ const checks = [
     },
   },
   {
+    // A mobile number and SMS (migration 054): the columns and tables every
+    // phone and SMS path reads, and the index that keeps a verified number on
+    // one account. Existence only — the flows that use them are checked in the
+    // steps that call their services.
+    name: "phone numbers and SMS (migration 054)",
+    run: async () => {
+      const { rows: cols } = await pool.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'users' AND column_name IN ('phone_e164', 'phone_verified_at')`
+      );
+      if (cols.length !== 2) throw new Error("users.phone_e164 / phone_verified_at missing — migration 054 has not been applied");
+      const { rows: [tables] } = await pool.query(
+        `SELECT to_regclass('public.phone_verifications') AS v, to_regclass('public.notification_sms_optins') AS o,
+                to_regclass('public.sms_usage') AS u, to_regclass('public.users_verified_phone_unique') AS i`
+      );
+      const missing = Object.entries(tables).filter(([, v]) => !v).map(([k]) => k);
+      if (missing.length) throw new Error(`missing (${missing.join(", ")}) — migration 054 has not been applied`);
+      const { rows: [counts] } = await pool.query(
+        "SELECT count(*) FILTER (WHERE phone_verified_at IS NOT NULL)::int AS verified FROM users"
+      );
+      return `present; ${counts.verified} verified number(s)`;
+    },
+  },
+  {
     // The chat's starting questions are an object keyed by language (migration
     // 053). An array left behind is a lesson whose questions no reader would be
     // offered — the client reads arrays as Hebrew-only, but nothing writes them.
