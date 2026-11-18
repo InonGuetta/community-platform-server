@@ -82,6 +82,10 @@ const PUBLIC = new Set([
   // signed token in the body is the credential, and all it can do is turn mail
   // off (lib/unsubscribe.js).
   "post /api/notifications/unsubscribe",
+  // Twilio, server to server, when somebody replies to the platform's number.
+  // It authenticates by signature, which the controller checks before anything
+  // else (lib/sms.js → verifyTwilioSignature), and all it can do is turn SMS off.
+  "post /api/sms/inbound",
   // A lesson its manager made public (PRD COM-3b), opened from a shared link by
   // someone with no account. Each answers only for a public, published lesson —
   // the row decides, and every other id is a 404 (test/publicLessons.test.js).

@@ -58,7 +58,7 @@ test("with onceBy, somebody who already has it for the same value is skipped", a
     await deliver([1], NOTIFICATION_TYPES.NEW_LESSON, { mediaId: 3 }, { onceBy: "mediaId" });
     const insert = stub.calls.find((c) => INSERT.test(c.text));
     assert.match(insert.text, /NOT EXISTS \(\s*SELECT 1 FROM notifications n/);
-    assert.deepEqual(insert.params.slice(4), ["mediaId", "3"]);
+    assert.deepEqual(insert.params.slice(4, 6), ["mediaId", "3"]);
   } finally {
     stub.restore();
   }
@@ -279,7 +279,7 @@ test("a new lesson goes to the course's students, not its uploader, once each", 
     assert.deepEqual(enrolled.params, [5, 2]);
     const insert = stub.calls.find((c) => INSERT.test(c.text));
     assert.equal(insert.params[1], "new_lesson");
-    assert.deepEqual(insert.params.slice(4), ["mediaId", "3"]);
+    assert.deepEqual(insert.params.slice(4, 6), ["mediaId", "3"]);
   } finally {
     stub.restore();
   }
@@ -356,12 +356,16 @@ test("the preferences offer a student only the mail a student can get", async ()
     const res = await request(app).get("/api/notifications/preferences").set("Cookie", cookie);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.categories, [
-      { key: "sessions", email: false },
-      { key: "new_lessons", email: true },
+      // `sms` is null where an SMS never goes (migration 054).
+      { key: "sessions", email: false, sms: false },
+      { key: "new_lessons", email: true, sms: null },
       // The answer to a request to join a course by its code (PRD ROST-9).
-      { key: "enrolments", email: true },
+      { key: "enrolments", email: true, sms: false },
+      // One's own account: a phone number taken by another account.
+      { key: "account", email: true, sms: null },
     ]);
     assert.equal(res.body.allOff, false);
+    assert.equal(res.body.phoneVerified, false);
   } finally {
     stub.restore();
   }

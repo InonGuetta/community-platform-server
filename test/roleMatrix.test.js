@@ -73,6 +73,8 @@ const MATRIX = {
   "post /api/auth/me/phone": ANY,
   "post /api/auth/me/phone/verify": ANY,
   "delete /api/auth/me/phone": ANY,
+  // Twilio's reply webhook: signed, not signed in (lib/sms.js).
+  "post /api/sms/inbound": PUBLIC,
   "post /api/auth/change-password": ANY,
   // Asking is open to everyone; granting is under /api/users, admin-only.
   "post /api/auth/request-role": ANY,

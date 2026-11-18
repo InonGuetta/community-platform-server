@@ -228,7 +228,7 @@ const givenPending = ({ attempts = 0, expired = false, movedFrom = null } = {}) 
   const db = stubPoolQuery(pool, (text) =>
     isAuth(text) ? { rows: [USER] } : { rows: [{ phone_e164: PHONE, phone_verified_at: new Date(), phone_pending: null }] });
   restores.push(tx.restore, db.restore);
-  return tx;
+  return Object.assign(tx, { db });
 };
 
 test("a wrong code spends an attempt — and the count is committed, not rolled back", async () => {
@@ -293,6 +293,12 @@ test("a number verified on another account moves here, and that account loses it
   assert.ok(moved >= 0 && moved < taken, "the other account lets go before this one takes it");
   const optOut = tx.calls.find((c) => /DELETE FROM notification_sms_optins/.test(c.text));
   assert.deepEqual(optOut.params, [77]);
+  // And it is told why its SMS stopped — with the number masked, never whole.
+  const told = tx.db.calls.find((c) => /INSERT INTO notifications/.test(c.text));
+  assert.deepEqual(told.params[0], [77]);
+  assert.equal(told.params[1], "phone_moved");
+  assert.equal(JSON.parse(told.params[2]).phone, "+972•••••1234");
+  assert.ok(!JSON.stringify(tx.db.calls.map((c) => c.params)).includes(PHONE.slice(4)), "the whole number is in no notification");
 });
 
 test("removing the number clears it, a waiting code and every SMS choice, together", async () => {

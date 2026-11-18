@@ -109,6 +109,11 @@
         "approved": "Your request to join the course \"{{course}}\" was approved. Its lessons are open to you now.",
         "rejected": "Your request to join the course \"{{course}}\" was not approved. If this is a mistake, contact the lecturer.",
         "myCourses": "To my courses"
+      },
+      "phone": {
+        "subject": "Your phone number was removed from your account",
+        "body": "The number {{phone}} was just verified on another account, so it was removed from yours and your SMS notifications are off. If that was not you, you can add the number again on your account page.",
+        "link": "My account"
       }
     },
     "unsubscribe": {
@@ -117,6 +122,15 @@
     }
   },
   "sms": {
-    "code": "Your verification code: {{code}}. Do not share it with anyone."
+    "code": "Your verification code: {{code}}. Do not share it with anyone.",
+    "notify": {
+      "session_scheduled": "Session scheduled: \"{{title}}\", {{when}}",
+      "session_reminder": "The session \"{{title}}\" starts in about 15 minutes",
+      "session_starting": "The session \"{{title}}\" has started",
+      "processing_done": "Processing of \"{{title}}\" is done",
+      "processing_error": "Processing of \"{{title}}\" failed",
+      "course_join_approved": "You were accepted to the course \"{{title}}\"",
+      "course_join_rejected": "Your request to join \"{{title}}\" was not approved"
+    }
   }
 }

@@ -18,11 +18,25 @@
 // worker after status='done' would make Bull retry a finished job and pay OpenAI
 // for it again. So nothing exported here throws; it logs, without anybody's
 // address, and reports what it managed.
+//
+// ── SMS (PRD AUTH-13, migration 054) ────────────────────────────────────────
+//
+// The same event may also go by SMS — the third channel, beside the bell and
+// the mail — to a person who verified a mobile number AND turned SMS on for its
+// category. The reverse of mail: mail is on until turned off
+// (notification_email_optouts), SMS off until turned on
+// (notification_sms_optins), because an SMS costs money and reaches a phone in
+// a pocket. Only the categories in SMS_CATEGORIES can go by SMS at all, and
+// none of them between 22:00 and 07:00 Israel time but a session that has just
+// started (QUIET_HOURS) — a message the night swallows is not sent later; the
+// bell and the mail still have it.
 import { pool } from "../db/pool.js";
 import { logger } from "../lib/logger.js";
 import { sendNotificationEmail } from "../lib/mailer.js";
 import { signUnsubscribeToken } from "../lib/unsubscribe.js";
+import { notificationSms } from "../lib/smsText.js";
 import { getSessionSchedule } from "./servicesSessions.js";
+import { sendSms, smsRefusedByCap } from "./servicesSms.js";
 
 export const NOTIFICATION_TYPES = Object.freeze({
   // To every admin: somebody asked to be a lecturer or an admin (REG-11).
@@ -43,6 +57,9 @@ export const NOTIFICATION_TYPES = Object.freeze({
   COURSE_JOIN_REQUEST: "course_join_request",
   COURSE_JOIN_APPROVED: "course_join_approved",
   COURSE_JOIN_REJECTED: "course_join_rejected",
+  // To an account whose verified number another account has just proved — and
+  // so taken (services/servicesPhone.js). The number in the payload is masked.
+  PHONE_MOVED: "phone_moved",
 });
 
 // What a person decides about (NOTIF-6) — the mail for a CATEGORY, not for each
@@ -59,7 +76,32 @@ export const EMAIL_CATEGORIES = Object.freeze({
   join_requests: { types: ["course_join_request"], roles: ["lecturer", "admin"] },
   // Every role: a lecturer may join a colleague's course too (PRD D6).
   enrolments: { types: ["course_join_approved", "course_join_rejected"], roles: ["student", "lecturer", "admin"] },
+  // One's own account: a phone number taken by another account.
+  account: { types: ["phone_moved"], roles: ["student", "lecturer", "admin"] },
 });
+
+// The categories an SMS may carry — what is worth a message to a phone: a
+// session about to happen, one's own lesson finished, an answer about joining
+// a course. Not a new lesson (a course can publish ten in an evening), not the
+// requests waiting for a lecturer or an admin, not the account notice (the
+// number it is about has just left).
+export const SMS_CATEGORIES = Object.freeze(["sessions", "processing", "enrolments"]);
+export const isSmsCategory = (category) => category === ALL_CATEGORIES || SMS_CATEGORIES.includes(category);
+
+// No SMS from 22:00 until 07:00, Israel time, but these.
+export const QUIET_HOURS = Object.freeze({ from: 22, until: 7, exempt: ["session_starting"] });
+const israelHour = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Jerusalem", hour: "numeric", hourCycle: "h23" });
+
+/** Whether an SMS of this type may go out at this moment. @param {string} type @param {Date} [now] */
+export const smsAllowedNow = (type, now = new Date()) => {
+  if (QUIET_HOURS.exempt.includes(type)) return true;
+  const hour = Number(israelHour.format(now));
+  return !(hour >= QUIET_HOURS.from || hour < QUIET_HOURS.until);
+};
+
+// The provider's answer when the number replied STOP to this sender
+// (lib/sms.js). It will refuse every later message, so SMS is turned off.
+const PROVIDER_UNSUBSCRIBED = 21610;
 
 // "Stop all of it", from the unsubscribe page. One row, so it also covers any
 // category added after it was written.
@@ -87,7 +129,9 @@ export const LIST_LIMIT = 30;
  *     value is skipped. A lesson unpublished and republished is one lesson, and
  *     its students hear about it once;
  *   · whether to mail is read from their opt-outs (migration 036) — the row
- *     comes back with `mail` already decided.
+ *     comes back with `mail` already decided;
+ *   · whether to send an SMS, and where: `sms_to` is their verified number
+ *     when they turned SMS on for this category (migration 054), else null.
  *
  * @param {number[]} userIds
  * @param {string} type     one of NOTIFICATION_TYPES
@@ -100,6 +144,8 @@ export const deliver = async (userIds, type, payload = {}, { onceBy, attachments
   if (ids.length === 0) return 0;
   const category = categoryOf(type);
   const onceValue = onceBy ? String(payload[onceBy] ?? "") : null;
+  // Asked of the database only when an SMS could go at all.
+  const smsPossible = SMS_CATEGORIES.includes(category) && smsAllowedNow(type);
   try {
     // Every parameter that appears twice carries an explicit cast. Postgres
     // deduces a parameter's type from each place it is used, and $2 is both a
@@ -120,9 +166,31 @@ export const deliver = async (userIds, type, payload = {}, { onceBy, attachments
          NOT EXISTS (
            SELECT 1 FROM notification_email_optouts o
            WHERE o.user_id = notifications.user_id AND o.category IN ($4::text, '${ALL_CATEGORIES}')
-         ) AS mail`,
-      [ids, type, JSON.stringify(payload), category, onceBy ?? null, onceValue]
+         ) AS mail,
+         (SELECT p.phone_e164 FROM users p
+           WHERE p.id = notifications.user_id AND $7::boolean
+             AND p.phone_verified_at IS NOT NULL
+             AND EXISTS (
+               SELECT 1 FROM notification_sms_optins s WHERE s.user_id = p.id AND s.category = $4::text
+             )
+         ) AS sms_to`,
+      [ids, type, JSON.stringify(payload), category, onceBy ?? null, onceValue, smsPossible]
     );
+
+    // The SMS first: the one that is urgent ("the session has started") must
+    // not wait behind a mail to every other recipient. The month's cap is read
+    // once for the whole audience — a notice to three hundred students may
+    // overshoot it by that notice, and then the next one is refused. One at a
+    // time, as the mail below; sendSms never throws.
+    const smsRows = rows.filter((row) => row.sms_to);
+    if (smsRows.length > 0 && (await smsRefusedByCap(category ?? type)) === null) {
+      for (const row of smsRows) {
+        const body = notificationSms(type, payload, row.locale);
+        if (!body) continue;
+        const sent = await sendSms({ userId: row.user_id, to: row.sms_to, body, purpose: category ?? type }, { capChecked: true });
+        if (sent.providerCode === PROVIDER_UNSUBSCRIBED) await stopSms(row.user_id, "replied STOP to the sender");
+      }
+    }
 
     // One at a time rather than all at once: an SMTP relay rate-limits a burst,
     // and sendMail never throws, so a failure costs one message, not the rest.
@@ -415,6 +483,72 @@ export const getEmailOptOuts = async (userId) => {
     [userId]
   );
   return rows.map((row) => row.category);
+};
+
+/** The categories this user has turned SMS on for. */
+export const getSmsOptIns = async (userId) => {
+  const { rows } = await pool.query(
+    "SELECT category FROM notification_sms_optins WHERE user_id = $1 ORDER BY category",
+    [userId]
+  );
+  return rows.map((row) => row.category);
+};
+
+/**
+ * Turn one category's SMS on or off — or, with ALL_CATEGORIES, every SMS
+ * category: on, those the user's role can receive; off, every row they have,
+ * whatever role they held when they turned it on. Idempotent both ways.
+ *
+ * Turning on needs a verified number, asked in the same statement as the
+ * INSERT and under a share lock on the user's row: removePhone's UPDATE of that
+ * row waits for it (and then deletes these rows), or it waits for removePhone
+ * and finds no number — either way no choice outlives the number.
+ *
+ * @param {{ id: number, role: string }} user
+ * @param {string} category  one of SMS_CATEGORIES, or ALL_CATEGORIES
+ * @param {boolean} wantsSms
+ * @returns {Promise<boolean>} false when SMS was asked for without a verified number
+ */
+export const setSmsPreference = async (user, category, wantsSms) => {
+  if (!wantsSms) {
+    if (category === ALL_CATEGORIES) {
+      await pool.query("DELETE FROM notification_sms_optins WHERE user_id = $1", [user.id]);
+    } else {
+      await pool.query("DELETE FROM notification_sms_optins WHERE user_id = $1 AND category = $2", [user.id, category]);
+    }
+    return true;
+  }
+  const categories = category === ALL_CATEGORIES
+    ? SMS_CATEGORIES.filter((key) => EMAIL_CATEGORIES[key].roles.includes(user.role))
+    : [category];
+  const { rows } = await pool.query(
+    `WITH verified AS (
+       SELECT id FROM users
+        WHERE id = $1 AND is_active = TRUE AND phone_verified_at IS NOT NULL
+        FOR SHARE
+     ), added AS (
+       INSERT INTO notification_sms_optins (user_id, category)
+       SELECT v.id, c FROM verified v CROSS JOIN unnest($2::text[]) AS c
+       ON CONFLICT (user_id, category) DO NOTHING
+     )
+     SELECT count(*)::int AS verified FROM verified`,
+    [user.id, categories]
+  );
+  return (rows[0]?.verified ?? 0) > 0;
+};
+
+/**
+ * Every SMS off for one user — the provider says the number replied STOP, or a
+ * STOP arrived on the inbound webhook. Never throws.
+ * @param {number} userId @param {string} why for the log
+ */
+export const stopSms = async (userId, why) => {
+  try {
+    await pool.query("DELETE FROM notification_sms_optins WHERE user_id = $1", [userId]);
+    logger.info(`[notify] SMS turned off for user ${userId}: ${why}`);
+  } catch (err) {
+    logger.warn(`[notify] could not turn SMS off for user ${userId}: ${err.message}`);
+  }
 };
 
 /**

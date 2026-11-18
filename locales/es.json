@@ -109,6 +109,11 @@
         "approved": "Tu solicitud para unirte al curso «{{course}}» fue aprobada. Sus clases ya están abiertas para ti.",
         "rejected": "Tu solicitud para unirte al curso «{{course}}» no fue aprobada. Si es un error, contacta con el profesor.",
         "myCourses": "A mis cursos"
+      },
+      "phone": {
+        "subject": "Se quitó el número de teléfono de tu cuenta",
+        "body": "El número {{phone}} se acaba de verificar en otra cuenta, así que se quitó de la tuya y tus notificaciones por SMS están desactivadas. Si no fuiste tú, puedes volver a añadir el número en la página de tu cuenta.",
+        "link": "Mi cuenta"
       }
     },
     "unsubscribe": {
@@ -117,6 +122,15 @@
     }
   },
   "sms": {
-    "code": "Tu código de verificación: {{code}}. No lo compartas con nadie."
+    "code": "Tu código de verificación: {{code}}. No lo compartas con nadie.",
+    "notify": {
+      "session_scheduled": "Sesión programada: \"{{title}}\", {{when}}",
+      "session_reminder": "La sesión \"{{title}}\" empieza en unos 15 minutos",
+      "session_starting": "La sesión \"{{title}}\" ha empezado",
+      "processing_done": "El procesamiento de \"{{title}}\" ha terminado",
+      "processing_error": "El procesamiento de \"{{title}}\" ha fallado",
+      "course_join_approved": "Te aceptaron en el curso \"{{title}}\"",
+      "course_join_rejected": "Tu solicitud para unirte a \"{{title}}\" no fue aprobada"
+    }
   }
 }

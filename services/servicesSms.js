@@ -119,11 +119,15 @@ export const smsRefusedByCap = async (purpose) => (await capRefusal(purpose))?.s
  * @param {{ userId: number | null, to: string, body: string, purpose: string }} message
  *   `purpose` is "verification" or a notification category — what the admin's
  *   screen groups by.
+ * @param {{ capChecked?: boolean }} [options] `capChecked`: the caller read the
+ *   cap for a whole batch (deliver), so it is not read again per message
  * @returns {Promise<{ status: "sent" | "logged" | "failed" | "capped", segments: number, providerCode?: number | null }>}
  */
-export const sendSms = async ({ userId, to, body, purpose }) => {
-  const refused = await capRefusal(purpose);
-  if (refused) return refused;
+export const sendSms = async ({ userId, to, body, purpose }, { capChecked = false } = {}) => {
+  if (!capChecked) {
+    const refused = await capRefusal(purpose);
+    if (refused) return refused;
+  }
   let id = null;
   try {
     id = await reserveSms(pool, { userId, to, purpose });

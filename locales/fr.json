@@ -109,6 +109,11 @@
         "approved": "Votre demande d'inscription au cours « {{course}} » a été acceptée. Ses leçons vous sont maintenant ouvertes.",
         "rejected": "Votre demande d'inscription au cours « {{course}} » n'a pas été acceptée. S'il s'agit d'une erreur, contactez l'enseignant.",
         "myCourses": "Vers mes cours"
+      },
+      "phone": {
+        "subject": "Votre numéro de téléphone a été retiré de votre compte",
+        "body": "Le numéro {{phone}} vient d'être vérifié sur un autre compte : il a donc été retiré du vôtre et vos notifications par SMS sont désactivées. Si ce n'était pas vous, vous pouvez ajouter le numéro à nouveau sur la page de votre compte.",
+        "link": "Mon compte"
       }
     },
     "unsubscribe": {
@@ -117,6 +122,15 @@
     }
   },
   "sms": {
-    "code": "Votre code de vérification : {{code}}. Ne le partagez avec personne."
+    "code": "Votre code de vérification : {{code}}. Ne le partagez avec personne.",
+    "notify": {
+      "session_scheduled": "Séance prévue : \"{{title}}\", {{when}}",
+      "session_reminder": "La séance \"{{title}}\" commence dans environ 15 minutes",
+      "session_starting": "La séance \"{{title}}\" a commencé",
+      "processing_done": "Le traitement de \"{{title}}\" est terminé",
+      "processing_error": "Le traitement de \"{{title}}\" a échoué",
+      "course_join_approved": "Vous avez été accepté au cours \"{{title}}\"",
+      "course_join_rejected": "Votre demande pour rejoindre \"{{title}}\" n'a pas été acceptée"
+    }
   }
 }

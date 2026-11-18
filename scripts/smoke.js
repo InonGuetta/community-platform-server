@@ -22,7 +22,7 @@ import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
 import { searchArchive, getArchiveConversation, ARCHIVE_PASSAGES, PER_LESSON_MAX } from "../services/discussion/archive.js";
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
-import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
+import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver, setSmsPreference, getSmsOptIns } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
 import { monthSmsReport, recentVerificationSends } from "../services/servicesSms.js";
@@ -1446,6 +1446,12 @@ const checks = [
         await client.query(
           "INSERT INTO notification_sms_optins (user_id, category) VALUES ($1, 'sessions') ON CONFLICT DO NOTHING", [holder]
         );
+        // This check sends notifications; where mail is configured they must not
+        // reach anybody. 'all' off for both, inside the transaction.
+        await client.query(
+          "INSERT INTO notification_email_optouts (user_id, category) SELECT unnest($1::int[]), 'all' ON CONFLICT DO NOTHING",
+          [[holder, taker]]
+        );
 
         // @ts-ignore — a stand-in for the duration of this check only
         pool.query = inner.query;
@@ -1468,9 +1474,27 @@ const checks = [
           [holder]
         );
         if (before.phone_e164 !== null || before.optins !== 0) throw new Error("the previous holder kept the number or its SMS choices");
+        const { rows: told } = await client.query(
+          "SELECT payload FROM notifications WHERE user_id = $1 AND type = 'phone_moved'", [holder]
+        );
+        if (told.length !== 1) throw new Error("the previous holder was not told the number moved");
+
+        // SMS on for one category, and a notification of it goes by SMS: the
+        // deliver() statement's sms_to, read with its $7::boolean, on real rows.
+        if (!(await setSmsPreference({ id: taker, role: "student" }, "sessions", true))) {
+          throw new Error("a verified number could not turn SMS on");
+        }
+        if (!(await getSmsOptIns(taker)).includes("sessions")) throw new Error("the SMS choice was not kept");
+        const countSms = async () =>
+          (await client.query("SELECT count(*)::int AS n FROM sms_usage WHERE user_id = $1", [taker])).rows[0].n;
+        const smsBefore = await countSms();
+        await deliver([taker], "session_starting", { sessionId: 0, title: "__smoke" });
+        if ((await countSms()) !== smsBefore + 1) throw new Error("deliver did not send the SMS to a verified, opted-in number");
+
         const removed = await removePhone(taker);
         if (removed.phone !== null) throw new Error("removing left the number");
-        return "code sent (to the log), wrong one counted, right one moved the number, removed (rolled back)";
+        if ((await getSmsOptIns(taker)).length) throw new Error("removing the number left SMS choices");
+        return "code sent (to the log), wrong one counted, right one moved the number and told its holder, SMS on and sent, removed (rolled back)";
       } finally {
         pool.query = original.query;
         pool.connect = original.connect;

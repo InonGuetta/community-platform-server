@@ -37,7 +37,8 @@ import { env } from "../lib/env.js";
 import { AppError, notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { forLocale } from "../lib/i18n.js";
 import { reserveSms, transmitReserved, smsRefusedByCap, recentVerificationSends } from "./servicesSms.js";
-import { phoneHash } from "../lib/phone.js";
+import { phoneHash, maskPhone } from "../lib/phone.js";
+import { notify, NOTIFICATION_TYPES } from "./servicesNotifications.js";
 
 export const CODE_TTL_MINUTES = 10;
 export const MAX_ATTEMPTS = 5;
@@ -234,7 +235,28 @@ export const verifyPhoneCode = async (userId, code) => {
   if (outcome.refusal === "wrong") {
     throw badRequest("Wrong code", ERROR_CODES.PHONE_CODE_INVALID, { attemptsLeft: outcome.attemptsLeft ?? 0 });
   }
-  return { state: await getPhoneState(userId), movedFrom: outcome.movedFrom ?? null };
+  const state = await getPhoneState(userId);
+  const movedFrom = outcome.movedFrom ?? null;
+  // The account that lost the number hears why its SMS stopped — by the bell and
+  // by mail, never by SMS: the number is no longer theirs. notify never throws.
+  if (movedFrom !== null && state.phone) {
+    await notify(movedFrom, NOTIFICATION_TYPES.PHONE_MOVED, { phone: maskPhone(state.phone) });
+  }
+  return { state, movedFrom };
+};
+
+/**
+ * The account holding this number verified — at most one, by the unique index;
+ * a list so a caller need not care.
+ * @param {string} e164
+ * @returns {Promise<number[]>}
+ */
+export const accountsWithVerifiedPhone = async (e164) => {
+  const { rows } = await pool.query(
+    "SELECT id FROM users WHERE phone_e164 = $1 AND phone_verified_at IS NOT NULL",
+    [e164]
+  );
+  return rows.map((row) => row.id);
 };
 
 /**

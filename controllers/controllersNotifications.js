@@ -1,6 +1,8 @@
 // @ts-check
 import * as servicesNotifications from "../services/servicesNotifications.js";
-import { notFound, badRequest } from "../lib/AppError.js";
+import { notFound, badRequest, ERROR_CODES } from "../lib/AppError.js";
+import { requireOneChannel, requireCategory } from "../lib/validate.js";
+import { getPhoneState } from "../services/servicesPhone.js";
 import { readUnsubscribeToken } from "../lib/unsubscribe.js";
 import { isAdmin } from "../lib/permissions.js";
 
@@ -36,19 +38,42 @@ export const markAllRead = async (req, res) => {
 //
 // Which mail this user can receive at all (by role) and which of it they have
 // turned off. The bell is not switchable — see EMAIL_CATEGORIES.
+//
+// And, per category, whether it goes by SMS (migration 054): `sms` is a boolean
+// for a category an SMS can carry, null for one it cannot. `phoneVerified`
+// says whether turning SMS on can work yet.
 export const getPreferences = async (req, res) => {
-  const optedOut = new Set(await servicesNotifications.getEmailOptOuts(req.user.id));
+  const [optOuts, optIns, phone] = await Promise.all([
+    servicesNotifications.getEmailOptOuts(req.user.id),
+    servicesNotifications.getSmsOptIns(req.user.id),
+    getPhoneState(req.user.id),
+  ]);
+  const optedOut = new Set(optOuts);
+  const smsOn = new Set(optIns);
   const categories = Object.entries(servicesNotifications.EMAIL_CATEGORIES)
     .filter(([, c]) => c.roles.includes(req.user.role))
-    .map(([key]) => ({ key, email: !optedOut.has(key) }));
-  res.status(200).json({ categories, allOff: optedOut.has(servicesNotifications.ALL_CATEGORIES) });
+    .map(([key]) => ({
+      key,
+      email: !optedOut.has(key),
+      sms: servicesNotifications.SMS_CATEGORIES.includes(key) ? smsOn.has(key) : null,
+    }));
+  res.status(200).json({
+    categories,
+    allOff: optedOut.has(servicesNotifications.ALL_CATEGORIES),
+    phoneVerified: Boolean(phone.phone),
+  });
 };
 
 export const setPreference = async (req, res) => {
-  const { category, email } = req.body ?? {};
-  if (!servicesNotifications.isEmailCategory(category)) throw badRequest("Unknown notification category");
-  if (typeof email !== "boolean") throw badRequest("email must be a boolean");
-  await servicesNotifications.setEmailPreference(req.user.id, category, email);
+  const { channel, on } = requireOneChannel(req.body);
+  if (channel === "email") {
+    const category = requireCategory(req.body.category, servicesNotifications.isEmailCategory, "Unknown notification category");
+    await servicesNotifications.setEmailPreference(req.user.id, category, on);
+    return res.status(204).end();
+  }
+  const category = requireCategory(req.body.category, servicesNotifications.isSmsCategory, "This category is not sent by SMS");
+  const done = await servicesNotifications.setSmsPreference(req.user, category, on);
+  if (!done) throw badRequest("No verified phone number", ERROR_CODES.PHONE_NOT_VERIFIED);
   res.status(204).end();
 };
 
