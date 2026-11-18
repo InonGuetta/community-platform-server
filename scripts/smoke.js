@@ -25,7 +25,9 @@ import { getLatestConversation, countQuestionsToday, listConversations, deleteCo
 import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
-import { monthSmsReport, smsCountToNumber } from "../services/servicesSms.js";
+import { monthSmsReport, recentVerificationSends } from "../services/servicesSms.js";
+import { getPhoneState, startPhoneVerification, verifyPhoneCode, removePhone, hashCode as hashPhoneCode } from "../services/servicesPhone.js";
+import { smsConfigured as smsConfiguredSmoke } from "../lib/sms.js";
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
@@ -1397,9 +1399,84 @@ const checks = [
       // The SMS service's own reads — the month's report and the per-number
       // count the verification rate limit asks. Read only; nothing is sent.
       const report = await monthSmsReport();
-      const toOne = await smsCountToNumber("+972545550000", 60);
-      if (!Number.isInteger(toOne)) throw new Error("smsCountToNumber did not return a count");
+      const toOne = await recentVerificationSends({ to: "+972545550000" }, 60);
+      const byOne = await recentVerificationSends({ userId: 1 }, 60);
+      if (!Number.isInteger(toOne.count) || !Number.isInteger(byOne.waitMinutes)) {
+        throw new Error("recentVerificationSends did not return counts");
+      }
+      // The account page's read: the verified number and one still waiting.
+      const { rows: [anyone] } = await pool.query("SELECT id FROM users WHERE is_active = TRUE LIMIT 1");
+      if (anyone) {
+        const state = await getPhoneState(anyone.id);
+        if (!("phone" in state) || !("phone_pending" in state)) throw new Error("getPhoneState is missing a field");
+      }
       return `present; ${counts.verified} verified number(s); SMS this month $${report.spentUsd.toFixed(2)} over ${report.byPurpose.length} purpose(s)`;
+    },
+  },
+  {
+    // AUTH-13: a code sent, a wrong one counted, the right one taking a number
+    // that ANOTHER account had verified — through the real SQL, on one client
+    // inside a transaction that is always rolled back (the savepoint routing of
+    // the join check above). The ON CONFLICT upsert, make_interval and the
+    // move-then-take order under the unique index are what only a real database
+    // can judge. Only in log mode: smoke must never send a real SMS.
+    name: "verifying a phone number (migration 054)",
+    run: async () => {
+      if (smsConfiguredSmoke()) return "skipped — an SMS provider is configured, and smoke sends nothing real";
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_phone");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_phone");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_phone");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        const { rows: two } = await client.query("SELECT id FROM users WHERE is_active ORDER BY id LIMIT 2");
+        if (two.length < 2) return "skipped — needs two accounts";
+        const [holder, taker] = two.map((r) => r.id);
+        // A number nobody has, verified on the first account inside the transaction.
+        const number = "+972545550101";
+        await client.query("UPDATE users SET phone_e164 = NULL, phone_verified_at = NULL WHERE phone_e164 = $1", [number]);
+        await client.query("UPDATE users SET phone_e164 = $1, phone_verified_at = NOW() WHERE id = $2", [number, holder]);
+        await client.query(
+          "INSERT INTO notification_sms_optins (user_id, category) VALUES ($1, 'sessions') ON CONFLICT DO NOTHING", [holder]
+        );
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const waiting = await startPhoneVerification(taker, number);
+        if (waiting.phone_pending !== number) throw new Error("the number is not waiting for its code");
+        // The code went to the log; put a known one in its place.
+        await client.query("UPDATE phone_verifications SET code_hash = $1 WHERE user_id = $2", [hashPhoneCode(taker, number, "123456"), taker]);
+        const wrong = await verifyPhoneCode(taker, "000000").then(() => null, (err) => err);
+        if (wrong?.code !== "PHONE_CODE_INVALID") throw new Error(`a wrong code answered ${wrong?.code ?? "success"}`);
+        const { rows: [counted] } = await client.query("SELECT attempts FROM phone_verifications WHERE user_id = $1", [taker]);
+        if (counted?.attempts !== 1) throw new Error("the wrong attempt was not counted");
+
+        const { state, movedFrom } = await verifyPhoneCode(taker, "123456");
+        if (state.phone !== number || movedFrom !== holder) throw new Error("the right code did not move the number");
+        const { rows: [before] } = await client.query(
+          "SELECT phone_e164, (SELECT count(*)::int FROM notification_sms_optins WHERE user_id = $1) AS optins FROM users WHERE id = $1",
+          [holder]
+        );
+        if (before.phone_e164 !== null || before.optins !== 0) throw new Error("the previous holder kept the number or its SMS choices");
+        const removed = await removePhone(taker);
+        if (removed.phone !== null) throw new Error("removing left the number");
+        return "code sent (to the log), wrong one counted, right one moved the number, removed (rolled back)";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
     },
   },
   {

@@ -115,5 +115,8 @@
       "text": "To stop emails of this kind: {{link}}",
       "link": "Stop emails of this kind"
     }
+  },
+  "sms": {
+    "code": "Your verification code: {{code}}. Do not share it with anyone."
   }
 }

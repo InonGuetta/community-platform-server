@@ -115,5 +115,8 @@
       "text": "Pour ne plus recevoir d'e-mails de ce type : {{link}}",
       "link": "Ne plus recevoir d'e-mails de ce type"
     }
+  },
+  "sms": {
+    "code": "Votre code de vérification : {{code}}. Ne le partagez avec personne."
   }
 }

@@ -5,6 +5,7 @@ import passport from "../config/passport.js";
 import { verifyToken } from "../middleware/auth.js";
 import * as controllersAuth from "../controllers/controllersAuth.js";
 import * as controllersAvatars from "../controllers/controllersAvatars.js";
+import * as controllersPhone from "../controllers/controllersPhone.js";
 import multer from "multer";
 import { userRateLimit } from "../middleware/userRateLimit.js";
 import { validateIntParam } from "../middleware/validateIntParam.js";
@@ -93,6 +94,19 @@ router.delete("/me/avatar", verifyToken, avatarLimiter, controllersAvatars.remov
 // Any signed-in user may see anyone's picture: it is shown beside their name.
 router.get("/avatar/:id", verifyToken, validateIntParam("id"), controllersAvatars.getAvatar);
 router.post("/change-password", verifyToken, authLimiter, controllersAuth.changePassword);
+
+// A mobile number (migration 054, PRD AUTH-13). The real limits — one code a
+// minute, three an hour per account and per number, five attempts per code —
+// are in services/servicesPhone.js, where the number is known; this only stops
+// a client looping.
+const phoneLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Too many requests, please wait a minute",
+});
+router.post("/me/phone", verifyToken, phoneLimiter, controllersPhone.startVerification);
+router.post("/me/phone/verify", verifyToken, phoneLimiter, controllersPhone.verifyCode);
+router.delete("/me/phone", verifyToken, phoneLimiter, controllersPhone.removePhone);
 
 // Asking for a lecturer or admin role after registration — the path a Google
 // sign-in has to use, since the OAuth callback never shows the signup form, and

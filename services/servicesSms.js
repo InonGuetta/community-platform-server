@@ -34,24 +34,80 @@ export const smsBudgetReached = async () => {
   return (await monthSmsSpendUsd()) >= cap;
 };
 
+// ── Recording ───────────────────────────────────────────────────────────────
+//
+// A message's row is written BEFORE it is sent, as 'sending', and settled
+// after. A row written only afterwards would leave every message in flight out
+// of the counts the verification limits read — and two requests a moment apart
+// would both find room for one more code.
+
 /**
- * Record one message. Never throws: the message has already gone (or failed),
- * and a failure to write it down must not fail the work that sent it.
- * @param {{ userId: number | null, purpose: string, to: string, segments: number, status: string }} row
+ * Reserve a message's row. `db` is the pool, or a transaction's client when the
+ * reservation must be decided together with other statements (servicesPhone's
+ * send limits).
+ * @param {{ query: Function }} db
+ * @param {{ userId: number | null, to: string, purpose: string }} message
+ * @returns {Promise<number>} the row's id
  */
-const recordSms = async ({ userId, purpose, to, segments, status }) => {
+export const reserveSms = async (db, { userId, to, purpose }) => {
+  const { rows } = await db.query(
+    `INSERT INTO sms_usage (user_id, purpose, phone_hash, segments, cost_usd, status)
+     VALUES ($1, $2, $3, 0, 0, 'sending') RETURNING id`,
+    [userId, purpose.slice(0, 32), phoneHash(to)]
+  );
+  return rows[0].id;
+};
+
+/**
+ * Write what happened to a reserved message. Never throws: the message has
+ * already gone (or failed), and a failure to write it down must not fail the
+ * work that sent it.
+ * @param {number | null} id
+ * @param {{ status: string, segments: number }} result
+ */
+const settleSms = async (id, { status, segments }) => {
+  if (id === null) return;
   // Only a message the provider accepted costs anything; a logged one is free.
   const cost = status === "sent" ? segments * env.smsPricePerSegmentUsd : 0;
   try {
     await pool.query(
-      `INSERT INTO sms_usage (user_id, purpose, phone_hash, segments, cost_usd, status)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, purpose.slice(0, 32), phoneHash(to), segments, cost, status]
+      "UPDATE sms_usage SET status = $2, segments = $3, cost_usd = $4 WHERE id = $1",
+      [id, status, segments, cost]
     );
   } catch (err) {
-    logger.warn(`[sms] could not record a ${purpose} message: ${err.message}`);
+    logger.warn(`[sms] could not record message ${id}: ${err.message}`);
   }
 };
+
+/**
+ * Transmit a message already reserved, and settle its row.
+ * @param {number | null} id from reserveSms
+ * @param {{ to: string, body: string }} message
+ */
+export const transmitReserved = async (id, { to, body }) => {
+  const result = await transmitSms({ to, body });
+  await settleSms(id, result);
+  return result;
+};
+
+/** Fail closed: a cap that cannot be read is treated as reached. */
+const capRefusal = async (purpose) => {
+  try {
+    if (!(await smsBudgetReached())) return null;
+    logger.warn(`[sms] monthly cap reached — a ${purpose} message was not sent`);
+    return /** @type {const} */ ({ status: "capped", segments: 0 });
+  } catch (err) {
+    logger.warn(`[sms] could not read this month's SMS spend — not sending: ${err.message}`);
+    return /** @type {const} */ ({ status: "failed", segments: 0 });
+  }
+};
+
+/**
+ * Whether a message may go at all this month — for a caller that reserves its
+ * own row (servicesPhone). "capped" or "failed" (cap unreadable), or null.
+ * @param {string} purpose
+ */
+export const smsRefusedByCap = async (purpose) => (await capRefusal(purpose))?.status ?? null;
 
 /**
  * Send one SMS. Never throws — the answer says what happened:
@@ -66,35 +122,42 @@ const recordSms = async ({ userId, purpose, to, segments, status }) => {
  * @returns {Promise<{ status: "sent" | "logged" | "failed" | "capped", segments: number, providerCode?: number | null }>}
  */
 export const sendSms = async ({ userId, to, body, purpose }) => {
+  const refused = await capRefusal(purpose);
+  if (refused) return refused;
+  let id = null;
   try {
-    if (await smsBudgetReached()) {
-      logger.warn(`[sms] monthly cap reached — a ${purpose} message was not sent`);
-      return { status: "capped", segments: 0 };
-    }
+    id = await reserveSms(pool, { userId, to, purpose });
   } catch (err) {
-    // The cap could not be read: fail closed, as a cap must.
-    logger.warn(`[sms] could not read this month's SMS spend — not sending: ${err.message}`);
-    return { status: "failed", segments: 0 };
+    // Unrecorded is better than unsent for a message somebody asked for.
+    logger.warn(`[sms] could not record a ${purpose} message before sending: ${err.message}`);
   }
-  const result = await transmitSms({ to, body });
-  await recordSms({ userId, purpose, to, segments: result.segments, status: result.status });
-  return result;
+  return transmitReserved(id, { to, body });
 };
 
 /**
- * How many codes this number was sent since `sinceMinutes` ago — across every
- * account, which is the point: one number cannot be flooded by many accounts.
- * @param {string} to E.164
- * @param {number} sinceMinutes
+ * The verification codes sent in the last `windowMinutes` — to one number
+ * (across every account, which is the point: many accounts cannot flood one
+ * phone) or by one account (to whatever numbers it tried) — and how many
+ * minutes until the oldest of them leaves the window.
+ *
+ * Every row counts, a message still 'sending' included.
+ *
+ * @param {{ to: string } | { userId: number }} who
+ * @param {number} windowMinutes
+ * @param {{ query: Function }} [db] the pool, or the caller's transaction
+ * @returns {Promise<{ count: number, waitMinutes: number }>}
  */
-export const smsCountToNumber = async (to, sinceMinutes) => {
-  const { rows } = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM sms_usage
-      WHERE phone_hash = $1 AND purpose = 'verification'
+export const recentVerificationSends = async (who, windowMinutes, db = pool) => {
+  const [column, value] = "to" in who ? ["phone_hash", phoneHash(who.to)] : ["user_id", who.userId];
+  const { rows } = await db.query(
+    `SELECT COUNT(*)::int AS count,
+            COALESCE(CEIL(EXTRACT(EPOCH FROM (MIN(created_at) + make_interval(mins => $2::int) - NOW())) / 60), 0)::int AS wait_minutes
+       FROM sms_usage
+      WHERE ${column} = $1 AND purpose = 'verification'
         AND created_at > NOW() - make_interval(mins => $2::int)`,
-    [phoneHash(to), sinceMinutes]
+    [value, windowMinutes]
   );
-  return rows[0]?.n ?? 0;
+  return { count: rows[0]?.count ?? 0, waitMinutes: Math.max(1, rows[0]?.wait_minutes ?? 1) };
 };
 
 /** The admin's screen: this month by purpose, the spend and the cap. */

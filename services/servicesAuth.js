@@ -9,6 +9,7 @@ import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { env } from "../lib/env.js";
 import { logger } from "../lib/logger.js";
 import { isAdmin } from "../lib/permissions.js";
+import { phoneStateOf, PHONE_STATE_SQL, PHONE_PENDING_JOIN } from "./servicesPhone.js";
 
 const DUMMY_BCRYPT_HASH = "$2a$12$CwTycUXWue0Thq9StjUM0uJ8.U8nJ.JtbCmHkY2Z9Y6XYC8N7yL3a";
 
@@ -598,14 +599,17 @@ export const getMe = async (userId) => {
   const result = await pool.query(
     // requested_role and approval_status ride along so the client can draw the
     // "your request is waiting" banner without a second call. They are not
-    // secrets — they are this user's own row.
-    `SELECT id, email, role, display_name, avatar_url, created_at,
-            requested_role, approval_status, rejection_reason, locale
-     FROM users WHERE id=$1 AND is_active=TRUE`,
+    // secrets — they are this user's own row. So is the phone (migration 054):
+    // the verified number and one still waiting for its code.
+    `SELECT u.id, u.email, u.role, u.display_name, u.avatar_url, u.created_at,
+            u.requested_role, u.approval_status, u.rejection_reason, u.locale,
+            ${PHONE_STATE_SQL}
+     FROM users u ${PHONE_PENDING_JOIN} WHERE u.id=$1 AND u.is_active=TRUE`,
     [userId]
   );
   if (result.rows.length === 0) throw notFound("User not found");
-  return result.rows[0];
+  const { phone_e164: _e164, ...row } = result.rows[0];
+  return { ...row, ...phoneStateOf(result.rows[0]) };
 };
 
 // ── Asking for a role after registration ────────────────────────────────────

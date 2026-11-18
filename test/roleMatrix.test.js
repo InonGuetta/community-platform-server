@@ -69,6 +69,10 @@ const MATRIX = {
   "post /api/auth/me/avatar": ANY,
   "delete /api/auth/me/avatar": ANY,
   "get /api/auth/avatar/:id": ANY,
+  // One's own mobile number (migration 054).
+  "post /api/auth/me/phone": ANY,
+  "post /api/auth/me/phone/verify": ANY,
+  "delete /api/auth/me/phone": ANY,
   "post /api/auth/change-password": ANY,
   // Asking is open to everyone; granting is under /api/users, admin-only.
   "post /api/auth/request-role": ANY,

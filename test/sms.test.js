@@ -2,10 +2,11 @@ import "./setup.js";
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { segmentsOf, transmitSms } from "../lib/sms.js";
-import { sendSms, smsCountToNumber } from "../services/servicesSms.js";
+import { sendSms, recentVerificationSends } from "../services/servicesSms.js";
 import { pool } from "../db/pool.js";
 import { phoneHash } from "../lib/phone.js";
 import { stubPoolQuery } from "./setup.js";
+import { logger } from "../lib/logger.js";
 
 // The SMS channel (lib/sms.js) and the cap and record around it
 // (services/servicesSms.js, migration 054's sms_usage).
@@ -47,6 +48,26 @@ test("with no provider configured, a message is logged, not sent — and no fetc
   assert.deepEqual(result, { status: "logged", segments: 1 });
 });
 
+test("log mode prints the body in development, never in production — nor the whole number", async () => {
+  const lines = [];
+  const realInfo = logger.info;
+  const realEnv = process.env.NODE_ENV;
+  logger.info = (line) => lines.push(String(line));
+  try {
+    process.env.NODE_ENV = "development";
+    await transmitSms({ to: TO, body: "קוד: 654321" });
+    process.env.NODE_ENV = "production";
+    await transmitSms({ to: TO, body: "קוד: 654321" });
+  } finally {
+    logger.info = realInfo;
+    process.env.NODE_ENV = realEnv;
+  }
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /654321/);
+  assert.doesNotMatch(lines[1], /654321/);
+  assert.ok(lines.every((l) => !l.includes(TO)));
+});
+
 test("with Twilio configured, one POST with basic auth, the number and the body", async () => {
   configure(true);
   const calls = [];
@@ -85,13 +106,17 @@ test("a provider refusal is an answer, not a throw, and carries the provider's c
 test("sendSms records the message with a hash of the number — never the number — and its estimated cost", async () => {
   configure(true, { SMS_PRICE_PER_SEGMENT_USD: "0.25" });
   globalThis.fetch = async () => ({ ok: true, status: 201, json: async () => ({ sid: "SM2" }) });
-  const db = stubPoolQuery(pool, () => ({ rows: [] }));
+  const db = stubPoolQuery(pool, (text) => (/RETURNING id/.test(text) ? { rows: [{ id: 31 }] } : { rows: [] }));
   try {
     const result = await sendSms({ userId: 7, to: TO, body: "ש".repeat(71), purpose: "verification" });
     assert.equal(result.status, "sent");
-    const insert = db.calls.find((c) => /INSERT INTO sms_usage/.test(c.text));
-    assert.ok(insert, "the message is recorded");
-    assert.deepEqual(insert.params, [7, "verification", phoneHash(TO), 2, 0.5, "sent"]);
+    const texts = db.calls.map((c) => c.text);
+    const insert = texts.findIndex((t) => /INSERT INTO sms_usage/.test(t));
+    const settle = texts.findIndex((t) => /UPDATE sms_usage SET status/.test(t));
+    assert.ok(insert >= 0 && insert < settle, "reserved before it is sent, settled after");
+    assert.deepEqual(db.calls[insert].params, [7, "verification", phoneHash(TO)]);
+    assert.match(texts[insert], /'sending'/);
+    assert.deepEqual(db.calls[settle].params, [31, "sent", 2, 0.5]);
     assert.ok(!JSON.stringify(db.calls).includes(TO), "the number itself never reaches the database");
   } finally {
     db.restore();
@@ -99,12 +124,26 @@ test("sendSms records the message with a hash of the number — never the number
 });
 
 test("a logged message is recorded at no cost", async () => {
-  const db = stubPoolQuery(pool, () => ({ rows: [] }));
+  const db = stubPoolQuery(pool, (text) => (/RETURNING id/.test(text) ? { rows: [{ id: 32 }] } : { rows: [] }));
   try {
     await sendSms({ userId: 7, to: TO, body: "x", purpose: "sessions" });
-    const insert = db.calls.find((c) => /INSERT INTO sms_usage/.test(c.text));
-    assert.equal(insert.params[4], 0);
-    assert.equal(insert.params[5], "logged");
+    const settle = db.calls.find((c) => /UPDATE sms_usage SET status/.test(c.text));
+    assert.deepEqual(settle.params, [32, "logged", 1, 0]);
+  } finally {
+    db.restore();
+  }
+});
+
+test("a message that could not be reserved is still sent — unrecorded beats unsent", async () => {
+  configure(true);
+  let posted = 0;
+  globalThis.fetch = async () => { posted += 1; return { ok: true, status: 201, json: async () => ({}) }; };
+  const db = stubPoolQuery(pool, (text) => { if (/INSERT/.test(text)) throw new Error("db hiccup"); return { rows: [] }; });
+  try {
+    const result = await sendSms({ userId: 7, to: TO, body: "x", purpose: "sessions" });
+    assert.equal(result.status, "sent");
+    assert.equal(posted, 1);
+    assert.ok(!db.calls.some((c) => /UPDATE sms_usage/.test(c.text)));
   } finally {
     db.restore();
   }
@@ -146,11 +185,22 @@ test("a cap that cannot be read fails closed", async () => {
 });
 
 test("codes sent to a number are counted by its hash, across every account", async () => {
-  const db = stubPoolQuery(pool, () => ({ rows: [{ n: 2 }] }));
+  const db = stubPoolQuery(pool, () => ({ rows: [{ count: 2, wait_minutes: 17 }] }));
   try {
-    assert.equal(await smsCountToNumber(TO, 60), 2);
+    assert.deepEqual(await recentVerificationSends({ to: TO }, 60), { count: 2, waitMinutes: 17 });
     assert.deepEqual(db.calls[0].params, [phoneHash(TO), 60]);
-    assert.ok(!/user_id/.test(db.calls[0].text));
+    assert.match(db.calls[0].text, /WHERE phone_hash = \$1/);
+  } finally {
+    db.restore();
+  }
+});
+
+test("codes sent by one account are counted by the account, and the wait is never under a minute", async () => {
+  const db = stubPoolQuery(pool, () => ({ rows: [{ count: 0, wait_minutes: 0 }] }));
+  try {
+    assert.deepEqual(await recentVerificationSends({ userId: 7 }, 60), { count: 0, waitMinutes: 1 });
+    assert.deepEqual(db.calls[0].params, [7, 60]);
+    assert.match(db.calls[0].text, /WHERE user_id = \$1/);
   } finally {
     db.restore();
   }
