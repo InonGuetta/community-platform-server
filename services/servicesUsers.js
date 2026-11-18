@@ -6,6 +6,7 @@ import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js"
 import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
 import { isAdmin } from "../lib/permissions.js";
+import { maskPhone } from "../lib/phone.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
 
@@ -17,10 +18,18 @@ export const getAllUsers = async () => {
     // users tab renders one table and needs both halves of every row at once,
     // and a separate "pending" call would make the two disagree while it loaded.
     `SELECT id, email, role, display_name, avatar_url, created_at, is_active,
-            requested_role, approval_status, approved_by, approved_at, rejection_reason
+            requested_role, approval_status, approved_by, approved_at, rejection_reason,
+            phone_e164, phone_verified_at
      FROM users ORDER BY created_at DESC`
   );
-  return result.rows;
+  // A verified number, MASKED (migration 054, PRD AUTH-13): enough for an admin
+  // to tell whether a member has one and to recognise it ("+972•••••1234"),
+  // never the whole number — it is the member's, not the site's. Never a number
+  // still waiting for its code.
+  return result.rows.map(({ phone_e164: phone, phone_verified_at: verifiedAt, ...row }) => ({
+    ...row,
+    phone_masked: verifiedAt && phone ? maskPhone(phone) : null,
+  }));
 };
 
 export const getUserById = async (id) => {

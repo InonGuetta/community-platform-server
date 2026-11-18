@@ -1,6 +1,7 @@
 // @ts-check
 import * as servicesAdmin from "../services/servicesAdmin.js";
 import { monthUsageReport } from "../services/servicesAiUsage.js";
+import { monthSmsReport } from "../services/servicesSms.js";
 import * as servicesDonations from "../services/servicesDonations.js";
 import { reconcileMissingTranscripts } from "../services/servicesTranscripts.js";
 import * as servicesTags from "../services/servicesTags.js";
@@ -107,4 +108,10 @@ export const rejectTagProposal = async (req, res) => {
 // set). See services/servicesAiUsage.js for what "estimated" means.
 export const getAiUsage = async (req, res) => {
   res.status(200).json(await monthUsageReport());
+};
+
+// What SMS has cost this month, by purpose, against SMS_MONTHLY_CAP_USD — and
+// whether a provider is configured at all (PRD AUTH-13).
+export const getSmsUsage = async (req, res) => {
+  res.status(200).json(await monthSmsReport());
 };
