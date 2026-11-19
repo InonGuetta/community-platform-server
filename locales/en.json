@@ -1,0 +1,136 @@
+{
+  "appName": "Community Platform",
+  "share": {
+    "genericTitle": "A lesson on the Community Platform",
+    "ogLocale": "en_US"
+  },
+  "documentPage": {
+    "unviewable": "This type of file cannot be displayed here. You can download it and open it on your computer.",
+    "unreadable": "The file cannot be read — it may be damaged or password-protected.",
+    "notFound": "The file was not found.",
+    "failed": "The document cannot be displayed."
+  },
+  "calendar": {
+    "defaultTitle": "Live session",
+    "host": "Host: {{name}}"
+  },
+  "mail": {
+    "reset": {
+      "subject": "Reset your password",
+      "intro": "We received a request to reset the password on your account.",
+      "open": "To reset it, open this link:",
+      "button": "Click here to reset your password",
+      "validity": "The link is valid for one hour and can be used once.",
+      "ignore": "If you didn't ask to reset your password, you can ignore this message — nothing has changed on your account."
+    },
+    "verify": {
+      "subject": "Verify your email address",
+      "welcome": "Welcome.",
+      "open": "To verify your email address, open this link:",
+      "button": "Click here to verify your email address",
+      "validity": "The link is valid for 24 hours."
+    },
+    "donation": {
+      "subject": "Confirmation of your donation — {{amount}}",
+      "thanks": "Thank you for your donation.",
+      "amount": "Amount",
+      "date": "Date",
+      "reference": "Reference number",
+      "referenceShort": "Reference",
+      "notTaxReceipt": "This message confirms that your donation was received and is not a receipt for tax purposes."
+    },
+    "role": {
+      "names": {
+        "lecturer": "lecturer",
+        "admin": "admin"
+      },
+      "approvedSubject": "Your request was approved — {{role}} permissions",
+      "approved": "Your request for {{role}} permissions was approved.",
+      "active": "The permission is already active on your account — there's no need to sign out and back in.",
+      "rejectedSubject": "Your request for {{role}} permissions was not approved",
+      "rejected": "Your request for {{role}} permissions was not approved.",
+      "stillStudent": "Your account is active and keeps working as usual as a student."
+    },
+    "reason": "Reason: {{reason}}",
+    "enter": "Go to the platform",
+    "reasons": {
+      "UNSUPPORTED_TEXT_FORMAT": "A summary cannot be produced from this type of file. Supported: PDF, DOCX, TXT.",
+      "DOCUMENT_UNREADABLE": "The file cannot be read — it may be damaged or password-protected.",
+      "OLD_DOC_FORMAT": "The old .doc format cannot be summarised. Save the file as .docx and try again.",
+      "DOCUMENT_SCANNED": "The file looks like a scanned document — images without a text layer. A summary needs a file text can be extracted from.",
+      "DOCUMENT_TOO_SHORT": "Not enough readable text was found in the file ({{words}} words). At least {{min}} words are needed for a summary.",
+      "DOCUMENT_NO_TEXT": "No readable text was found in the file.",
+      "AI_BUDGET_EXCEEDED": "The monthly AI cost cap has been reached. New processing will be possible next month, or after an admin raises the cap.",
+      "NO_KEY_POINTS": "The AI analysis produced no key points.",
+      "MEDIA_NOT_FOUND": "The file was not found."
+    },
+    "notify": {
+      "someone": "a user",
+      "decideLink": "Approve or refuse",
+      "inCourse": " in the course \"{{course}}\"",
+      "roleRequest": {
+        "subject": "New permission request — {{role}}",
+        "body": "A request for {{role}} permissions was received from {{who}}."
+      },
+      "processing": {
+        "lesson": "the lesson",
+        "doneSubject": "Processing finished — {{title}}",
+        "errorSubject": "Processing failed — {{title}}",
+        "done": "Processing of \"{{title}}\" has finished: the transcript and summary are ready.",
+        "error": "Processing of \"{{title}}\" did not complete. You can try again from the lesson's page.",
+        "link": "To the lesson's page"
+      },
+      "session": {
+        "defaultTitle": "Live session",
+        "withHost": " with {{name}}",
+        "scheduledSubject": "Session scheduled: {{title}}",
+        "reminderSubject": "The session \"{{title}}\" starts in about a quarter of an hour",
+        "startingSubject": "The session \"{{title}}\" has started",
+        "scheduled": "A live session{{host}} was scheduled: \"{{title}}\".",
+        "reminder": "The live session{{host}}, \"{{title}}\", starts in about a quarter of an hour.",
+        "starting": "The live session{{host}}, \"{{title}}\", has just started.",
+        "when": "When: {{when}}.",
+        "calendarAttached": "A calendar file is attached.",
+        "link": "To sessions"
+      },
+      "newLesson": {
+        "defaultTitle": "A new lesson",
+        "by": ", by {{name}}",
+        "subject": "New lesson{{course}}: {{title}}",
+        "body": "A new lesson was uploaded{{course}}: \"{{title}}\"{{by}}.",
+        "link": "To the lesson"
+      },
+      "join": {
+        "course": "the course",
+        "requestSubject": "Request to join the course {{course}}",
+        "request": "{{who}} asked to join the course \"{{course}}\" with its join code.",
+        "approvedSubject": "You were accepted into the course {{course}}",
+        "rejectedSubject": "Your request to join the course {{course}} was not approved",
+        "approved": "Your request to join the course \"{{course}}\" was approved. Its lessons are open to you now.",
+        "rejected": "Your request to join the course \"{{course}}\" was not approved. If this is a mistake, contact the lecturer.",
+        "myCourses": "To my courses"
+      },
+      "phone": {
+        "subject": "Your phone number was removed from your account",
+        "body": "The number {{phone}} was just verified on another account, so it was removed from yours and your SMS notifications are off. If that was not you, you can add the number again on your account page.",
+        "link": "My account"
+      }
+    },
+    "unsubscribe": {
+      "text": "To stop emails of this kind: {{link}}",
+      "link": "Stop emails of this kind"
+    }
+  },
+  "sms": {
+    "code": "Your verification code: {{code}}. Do not share it with anyone.",
+    "notify": {
+      "session_scheduled": "Session scheduled: \"{{title}}\", {{when}}",
+      "session_reminder": "The session \"{{title}}\" starts in about 15 minutes",
+      "session_starting": "The session \"{{title}}\" has started",
+      "processing_done": "Processing of \"{{title}}\" is done",
+      "processing_error": "Processing of \"{{title}}\" failed",
+      "course_join_approved": "You were accepted to the course \"{{title}}\"",
+      "course_join_rejected": "Your request to join \"{{title}}\" was not approved"
+    }
+  }
+}

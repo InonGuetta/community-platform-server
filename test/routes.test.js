@@ -62,6 +62,10 @@ const PUBLIC = new Set([
   "post /api/auth/logout",
   "get /api/auth/google",            // redirects the browser to Google
   "get /api/auth/google/callback",   // Google redirects back here
+  "get /api/auth/apple",             // the same, for Apple and LinkedIn
+  "post /api/auth/apple/callback",   // Apple returns with a form POST
+  "get /api/auth/linkedin",
+  "get /api/auth/linkedin/callback",
   // Recovery, for the one person who by definition cannot authenticate: someone
   // who has lost their password. Each answers identically whether or not the
   // address exists, so being open does not make them an enumeration oracle, and
@@ -78,6 +82,10 @@ const PUBLIC = new Set([
   // signed token in the body is the credential, and all it can do is turn mail
   // off (lib/unsubscribe.js).
   "post /api/notifications/unsubscribe",
+  // Twilio, server to server, when somebody replies to the platform's number.
+  // It authenticates by signature, which the controller checks before anything
+  // else (lib/sms.js → verifyTwilioSignature), and all it can do is turn SMS off.
+  "post /api/sms/inbound",
   // A lesson its manager made public (PRD COM-3b), opened from a shared link by
   // someone with no account. Each answers only for a public, published lesson —
   // the row decides, and every other id is a 404 (test/publicLessons.test.js).

@@ -24,6 +24,8 @@ router.get("/donations", controllersAdmin.getDonations);
 // What OpenAI has cost this month, by purpose and by day, against the cap
 // (PRD ADM-1, NFR-3).
 router.get("/ai-usage", controllersAdmin.getAiUsage);
+// And SMS — codes and notifications — this month, against its own cap (AUTH-13).
+router.get("/sms-usage", controllersAdmin.getSmsUsage);
 
 // New tags lecturers asked for. Approving creates the tag and tags every item
 // that was waiting on it; see services/servicesTags.js → approveTagProposal.

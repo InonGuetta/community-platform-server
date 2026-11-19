@@ -1,9 +1,16 @@
 // @ts-check
-import { Router } from "express";
+import express, { Router } from "express";
 import rateLimit from "express-rate-limit";
 import passport from "../config/passport.js";
 import { verifyToken } from "../middleware/auth.js";
 import * as controllersAuth from "../controllers/controllersAuth.js";
+import * as controllersAvatars from "../controllers/controllersAvatars.js";
+import * as controllersPhone from "../controllers/controllersPhone.js";
+import multer from "multer";
+import { userRateLimit } from "../middleware/userRateLimit.js";
+import { validateIntParam } from "../middleware/validateIntParam.js";
+import { AVATAR_MAX_BYTES } from "../services/servicesAvatars.js";
+import { badRequest, ERROR_CODES } from "../lib/AppError.js";
 import { env } from "../lib/env.js";
 
 const router = Router();
@@ -59,7 +66,47 @@ router.post("/verify-email", recoveryLimiter, controllersAuth.verifyEmail);
 
 // The signed-in user's own account.
 router.patch("/me", verifyToken, controllersAuth.updateProfile);
+
+// A profile picture (migration 052). Held in memory: it is at most
+// AVATAR_MAX_BYTES, and the client shrinks it to a few dozen kilobytes first.
+// What the file IS is decided from its bytes in the controller
+// (requireAvatarImage), not here from its name. multer reports a refused file
+// through its own callback, so it is turned into an AppError on the way.
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: AVATAR_MAX_BYTES, files: 1 } });
+const avatarLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Too many picture changes, please wait a minute",
+});
+const receiveAvatar = (req, res, next) => {
+  avatarUpload.single("avatar")(req, res, (err) => {
+    if (!err) return next();
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return next(badRequest("The picture is too large", ERROR_CODES.AVATAR_TOO_LARGE, {
+        maxMb: AVATAR_MAX_BYTES / (1024 * 1024),
+      }));
+    }
+    return next(badRequest(`Picture upload refused: ${err.message}`, ERROR_CODES.AVATAR_NOT_IMAGE));
+  });
+};
+router.post("/me/avatar", verifyToken, avatarLimiter, receiveAvatar, controllersAvatars.uploadAvatar);
+router.delete("/me/avatar", verifyToken, avatarLimiter, controllersAvatars.removeAvatar);
+// Any signed-in user may see anyone's picture: it is shown beside their name.
+router.get("/avatar/:id", verifyToken, validateIntParam("id"), controllersAvatars.getAvatar);
 router.post("/change-password", verifyToken, authLimiter, controllersAuth.changePassword);
+
+// A mobile number (migration 054, PRD AUTH-13). The real limits — one code a
+// minute, three an hour per account and per number, five attempts per code —
+// are in services/servicesPhone.js, where the number is known; this only stops
+// a client looping.
+const phoneLimiter = userRateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: "Too many requests, please wait a minute",
+});
+router.post("/me/phone", verifyToken, phoneLimiter, controllersPhone.startVerification);
+router.post("/me/phone/verify", verifyToken, phoneLimiter, controllersPhone.verifyCode);
+router.delete("/me/phone", verifyToken, phoneLimiter, controllersPhone.removePhone);
 
 // Asking for a lecturer or admin role after registration — the path a Google
 // sign-in has to use, since the OAuth callback never shows the signup form, and
@@ -78,5 +125,17 @@ router.get("/google/callback",
   passport.authenticate("google", { session: false, failureRedirect: `${env.clientUrl}/sign-in?error=google_failed` }),
   controllersAuth.googleCallback
 );
+
+// Apple and LinkedIn (lib/oauthProviders.js). Apple returns with a form POST —
+// the only way it will hand over the user's name and email — so that one
+// callback, and nothing else here, parses a urlencoded body. Small, because
+// all Apple sends is a code, a state, an id_token and the name.
+router.get("/apple", controllersAuth.oauthStart("apple"));
+router.post("/apple/callback",
+  express.urlencoded({ extended: false, limit: "20kb" }),
+  controllersAuth.oauthCallback("apple")
+);
+router.get("/linkedin", controllersAuth.oauthStart("linkedin"));
+router.get("/linkedin/callback", controllersAuth.oauthCallback("linkedin"));
 
 export default router;

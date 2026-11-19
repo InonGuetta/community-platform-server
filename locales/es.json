@@ -1,0 +1,136 @@
+{
+  "appName": "Plataforma comunitaria",
+  "share": {
+    "genericTitle": "Una clase en la Plataforma comunitaria",
+    "ogLocale": "es_ES"
+  },
+  "documentPage": {
+    "unviewable": "Este tipo de archivo no se puede mostrar aquí. Puedes descargarlo y abrirlo en tu ordenador.",
+    "unreadable": "El archivo no se puede leer: puede estar dañado o protegido con contraseña.",
+    "notFound": "No se encontró el archivo.",
+    "failed": "El documento no se puede mostrar."
+  },
+  "calendar": {
+    "defaultTitle": "Sesión en directo",
+    "host": "Anfitrión: {{name}}"
+  },
+  "mail": {
+    "reset": {
+      "subject": "Restablecer la contraseña",
+      "intro": "Recibimos una solicitud para restablecer la contraseña de tu cuenta.",
+      "open": "Para restablecerla, abre este enlace:",
+      "button": "Haz clic aquí para restablecer tu contraseña",
+      "validity": "El enlace es válido durante una hora y solo se puede usar una vez.",
+      "ignore": "Si no pediste restablecer la contraseña, puedes ignorar este mensaje: no ha cambiado nada en tu cuenta."
+    },
+    "verify": {
+      "subject": "Verifica tu dirección de correo",
+      "welcome": "Te damos la bienvenida.",
+      "open": "Para verificar tu dirección de correo, abre este enlace:",
+      "button": "Haz clic aquí para verificar tu dirección de correo",
+      "validity": "El enlace es válido durante 24 horas."
+    },
+    "donation": {
+      "subject": "Confirmación de tu donación — {{amount}}",
+      "thanks": "Gracias por tu donación.",
+      "amount": "Importe",
+      "date": "Fecha",
+      "reference": "Número de referencia",
+      "referenceShort": "Referencia",
+      "notTaxReceipt": "Este mensaje confirma que recibimos tu donación y no es un recibo a efectos fiscales."
+    },
+    "role": {
+      "names": {
+        "lecturer": "profesor",
+        "admin": "administrador"
+      },
+      "approvedSubject": "Tu solicitud fue aprobada — permiso de {{role}}",
+      "approved": "Tu solicitud de permiso de {{role}} fue aprobada.",
+      "active": "El permiso ya está activo en tu cuenta: no hace falta cerrar sesión y volver a entrar.",
+      "rejectedSubject": "Tu solicitud de permiso de {{role}} no fue aprobada",
+      "rejected": "Tu solicitud de permiso de {{role}} no fue aprobada.",
+      "stillStudent": "Tu cuenta está activa y sigue funcionando con normalidad como alumno."
+    },
+    "reason": "Motivo: {{reason}}",
+    "enter": "Ir a la plataforma",
+    "reasons": {
+      "UNSUPPORTED_TEXT_FORMAT": "No se puede generar un resumen a partir de este tipo de archivo. Formatos admitidos: PDF, DOCX, TXT.",
+      "DOCUMENT_UNREADABLE": "El archivo no se puede leer: puede estar dañado o protegido con contraseña.",
+      "OLD_DOC_FORMAT": "El antiguo formato .doc no se puede resumir. Guarda el archivo como .docx e inténtalo de nuevo.",
+      "DOCUMENT_SCANNED": "El archivo parece un documento escaneado: imágenes sin capa de texto. Un resumen necesita un archivo del que se pueda extraer el texto.",
+      "DOCUMENT_TOO_SHORT": "No se encontró suficiente texto legible en el archivo ({{words}} palabras). Se necesitan al menos {{min}} palabras para un resumen.",
+      "DOCUMENT_NO_TEXT": "No se encontró texto legible en el archivo.",
+      "AI_BUDGET_EXCEEDED": "Se alcanzó el límite mensual de coste de la IA. Será posible un nuevo procesamiento el mes que viene, o cuando un administrador suba el límite.",
+      "NO_KEY_POINTS": "El análisis de IA no generó puntos clave.",
+      "MEDIA_NOT_FOUND": "No se encontró el archivo."
+    },
+    "notify": {
+      "someone": "un usuario",
+      "decideLink": "Aprobar o rechazar",
+      "inCourse": " en el curso «{{course}}»",
+      "roleRequest": {
+        "subject": "Nueva solicitud de permiso — {{role}}",
+        "body": "Se recibió una solicitud de permiso de {{role}} de {{who}}."
+      },
+      "processing": {
+        "lesson": "la clase",
+        "doneSubject": "Procesamiento terminado — {{title}}",
+        "errorSubject": "El procesamiento falló — {{title}}",
+        "done": "El procesamiento de «{{title}}» terminó: la transcripción y el resumen están listos.",
+        "error": "El procesamiento de «{{title}}» no se completó. Puedes volver a intentarlo desde la página de la clase.",
+        "link": "A la página de la clase"
+      },
+      "session": {
+        "defaultTitle": "Sesión en directo",
+        "withHost": " con {{name}}",
+        "scheduledSubject": "Sesión programada: {{title}}",
+        "reminderSubject": "La sesión «{{title}}» empieza en un cuarto de hora aproximadamente",
+        "startingSubject": "La sesión «{{title}}» ha empezado",
+        "scheduled": "Se programó una sesión en directo{{host}}: «{{title}}».",
+        "reminder": "La sesión en directo{{host}}, «{{title}}», empieza en un cuarto de hora aproximadamente.",
+        "starting": "La sesión en directo{{host}}, «{{title}}», acaba de empezar.",
+        "when": "Cuándo: {{when}}.",
+        "calendarAttached": "Se adjunta un archivo de calendario.",
+        "link": "A las sesiones"
+      },
+      "newLesson": {
+        "defaultTitle": "Una clase nueva",
+        "by": ", de {{name}}",
+        "subject": "Clase nueva{{course}}: {{title}}",
+        "body": "Se subió una clase nueva{{course}}: «{{title}}»{{by}}.",
+        "link": "A la clase"
+      },
+      "join": {
+        "course": "el curso",
+        "requestSubject": "Solicitud para unirse al curso {{course}}",
+        "request": "{{who}} pidió unirse al curso «{{course}}» con su código de acceso.",
+        "approvedSubject": "Te aceptaron en el curso {{course}}",
+        "rejectedSubject": "Tu solicitud para unirte al curso {{course}} no fue aprobada",
+        "approved": "Tu solicitud para unirte al curso «{{course}}» fue aprobada. Sus clases ya están abiertas para ti.",
+        "rejected": "Tu solicitud para unirte al curso «{{course}}» no fue aprobada. Si es un error, contacta con el profesor.",
+        "myCourses": "A mis cursos"
+      },
+      "phone": {
+        "subject": "Se quitó el número de teléfono de tu cuenta",
+        "body": "El número {{phone}} se acaba de verificar en otra cuenta, así que se quitó de la tuya y tus notificaciones por SMS están desactivadas. Si no fuiste tú, puedes volver a añadir el número en la página de tu cuenta.",
+        "link": "Mi cuenta"
+      }
+    },
+    "unsubscribe": {
+      "text": "Para dejar de recibir correos de este tipo: {{link}}",
+      "link": "Dejar de recibir correos de este tipo"
+    }
+  },
+  "sms": {
+    "code": "Tu código de verificación: {{code}}. No lo compartas con nadie.",
+    "notify": {
+      "session_scheduled": "Sesión programada: \"{{title}}\", {{when}}",
+      "session_reminder": "La sesión \"{{title}}\" empieza en unos 15 minutos",
+      "session_starting": "La sesión \"{{title}}\" ha empezado",
+      "processing_done": "El procesamiento de \"{{title}}\" ha terminado",
+      "processing_error": "El procesamiento de \"{{title}}\" ha fallado",
+      "course_join_approved": "Te aceptaron en el curso \"{{title}}\"",
+      "course_join_rejected": "Tu solicitud para unirte a \"{{title}}\" no fue aprobada"
+    }
+  }
+}

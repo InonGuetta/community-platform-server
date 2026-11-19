@@ -59,8 +59,22 @@ const MATRIX = {
   "post /api/auth/verify-email": PUBLIC,
   "get /api/auth/google": PUBLIC,
   "get /api/auth/google/callback": PUBLIC,
+  "get /api/auth/apple": PUBLIC,
+  "post /api/auth/apple/callback": PUBLIC,
+  "get /api/auth/linkedin": PUBLIC,
+  "get /api/auth/linkedin/callback": PUBLIC,
   "get /api/auth/me": ANY,
   "patch /api/auth/me": ANY,
+  // One's own profile picture; anyone signed in sees anyone's (migration 052).
+  "post /api/auth/me/avatar": ANY,
+  "delete /api/auth/me/avatar": ANY,
+  "get /api/auth/avatar/:id": ANY,
+  // One's own mobile number (migration 054).
+  "post /api/auth/me/phone": ANY,
+  "post /api/auth/me/phone/verify": ANY,
+  "delete /api/auth/me/phone": ANY,
+  // Twilio's reply webhook: signed, not signed in (lib/sms.js).
+  "post /api/sms/inbound": PUBLIC,
   "post /api/auth/change-password": ANY,
   // Asking is open to everyone; granting is under /api/users, admin-only.
   "post /api/auth/request-role": ANY,
@@ -222,6 +236,7 @@ const MATRIX = {
   "post /api/admin/reconcile": ADMIN,
   "get /api/admin/donations": ADMIN,
   "get /api/admin/ai-usage": ADMIN,
+  "get /api/admin/sms-usage": ADMIN,
   "get /api/admin/tag-proposals": ADMIN,
   "post /api/admin/tag-proposals/:id/approve": ADMIN,
   "post /api/admin/tag-proposals/:id/reject": ADMIN,

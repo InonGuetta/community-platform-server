@@ -6,6 +6,7 @@ import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js"
 import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
 import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
 import { isAdmin } from "../lib/permissions.js";
+import { maskPhone } from "../lib/phone.js";
 
 const ROLES = new Set(["student", "lecturer", "admin"]);
 
@@ -17,10 +18,18 @@ export const getAllUsers = async () => {
     // users tab renders one table and needs both halves of every row at once,
     // and a separate "pending" call would make the two disagree while it loaded.
     `SELECT id, email, role, display_name, avatar_url, created_at, is_active,
-            requested_role, approval_status, approved_by, approved_at, rejection_reason
+            requested_role, approval_status, approved_by, approved_at, rejection_reason,
+            phone_e164, phone_verified_at
      FROM users ORDER BY created_at DESC`
   );
-  return result.rows;
+  // A verified number, MASKED (migration 054, PRD AUTH-13): enough for an admin
+  // to tell whether a member has one and to recognise it ("+972•••••1234"),
+  // never the whole number — it is the member's, not the site's. Never a number
+  // still waiting for its code.
+  return result.rows.map(({ phone_e164: phone, phone_verified_at: verifiedAt, ...row }) => ({
+    ...row,
+    phone_masked: verifiedAt && phone ? maskPhone(phone) : null,
+  }));
 };
 
 export const getUserById = async (id) => {
@@ -158,7 +167,7 @@ const updateUserRow = async (id, { email, role, displayName, avatarUrl, isActive
           approved_by = CASE WHEN $8::boolean THEN $9::int ELSE approved_by END,
           approved_at = CASE WHEN $8::boolean THEN NOW() ELSE approved_at END
         WHERE id=$6
-        RETURNING id, email, role, display_name, avatar_url, is_active`,
+        RETURNING id, email, role, display_name, avatar_url, is_active, locale`,
         [normalizedEmail, role, displayName, avatarUrl, isActive, id, emailChanged, settlesPending, adminId]
       );
 
@@ -261,7 +270,7 @@ export const approveUser = async (id, adminId) => {
          approved_at = NOW(),
          rejection_reason = NULL
        WHERE id = $3
-       RETURNING id, email, role, display_name, requested_role, approval_status, approved_at`,
+       RETURNING id, email, role, display_name, requested_role, approval_status, approved_at, locale`,
       [user.requested_role, adminId, id]
     );
 
@@ -295,7 +304,7 @@ export const rejectUser = async (id, adminId, reason = null) => {
          approved_at = NOW(),
          rejection_reason = $2
        WHERE id = $3
-       RETURNING id, email, role, display_name, requested_role, approval_status, rejection_reason`,
+       RETURNING id, email, role, display_name, requested_role, approval_status, rejection_reason, locale`,
       [adminId, reason || null, id]
     );
 

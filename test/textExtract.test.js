@@ -123,21 +123,25 @@ const isPermanent = (err) => err.name === "AppError" && err.statusCode === 400;
 test("refuses .doc with an actionable message instead of failing inside mammoth", async () => {
   await assert.rejects(
     () => extractDocumentText(Buffer.from("anything"), "book.doc"),
-    (err) => isPermanent(err) && err.message.includes(".docx")
+    (err) => isPermanent(err) && err.code === "OLD_DOC_FORMAT"
   );
 });
 
 test("refuses an unsupported extension", async () => {
   await assert.rejects(
     () => extractDocumentText(Buffer.from("anything"), "book.epub"),
-    isPermanent
+    (err) => isPermanent(err) && err.code === "UNSUPPORTED_TEXT_FORMAT"
   );
 });
 
 test("refuses a document with too little text to summarise", async () => {
   await assert.rejects(
     () => extractDocumentText(Buffer.from("שלום עולם", "utf8"), "note.txt"),
-    (err) => isPermanent(err) && err.message.includes(String(MIN_WORDS_TO_SUMMARISE))
+    (err) =>
+      isPermanent(err) &&
+      err.code === "DOCUMENT_TOO_SHORT" &&
+      err.params.min === MIN_WORDS_TO_SUMMARISE &&
+      err.params.words === 2
   );
 });
 
@@ -152,6 +156,6 @@ test("accepts a .txt with enough content, reporting real counts", async () => {
 test("a corrupt file is a permanent failure, not a crash", async () => {
   await assert.rejects(
     () => extractDocumentText(Buffer.from("not a pdf at all"), "book.pdf"),
-    isPermanent
+    (err) => isPermanent(err) && err.code === "DOCUMENT_UNREADABLE"
   );
 });

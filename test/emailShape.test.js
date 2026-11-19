@@ -1,7 +1,8 @@
 import "./setup.js";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { emailProblem } from "../lib/validate.js";
+import { readFileSync } from "node:fs";
+import { emailProblem, assertUsableEmail } from "../lib/validate.js";
 
 // Is this SHAPED like an address?
 //
@@ -49,9 +50,7 @@ test("a long but legal address is accepted", () => {
 // ── Addresses that must be refused ──────────────────────────────────────────
 
 test("a missing @ is refused, and said so", () => {
-  const problem = emailProblem("userexample.com");
-  assert.ok(problem);
-  assert.match(problem, /@/, "the message names what is missing");
+  assert.equal(emailProblem("userexample.com"), "noAt", "the reason names what is missing");
 });
 
 test("two @ are refused", () => {
@@ -61,9 +60,7 @@ test("two @ are refused", () => {
 
 // The most common real mistake by a wide margin: the sender simply stopped.
 test("a domain with no dot is refused", () => {
-  const problem = emailProblem("user@gmail");
-  assert.ok(problem);
-  assert.match(problem, /סיומת/, "the message says a suffix is missing");
+  assert.equal(emailProblem("user@gmail"), "noSuffix", "the reason says a suffix is missing");
 });
 
 test("a missing local part or domain is refused", () => {
@@ -111,13 +108,31 @@ test("a local part over 64 characters is refused", () => {
 
 // ── The message, not just the verdict ───────────────────────────────────────
 
-// "כתובת אימייל אינה תקינה" on a missing dot is a message that makes somebody
-// retype a correct address several times.
-test("every refusal explains itself in Hebrew", () => {
+// "Invalid address" on a missing dot is a message that makes somebody retype a
+// correct address several times. The reason is a key the client words as
+// auth:emailShape.<key> — so every key this file can return must exist there,
+// or the client shows nothing at all for it. The client is a separate package,
+// read as text (like the other mirror tests).
+const CLIENT_AUTH = new URL("../../community-platform-client/src/locales/he/auth.json", import.meta.url);
+
+test("every reason is a key the client can word", () => {
+  const worded = Object.keys(JSON.parse(readFileSync(CLIENT_AUTH, "utf8")).emailShape ?? {});
+  assert.ok(worded.length > 10, "the client's emailShape keys were not found");
+
+  const source = readFileSync(new URL("../lib/validate.js", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export const emailProblem"), source.indexOf("export const assertUsableEmail"));
+  const returned = [...body.matchAll(/return "([A-Za-z]+)"/g)].map((m) => m[1]);
+  assert.ok(returned.length > 10, "emailProblem's reasons were not found");
+  for (const key of returned) assert.ok(worded.includes(key), `auth:emailShape.${key} is missing on the client`);
+
   for (const email of ["userexample.com", "user@gmail", "user name@x.com", "user@example.c"]) {
-    const problem = emailProblem(email);
-    assert.ok(problem);
-    assert.match(problem, /[֐-׿]/, `"${email}" produced a message with no Hebrew in it`);
-    assert.notEqual(problem, "כתובת אימייל אינה תקינה", "a generic message helps nobody");
+    assert.ok(worded.includes(emailProblem(email)), email);
   }
+});
+
+test("the 400 carries the reason as a code and a param, not a sentence", () => {
+  assert.throws(
+    () => assertUsableEmail("user@gmail"),
+    (err) => err.statusCode === 400 && err.code === "INVALID_EMAIL" && err.params.reason === "noSuffix"
+  );
 });

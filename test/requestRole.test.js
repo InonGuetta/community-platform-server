@@ -194,7 +194,7 @@ test("it acts on the caller and takes no id from the body", async () => {
 test("getMe carries the refusal reason so the profile can show it", async () => {
   let meSql = "";
   stubPoolQuery(pool, (text) => {
-    if (/FROM users WHERE id=\$1 AND is_active=TRUE/i.test(text)) {
+    if (/FROM users u .*WHERE u\.id=\$1 AND u\.is_active=TRUE/is.test(text)) {
       meSql = text;
       return { rows: [STUDENT] };
     }

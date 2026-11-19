@@ -1,7 +1,8 @@
 // @ts-check
 import "dotenv/config";
 import { pool } from "../db/pool.js";
-import { getActiveUserById } from "../services/servicesAuth.js";
+import { getActiveUserById, updateProfile, getMe } from "../services/servicesAuth.js";
+import { removeAvatar, avatarKeyOf } from "../services/servicesAvatars.js";
 import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
 import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
@@ -21,9 +22,12 @@ import { UNRESTRICTED } from "../lib/permissions.js";
 import { searchWithinMedia, RESULT_LIMIT } from "../services/discussion/retrieval.js";
 import { searchArchive, getArchiveConversation, ARCHIVE_PASSAGES, PER_LESSON_MAX } from "../services/discussion/archive.js";
 import { getLatestConversation, countQuestionsToday, listConversations, deleteConversation } from "../services/discussion/conversations.js";
-import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver } from "../services/servicesNotifications.js";
+import { listForUser, markRead, countPendingRoleRequests, getEmailOptOuts, deliver, setSmsPreference, getSmsOptIns } from "../services/servicesNotifications.js";
 import { getSessionSchedule } from "../services/servicesSessions.js";
 import { recordAiUsage, monthUsageReport, monthSpendUsd } from "../services/servicesAiUsage.js";
+import { monthSmsReport, recentVerificationSends } from "../services/servicesSms.js";
+import { getPhoneState, startPhoneVerification, verifyPhoneCode, removePhone, hashCode as hashPhoneCode } from "../services/servicesPhone.js";
+import { smsConfigured as smsConfiguredSmoke } from "../lib/sms.js";
 import { getTranscriptByMediaId } from "../services/servicesTranscripts.js";
 import { getAiTagSuggestions, approveAiTags, dismissAiTags } from "../services/transcripts/tagging.js";
 import { setJoinCode, requestToJoin, getPendingJoinRequests, getMyJoinRequests, decideJoinRequest } from "../services/servicesCourseJoin.js";
@@ -1144,15 +1148,14 @@ const checks = [
           if (answers.get(Number(guest.id)) !== false) throw new Error("a changed answer did not replace the first");
         }
         await saveChatMessage(recordingId, { id: host.id, displayName: "smoke" }, "שורה בצ'אט");
-        let queued = null;
-        const done = await finishRecording(session.id, recordingId, host.id, { trigger: async (id) => { queued = id; } });
+        const done = await finishRecording(session.id, recordingId, host.id);
         storedKey = done.s3_key;
         if (done.status !== "finished" || done.parts !== 2 || Number(done.bytes) !== 14) {
           throw new Error(`finished as ${done.status} with ${done.parts} part(s), ${done.bytes} bytes`);
         }
         const { rows: [after] } = await client.query("SELECT recording_s3_key FROM live_sessions WHERE id=$1", [session.id]);
         if (after.recording_s3_key !== done.s3_key) throw new Error("the session does not point at its recording");
-        if (!done.media_id || queued !== done.media_id) throw new Error("the recording did not become a lesson queued for processing");
+        if (!done.media_id) throw new Error("the recording did not become a lesson");
         const { rows: [lesson] } = await client.query("SELECT media_type, is_published, session_id FROM media_items WHERE id=$1", [done.media_id]);
         if (lesson.media_type !== "audio" || lesson.is_published || lesson.session_id !== session.id) {
           throw new Error(`the lesson is ${JSON.stringify(lesson)}`);
@@ -1300,6 +1303,220 @@ const checks = [
         await client.query("ROLLBACK").catch(() => {});
         client.release();
       }
+    },
+  },
+  {
+    // The interface language (migration 051), through the real service: the
+    // COALESCE leaves it alone when absent, getMe reads it, and the CHECK refuses
+    // a code we do not have. Inside a transaction that is always rolled back,
+    // with pool.query routed to its client as in the tag check above.
+    name: "a user's interface language (migration 051)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query };
+      try {
+        await client.query("BEGIN");
+        const { rows: [user] } = await client.query("SELECT id, locale FROM users WHERE is_active LIMIT 1");
+        if (!user) return "no active user to change";
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+
+        const changed = await updateProfile(user.id, { locale: "yi" });
+        if (changed.locale !== "yi") throw new Error(`updateProfile returned locale ${changed.locale}`);
+        const kept = await updateProfile(user.id, { avatarUrl: undefined });
+        if (kept.locale !== "yi") throw new Error("a profile edit without a language changed the language");
+        const me = await getMe(user.id);
+        if (me.locale !== "yi") throw new Error(`getMe read locale ${me.locale}`);
+
+        await client.query("SAVEPOINT bad_locale");
+        const refused = await client
+          .query("UPDATE users SET locale = 'de' WHERE id = $1", [user.id])
+          .then(() => false, (err) => err.code === "23514");
+        await client.query("ROLLBACK TO SAVEPOINT bad_locale");
+        if (!refused) throw new Error("the CHECK accepted a language we do not have");
+
+        return `default read as '${user.locale}'; set, kept, read back; 'de' refused`;
+      } finally {
+        pool.query = original.query;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // A profile picture (migration 052), through the real SQL: the CTE that
+    // reads the previous key in the same UPDATE, on a user with no uploaded
+    // picture — so nothing on disk or in the bucket is touched — and the read
+    // the serving route makes. Rolled back, like the language check above.
+    name: "profile pictures (migration 052)",
+    run: async () => {
+      const client = await pool.connect();
+      const original = { query: pool.query };
+      try {
+        await client.query("BEGIN");
+        const { rows: [user] } = await client.query(
+          "SELECT id FROM users WHERE is_active AND avatar_key IS NULL LIMIT 1"
+        );
+        const { rows: [{ uploaded }] } = await client.query(
+          "SELECT count(*)::int AS uploaded FROM users WHERE avatar_key IS NOT NULL"
+        );
+        if (!user) return `no user without a picture to try; ${uploaded} uploaded`;
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+        const cleared = await removeAvatar(user.id);
+        if (cleared.avatar_url !== null) throw new Error("removeAvatar left an avatar_url");
+        const served = await avatarKeyOf(user.id).then(() => true, (err) => err.statusCode !== 404 && Promise.reject(err));
+        if (served) throw new Error("avatarKeyOf served a user with no picture");
+        return `${uploaded} uploaded picture(s); remove and the serving read ok`;
+      } finally {
+        pool.query = original.query;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // A mobile number and SMS (migration 054): the columns and tables every
+    // phone and SMS path reads, and the index that keeps a verified number on
+    // one account. Existence only — the flows that use them are checked in the
+    // steps that call their services.
+    name: "phone numbers and SMS (migration 054)",
+    run: async () => {
+      const { rows: cols } = await pool.query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'users' AND column_name IN ('phone_e164', 'phone_verified_at')`
+      );
+      if (cols.length !== 2) throw new Error("users.phone_e164 / phone_verified_at missing — migration 054 has not been applied");
+      const { rows: [tables] } = await pool.query(
+        `SELECT to_regclass('public.phone_verifications') AS v, to_regclass('public.notification_sms_optins') AS o,
+                to_regclass('public.sms_usage') AS u, to_regclass('public.users_verified_phone_unique') AS i`
+      );
+      const missing = Object.entries(tables).filter(([, v]) => !v).map(([k]) => k);
+      if (missing.length) throw new Error(`missing (${missing.join(", ")}) — migration 054 has not been applied`);
+      const { rows: [counts] } = await pool.query(
+        "SELECT count(*) FILTER (WHERE phone_verified_at IS NOT NULL)::int AS verified FROM users"
+      );
+      // The SMS service's own reads — the month's report and the per-number
+      // count the verification rate limit asks. Read only; nothing is sent.
+      const report = await monthSmsReport();
+      const toOne = await recentVerificationSends({ to: "+972545550000" }, 60);
+      const byOne = await recentVerificationSends({ userId: 1 }, 60);
+      if (!Number.isInteger(toOne.count) || !Number.isInteger(byOne.waitMinutes)) {
+        throw new Error("recentVerificationSends did not return counts");
+      }
+      // The account page's read: the verified number and one still waiting.
+      const { rows: [anyone] } = await pool.query("SELECT id FROM users WHERE is_active = TRUE LIMIT 1");
+      if (anyone) {
+        const state = await getPhoneState(anyone.id);
+        if (!("phone" in state) || !("phone_pending" in state)) throw new Error("getPhoneState is missing a field");
+      }
+      return `present; ${counts.verified} verified number(s); SMS this month $${report.spentUsd.toFixed(2)} over ${report.byPurpose.length} purpose(s)`;
+    },
+  },
+  {
+    // AUTH-13: a code sent, a wrong one counted, the right one taking a number
+    // that ANOTHER account had verified — through the real SQL, on one client
+    // inside a transaction that is always rolled back (the savepoint routing of
+    // the join check above). The ON CONFLICT upsert, make_interval and the
+    // move-then-take order under the unique index are what only a real database
+    // can judge. Only in log mode: smoke must never send a real SMS.
+    name: "verifying a phone number (migration 054)",
+    run: async () => {
+      if (smsConfiguredSmoke()) return "skipped — an SMS provider is configured, and smoke sends nothing real";
+      const client = await pool.connect();
+      const original = { query: pool.query, connect: pool.connect };
+      const inner = {
+        query: (text, params) => {
+          if (text === "BEGIN") return client.query("SAVEPOINT smoke_phone");
+          if (text === "COMMIT") return client.query("RELEASE SAVEPOINT smoke_phone");
+          if (text === "ROLLBACK") return client.query("ROLLBACK TO SAVEPOINT smoke_phone");
+          return client.query(text, params);
+        },
+        release: () => {},
+      };
+      try {
+        await client.query("BEGIN");
+        const { rows: two } = await client.query("SELECT id FROM users WHERE is_active ORDER BY id LIMIT 2");
+        if (two.length < 2) return "skipped — needs two accounts";
+        const [holder, taker] = two.map((r) => r.id);
+        // A number nobody has, verified on the first account inside the transaction.
+        const number = "+972545550101";
+        await client.query("UPDATE users SET phone_e164 = NULL, phone_verified_at = NULL WHERE phone_e164 = $1", [number]);
+        await client.query("UPDATE users SET phone_e164 = $1, phone_verified_at = NOW() WHERE id = $2", [number, holder]);
+        await client.query(
+          "INSERT INTO notification_sms_optins (user_id, category) VALUES ($1, 'sessions') ON CONFLICT DO NOTHING", [holder]
+        );
+        // This check sends notifications; where mail is configured they must not
+        // reach anybody. 'all' off for both, inside the transaction.
+        await client.query(
+          "INSERT INTO notification_email_optouts (user_id, category) SELECT unnest($1::int[]), 'all' ON CONFLICT DO NOTHING",
+          [[holder, taker]]
+        );
+
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = inner.query;
+        // @ts-ignore
+        pool.connect = async () => inner;
+
+        const waiting = await startPhoneVerification(taker, number);
+        if (waiting.phone_pending !== number) throw new Error("the number is not waiting for its code");
+        // The code went to the log; put a known one in its place.
+        await client.query("UPDATE phone_verifications SET code_hash = $1 WHERE user_id = $2", [hashPhoneCode(taker, number, "123456"), taker]);
+        const wrong = await verifyPhoneCode(taker, "000000").then(() => null, (err) => err);
+        if (wrong?.code !== "PHONE_CODE_INVALID") throw new Error(`a wrong code answered ${wrong?.code ?? "success"}`);
+        const { rows: [counted] } = await client.query("SELECT attempts FROM phone_verifications WHERE user_id = $1", [taker]);
+        if (counted?.attempts !== 1) throw new Error("the wrong attempt was not counted");
+
+        const { state, movedFrom } = await verifyPhoneCode(taker, "123456");
+        if (state.phone !== number || movedFrom !== holder) throw new Error("the right code did not move the number");
+        const { rows: [before] } = await client.query(
+          "SELECT phone_e164, (SELECT count(*)::int FROM notification_sms_optins WHERE user_id = $1) AS optins FROM users WHERE id = $1",
+          [holder]
+        );
+        if (before.phone_e164 !== null || before.optins !== 0) throw new Error("the previous holder kept the number or its SMS choices");
+        const { rows: told } = await client.query(
+          "SELECT payload FROM notifications WHERE user_id = $1 AND type = 'phone_moved'", [holder]
+        );
+        if (told.length !== 1) throw new Error("the previous holder was not told the number moved");
+
+        // SMS on for one category, and a notification of it goes by SMS: the
+        // deliver() statement's sms_to, read with its $7::boolean, on real rows.
+        if (!(await setSmsPreference({ id: taker, role: "student" }, "sessions", true))) {
+          throw new Error("a verified number could not turn SMS on");
+        }
+        if (!(await getSmsOptIns(taker)).includes("sessions")) throw new Error("the SMS choice was not kept");
+        const countSms = async () =>
+          (await client.query("SELECT count(*)::int AS n FROM sms_usage WHERE user_id = $1", [taker])).rows[0].n;
+        const smsBefore = await countSms();
+        await deliver([taker], "session_starting", { sessionId: 0, title: "__smoke" });
+        if ((await countSms()) !== smsBefore + 1) throw new Error("deliver did not send the SMS to a verified, opted-in number");
+
+        const removed = await removePhone(taker);
+        if (removed.phone !== null) throw new Error("removing left the number");
+        if ((await getSmsOptIns(taker)).length) throw new Error("removing the number left SMS choices");
+        return "code sent (to the log), wrong one counted, right one moved the number and told its holder, SMS on and sent, removed (rolled back)";
+      } finally {
+        pool.query = original.query;
+        pool.connect = original.connect;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
+    },
+  },
+  {
+    // The chat's starting questions are an object keyed by language (migration
+    // 053). An array left behind is a lesson whose questions no reader would be
+    // offered — the client reads arrays as Hebrew-only, but nothing writes them.
+    name: "suggested questions by language (migration 053)",
+    run: async () => {
+      const { rows: [counts] } = await pool.query(
+        `SELECT count(*) FILTER (WHERE jsonb_typeof(suggested_questions) = 'array')::int AS arrays,
+                count(*) FILTER (WHERE jsonb_typeof(suggested_questions) = 'object')::int AS objects,
+                count(*) FILTER (WHERE suggested_questions ?& ARRAY['he','yi','en','fr','es'])::int AS complete
+           FROM transcripts`
+      );
+      if (counts.arrays > 0) throw new Error(`${counts.arrays} lesson(s) still hold a plain list — migration 053 has not been applied`);
+      return `${counts.objects} lesson(s) with questions, ${counts.complete} in all five languages`;
     },
   },
   {

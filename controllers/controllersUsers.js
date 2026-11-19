@@ -25,7 +25,7 @@ export const updateUser = async (req, res) => {
   const { emailChanged, ...user } = await servicesUsers.updateUser(req.params.id, req.body ?? {}, req.user.id);
   if (emailChanged) {
     issueVerificationToken(user.id)
-      .then((token) => sendVerificationEmail(user.email, token))
+      .then((token) => sendVerificationEmail(user.email, token, user.locale))
       .catch(() => {});
   }
   res.status(200).json(user);
@@ -53,7 +53,7 @@ export const approveUser = async (req, res) => {
   // Not awaited, and the pattern is register's: a mail server being down must
   // not turn a decision that has already been committed into an error the admin
   // would reasonably retry — and retrying would then fail on "already decided".
-  sendRoleDecisionEmail(user.email, { approved: true, role: user.role }).catch(() => {});
+  sendRoleDecisionEmail(user.email, { approved: true, role: user.role, locale: user.locale }).catch(() => {});
   res.status(200).json(user);
 };
 
@@ -64,6 +64,7 @@ export const rejectUser = async (req, res) => {
     approved: false,
     role: user.requested_role,
     reason: user.rejection_reason,
+    locale: user.locale,
   }).catch(() => {});
   res.status(200).json(user);
 };
