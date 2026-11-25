@@ -5,6 +5,7 @@ import { sendDonationReceiptEmail } from "../lib/mailer.js";
 import { logger } from "../lib/logger.js";
 import { env } from "../lib/env.js";
 import { AppError, badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
+import { donationAmountCents } from "../lib/validate.js";
 
 // The thank-you mail, on the transition to completed only — from the webhook or
 // from a sync, whichever sees it first; the guarded UPDATE means the other one
@@ -21,10 +22,8 @@ const sendReceiptIfCompleted = (updated) => {
   }).catch(() => {});
 };
 
-// Stripe caps a single charge well below this; the floor keeps out zero/negative
-// amounts and the ceiling rejects obviously bogus values before they hit Stripe.
-const MIN_AMOUNT_CENTS = 100; // ₪1.00
-const MAX_AMOUNT_CENTS = 1_000_000; // ₪10,000.00
+// The amount's bounds — ₪10 to ₪100,000, the donate form's own — are
+// lib/validate.js's (donationAmountCents).
 const ALLOWED_CURRENCIES = new Set(["ILS", "USD", "EUR"]);
 
 // Mirrors the donation_type enum from migration 006. `type` was checked only for
@@ -59,9 +58,7 @@ export const createIntent = async (req, res) => {
       ERROR_CODES.RECURRING_UNAVAILABLE
     );
   }
-  if (!Number.isInteger(amountCents) || amountCents < MIN_AMOUNT_CENTS || amountCents > MAX_AMOUNT_CENTS) {
-    throw badRequest("amountCents must be a whole number between 100 and 1000000");
-  }
+  donationAmountCents(amountCents);
   // The type check comes first: currency arrives from the body and is not
   // necessarily a string, and calling a string method on it threw a TypeError —
   // answering 500 from inside the very block whose job is to answer 400.

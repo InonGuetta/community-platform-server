@@ -209,11 +209,40 @@ test("a non-string currency is a 400, not a TypeError", async () => {
     const res = await request(app)
       .post("/api/donations/create-intent")
       .set("Cookie", `token=${token}`)
-      .send({ type: "one_time", amountCents: 500, currency: 5 });
+      .send({ type: "one_time", amountCents: 5000, currency: 5 });
     assert.equal(res.status, 400);
     assert.match(res.body.message, /currency/i);
   } finally {
     stub.restore();
+  }
+});
+
+// The donate form's bounds (UI_UX_FIXES 5.1): ₪10 to ₪100,000, whole cents.
+// Refused before the payments check, so neither reaches Stripe or a row.
+test("a donation below ₪10 or above ₪100,000 is a 400 that names the bounds", async () => {
+  // A fresh session per request: authed answers verifyToken's one query.
+  const donate = async (amountCents) => {
+    const { token, stub } = authed(() => ({ rows: [] }));
+    try {
+      return await request(app)
+        .post("/api/donations/create-intent")
+        .set("Cookie", `token=${token}`)
+        .send({ type: "one_time", amountCents, currency: "ILS" });
+    } finally {
+      stub.restore();
+    }
+  };
+  const BOUNDS = "amountCents must be a whole number between 1000 and 10000000";
+  for (const amountCents of [999, 100, -5000, 0, 10_000_001, 1500.5, "5000"]) {
+    const res = await donate(amountCents);
+    assert.equal(res.status, 400, `amountCents ${amountCents}`);
+    assert.equal(res.body.message, BOUNDS);
+  }
+  // Both ends are a gift — past the amount check, so whatever answers next (the
+  // unconfigured-payments 503 here) is not the amount's 400.
+  for (const amountCents of [1000, 10_000_000]) {
+    const res = await donate(amountCents);
+    assert.notEqual(res.body.message, BOUNDS, `amountCents ${amountCents}`);
   }
 });
 
@@ -232,6 +261,22 @@ test("a tag id that is not an id is a 400, not a filter that quietly does nothin
     const res = await request(app).get("/api/media/get-all?tagIds=abc").set("Cookie", `token=${token}`);
     assert.equal(res.status, 400);
     assert.match(res.body.message, /tagIds/);
+  } finally {
+    stub.restore();
+  }
+});
+
+// UI_UX_FIXES 5.1. The parameter names are cross-repository pair 5 and stay.
+test("an upload date range that ends before it starts is a 400, before the listing is queried", async () => {
+  const { token, stub } = authed(() => {
+    throw new Error("a backwards date range reached the database");
+  });
+  try {
+    const res = await request(app)
+      .get("/api/media/get-all?uploadedAfter=2026-03-31&uploadedBefore=2026-01-06")
+      .set("Cookie", `token=${token}`);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.message, "uploadedAfter must not be later than uploadedBefore");
   } finally {
     stub.restore();
   }

@@ -3,7 +3,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { pool } from "../db/pool.js";
 import { stubPoolQuery } from "./setup.js";
-import { createMedia, updateMedia, DEFAULT_CREATOR } from "../services/servicesMedia.js";
+import {
+  createMedia, updateMedia, DEFAULT_CREATOR, findPlaceholderCreators, clearPlaceholderCreators, PLACEHOLDER_CREATORS,
+} from "../services/servicesMedia.js";
 import { searchTranscripts } from "../services/transcripts/search.js";
 
 // Attribution: "who said this", stored as words rather than as an account.
@@ -48,6 +50,43 @@ test("an empty or whitespace-only name stores the default", async () => {
     await createMedia({ ...BASE, creatorName: blank });
     assert.equal(calls[0].params.at(-1), DEFAULT_CREATOR, `blank was ${JSON.stringify(blank)}`);
   }
+});
+
+// UI_UX_FIXES 5.2: a tool's own label in the creator field — "AI", "ToolLLM",
+// in any case and with any spacing — is nobody's name, and stores what an empty
+// field stores. On an upload and on an edit, since both go through the same rule.
+test("a tool's label as the creator name stores the default, on upload and on edit", async () => {
+  for (const label of ["AI", "ai", " ToolLLM ", "toolllm", "TOOLLLM"]) {
+    let calls = capture();
+    await createMedia({ ...BASE, creatorName: label });
+    assert.equal(calls[0].params.at(-1), DEFAULT_CREATOR, `upload with ${JSON.stringify(label)}`);
+    calls = capture();
+    await updateMedia(1, { creatorName: label });
+    assert.equal(calls[0].params[10], DEFAULT_CREATOR, `edit with ${JSON.stringify(label)}`);
+  }
+});
+
+// Matched whole: a real name that merely contains the letters is a name.
+test("a name that only contains a tool's label is kept", async () => {
+  for (const name of ["AIDAN", "הרב AI כהן", "Ai Weiwei"]) {
+    const calls = capture();
+    await createMedia({ ...BASE, creatorName: name });
+    assert.equal(calls[0].params.at(-1), name);
+  }
+});
+
+// The cleanup script's two statements pick rows by one predicate, with the same
+// list, so its dry run lists exactly what its real run changes.
+test("the placeholder cleanup finds and clears by the same predicate, to the default", async () => {
+  const calls = capture();
+  await findPlaceholderCreators();
+  await clearPlaceholderCreators();
+  const [find, clear] = calls;
+  const predicate = "LOWER(BTRIM(creator_name)) = ANY($1::text[])";
+  assert.ok(find.text.includes(predicate) && /^\s*SELECT/.test(find.text));
+  assert.ok(clear.text.includes(predicate) && /^\s*UPDATE media_items SET creator_name = \$2/.test(clear.text));
+  assert.deepEqual(find.params, [PLACEHOLDER_CREATORS]);
+  assert.deepEqual(clear.params, [PLACEHOLDER_CREATORS, DEFAULT_CREATOR]);
 });
 
 // A name of " " would otherwise become a distinct creator that sorts to the top

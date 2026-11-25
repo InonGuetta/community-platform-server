@@ -65,6 +65,8 @@ const MATRIX = {
   "get /api/auth/linkedin/callback": PUBLIC,
   "get /api/auth/me": ANY,
   "patch /api/auth/me": ANY,
+  // The verification link again — one's own address only (UI_UX_FIXES 3.12).
+  "post /api/auth/resend-verification": ANY,
   // One's own profile picture; anyone signed in sees anyone's (migration 052).
   "post /api/auth/me/avatar": ANY,
   "delete /api/auth/me/avatar": ANY,

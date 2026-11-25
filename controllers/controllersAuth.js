@@ -211,6 +211,26 @@ export const verifyEmail = async (req, res) => {
   res.status(200).json(user);
 };
 
+// The verification link again, for the signed-in user whose address is not
+// verified yet (UI_UX_FIXES 3.12). The address is the caller's own and the
+// caller is signed in, so the answer may say what happened — unlike
+// forgotPassword, it reveals nothing about anybody else's account:
+//   { sent: true }              — the mail went out
+//   { sent: false }             — it could not be sent (mail is down, or not set
+//                                 up on this server); the link is still valid
+//                                 and the client offers to try again later
+//   { alreadyVerified: true }   — nothing to prove; no token, no mail
+// Awaited, unlike sign-up's: here the person is waiting to hear whether to look
+// in their inbox. sendMail never throws, so this cannot turn into a 500.
+export const resendVerification = async (req, res) => {
+  const result = await servicesAuth.issueVerificationForUser(req.user.id);
+  if (result.alreadyVerified) {
+    return res.status(200).json({ sent: false, alreadyVerified: true });
+  }
+  const sent = await sendVerificationEmail(result.email, result.token, result.locale);
+  res.status(200).json({ sent: Boolean(sent), alreadyVerified: false });
+};
+
 // ── The signed-in user's own account ────────────────────────────────────────
 
 export const updateProfile = async (req, res) => {
