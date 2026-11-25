@@ -38,9 +38,33 @@ test("a session's type is one of the enum's three", async () => {
   await refuses(session({}), 'Invalid session type: "undefined"');
 });
 
-test("a session's capacity is a whole number from 1 to 100, or absent", async () => {
-  for (const value of [0, 101, 1.5, "abc", -3]) {
-    await refuses(session({ sessionType: "group", maxParticipants: value }), "maxParticipants must be a whole number between 1 and 100");
+test("a session's capacity is a whole number from 2 to 500, or absent — the create dialog's bounds", async () => {
+  for (const value of [0, 1, 501, 1.5, "abc", -3]) {
+    await refuses(session({ sessionType: "group", maxParticipants: value }), "maxParticipants must be a whole number between 2 and 500");
+  }
+});
+
+test("a one-on-one holds exactly two, and two is what an absent capacity means there", async () => {
+  for (const value of [10, 3, 1, "abc"]) {
+    await refuses(session({ sessionType: "1on1", maxParticipants: value }), "A one-on-one session holds exactly 2 participants");
+  }
+  const stub = stubPoolQuery(pool, (text) =>
+    /INSERT INTO live_sessions/.test(text) || /FROM live_sessions/.test(text) ? { rows: [{ id: 3, host_id: 7 }] } : { rows: [] });
+  try {
+    for (const [sent, stored] of [[undefined, 2], [2, 2], ["2", 2]]) {
+      stub.calls.length = 0;
+      await createSession({ body: { sessionType: "1on1", maxParticipants: sent }, user: HOST }, res());
+      assert.equal(stub.calls.find((c) => /INSERT INTO live_sessions/.test(c.text)).params[4], stored);
+    }
+    // Two at the bottom and five hundred at the top are both a session.
+    for (const value of [2, 500]) {
+      stub.calls.length = 0;
+      await createSession({ body: { sessionType: "webinar", maxParticipants: value }, user: HOST }, res());
+      assert.equal(stub.calls.find((c) => /INSERT INTO live_sessions/.test(c.text)).params[4], value);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    stub.restore();
   }
 });
 
@@ -49,7 +73,9 @@ test("a session's time is a real date, a minute to a year ahead, or absent", asy
   await refuses(session({ sessionType: "group", scheduledAt: new Date(Date.now() + 10 * 1000).toISOString() }), "A scheduled session must be at least a minute away");
   await refuses(session({ sessionType: "group", scheduledAt: new Date(Date.now() + 400 * 24 * 60 * MINUTE).toISOString() }), "A session cannot be scheduled more than a year ahead");
   // Capacity is checked before the time.
-  await refuses(session({ sessionType: "group", maxParticipants: 0, scheduledAt: "nope" }), "maxParticipants must be a whole number between 1 and 100");
+  await refuses(session({ sessionType: "group", maxParticipants: 0, scheduledAt: "nope" }), "maxParticipants must be a whole number between 2 and 500");
+  // The past is further away than "a minute ahead" in the wrong direction.
+  await refuses(session({ sessionType: "group", scheduledAt: new Date(Date.now() - 60 * MINUTE).toISOString() }), "A scheduled session must be at least a minute away");
 });
 
 test("a valid session reaches the database trimmed, numbered and in ISO time", async () => {

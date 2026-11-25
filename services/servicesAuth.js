@@ -33,6 +33,10 @@ export const assertUsablePassword = (password) => {
 // so 101–120 characters passed the check and failed at the driver as a 500.
 export const DISPLAY_NAME_MAX = 100;
 
+// The Unicode replacement character — see cleanDisplayName, and
+// scripts/fix-garbled-names.js for the rows stored before it was refused.
+export const GARBLED_CHAR = "\uFFFD";
+
 // A display name from a request body: trimmed, length-checked, and null when the
 // caller did not send one (which COALESCE reads as "leave it alone"). `required`
 // is for the profile edit, where sending an EMPTY name is a mistake worth saying;
@@ -47,6 +51,15 @@ export const cleanDisplayName = (value, { required }) => {
   }
   if (trimmed.length > DISPLAY_NAME_MAX) {
     throw badRequest(`Display name must be at most ${DISPLAY_NAME_MAX} characters`);
+  }
+  // U+FFFD is what the JSON parser puts where the bytes were not UTF-8: a
+  // Hebrew name typed into a terminal whose code page is not UTF-8 (curl from
+  // a Windows shell, which is how account 9 was made — UI_UX_FIXES 5.3) arrives
+  // as a row of them. No browser sends one, and nobody's name contains one;
+  // storing it keeps a row of replacement marks in the users table for good. Refused so the
+  // sender can fix the encoding and send it again.
+  if (trimmed.includes(GARBLED_CHAR)) {
+    throw badRequest("Display name was not sent as UTF-8 text");
   }
   return trimmed;
 };
@@ -198,6 +211,28 @@ const insertMailedToken = async (userId, purpose, ttlMs) => {
 // (controllersUsers.updateUser), which has to send the new one a link.
 export const issueVerificationToken = (userId) =>
   insertMailedToken(userId, TOKEN_PURPOSE.VERIFY, VERIFICATION_TTL_MS);
+
+// A fresh link for the signed-in user who asked for one again (the profile's
+// "שליחת מייל אימות"). The same token as sign-up's — issueVerificationToken, same
+// purpose, same lifetime — so the link it mails is verified by verifyEmail like
+// any other; an earlier link that has not expired keeps working too.
+// { alreadyVerified: true } when there is nothing to prove, and no token is made.
+/** @param {number} userId */
+export const issueVerificationForUser = async (userId) => {
+  const { rows } = await pool.query(
+    "SELECT email, locale, email_verified FROM users WHERE id = $1 AND is_active = TRUE",
+    [userId]
+  );
+  const user = rows[0];
+  if (!user) throw notFound("User not found");
+  if (user.email_verified) return { alreadyVerified: true };
+  return {
+    alreadyVerified: false,
+    email: user.email,
+    locale: user.locale,
+    token: await issueVerificationToken(userId),
+  };
+};
 
 // One statement, so spending the token and verifying the address cannot be
 // separated: the CTE marks the token used only if it was still unused, and the

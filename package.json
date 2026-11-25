@@ -25,6 +25,8 @@
     "extract:preview": "node scripts/extractPreview.js",
     "fix:stale-sessions": "node db/closeStaleSessions.js",
     "fix:publish-existing": "node db/publishExistingMedia.js",
+    "fix:leaked-creators": "node scripts/fix-leaked-creators.js",
+    "fix:garbled-names": "node scripts/fix-garbled-names.js",
     "workers": "concurrently -n transcription,llm -c blue,magenta \"npm:worker:transcription\" \"npm:worker:llm\""
   },
   "dependencies": {

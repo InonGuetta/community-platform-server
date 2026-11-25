@@ -27,9 +27,20 @@ const CREATOR_NAME_MAX = 120;
 // Whitespace-only is treated as blank on purpose: a name of " " would otherwise
 // become a distinct "creator" that sorts to the top of every filter list and is
 // impossible to type again.
+//
+// A tool's own name is blank too (UI_UX_FIXES 5.2). Lessons reached the archive
+// attributed to "AI" or "ToolLLM": nothing in this repository writes either
+// word, so they arrived as `creatorName` from a client — an automated uploader
+// filling the field with its own label — and were stored as if a person had
+// said the lesson. Neither is anyone's name, so both store what an empty field
+// stores. Compared without case or surrounding space; matched whole, so a real
+// name that merely contains the letters is untouched.
+export const PLACEHOLDER_CREATORS = ["ai", "toolllm"];
+const isPlaceholderCreator = (trimmed) => PLACEHOLDER_CREATORS.includes(trimmed.toLowerCase());
+
 const cleanCreatorName = (value) => {
   const trimmed = typeof value === "string" ? value.trim() : "";
-  if (!trimmed) return DEFAULT_CREATOR;
+  if (!trimmed || isPlaceholderCreator(trimmed)) return DEFAULT_CREATOR;
   if (trimmed.length > CREATOR_NAME_MAX) {
     throw badRequest(`Creator name must be at most ${CREATOR_NAME_MAX} characters`);
   }
@@ -589,6 +600,36 @@ export const setDurationIfMissing = async (id, durationSeconds) => {
     [id, durationSeconds]
   );
   return result.rows.length > 0;
+};
+
+// The rows stored before cleanCreatorName refused the placeholders, for
+// scripts/fix-leaked-creators.js: first what would change, then the change.
+// Both select by the same predicate, so a dry run lists exactly what the real
+// run updates.
+const PLACEHOLDER_CREATOR_SQL = "LOWER(BTRIM(creator_name)) = ANY($1::text[])";
+
+export const findPlaceholderCreators = async () => {
+  const { rows } = await pool.query(
+    `SELECT id, title, creator_name, media_type, uploader_id, created_at
+       FROM media_items
+      WHERE ${PLACEHOLDER_CREATOR_SQL}
+      ORDER BY id`,
+    [PLACEHOLDER_CREATORS]
+  );
+  return rows;
+};
+
+// To DEFAULT_CREATOR, not NULL: the column is NOT NULL by design (020) and
+// "כללי" is the stored "nobody was named", which every screen already words as
+// "no lecturer". Returns the ids changed.
+export const clearPlaceholderCreators = async () => {
+  const { rows } = await pool.query(
+    `UPDATE media_items SET creator_name = $2
+      WHERE ${PLACEHOLDER_CREATOR_SQL}
+      RETURNING id`,
+    [PLACEHOLDER_CREATORS, DEFAULT_CREATOR]
+  );
+  return rows.map((r) => r.id);
 };
 
 export const deleteMedia = async (id) => {

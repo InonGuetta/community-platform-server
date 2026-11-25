@@ -64,6 +64,17 @@ router.post("/reset-password", recoveryLimiter, controllersAuth.resetPassword);
 // The token in the body is the credential.
 router.post("/verify-email", recoveryLimiter, controllersAuth.verifyEmail);
 
+// The verification link again, for the signed-in user (UI_UX_FIXES 3.12). The
+// recovery routes' allowance — five an hour — since each request is a real mail;
+// counted per account rather than per address, because the caller is known and
+// a yeshiva shares one IP. Mounted after verifyToken so req.user is the key.
+const resendVerificationLimiter = userRateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: "Too many requests, please try again later",
+});
+router.post("/resend-verification", verifyToken, resendVerificationLimiter, controllersAuth.resendVerification);
+
 // The signed-in user's own account.
 router.patch("/me", verifyToken, controllersAuth.updateProfile);
 

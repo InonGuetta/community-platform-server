@@ -4,7 +4,7 @@ import { pool } from "../db/pool.js";
 import { withTransaction } from "../db/transaction.js";
 import { notFound, badRequest, conflict, ERROR_CODES } from "../lib/AppError.js";
 import { assertUsableEmail, normalizeEmail } from "../lib/validate.js";
-import { assertUsablePassword, cleanDisplayName } from "./servicesAuth.js";
+import { assertUsablePassword, cleanDisplayName, GARBLED_CHAR } from "./servicesAuth.js";
 import { isAdmin } from "../lib/permissions.js";
 import { maskPhone } from "../lib/phone.js";
 
@@ -200,6 +200,36 @@ export const updateUser = async (id, data, adminId = null) => {
 export const deleteUser = async (id) => {
   await updateUserRow(id, { isActive: false });
   return { deleted: true, id };
+};
+
+// ── Names stored without their encoding (UI_UX_FIXES 5.3) ───────────────────
+//
+// For scripts/fix-garbled-names.js: the accounts whose display name holds the
+// replacement character cleanDisplayName now refuses, and the repair of one.
+// The repair re-checks the mark in its WHERE, so a name somebody has fixed by
+// hand since the dry run is left as they wrote it.
+
+export const findGarbledDisplayNames = async () => {
+  const { rows } = await pool.query(
+    `SELECT id, email, display_name, is_active, created_at
+       FROM users
+      WHERE STRPOS(display_name, $1) > 0
+      ORDER BY id`,
+    [GARBLED_CHAR]
+  );
+  return rows;
+};
+
+/** @param {number} id @param {string} name  the name as it was meant to be */
+export const repairGarbledDisplayName = async (id, name) => {
+  const clean = cleanDisplayName(name, { required: true });
+  const { rows } = await pool.query(
+    `UPDATE users SET display_name = $2
+      WHERE id = $1 AND STRPOS(display_name, $3) > 0
+      RETURNING id`,
+    [id, clean, GARBLED_CHAR]
+  );
+  return rows.length > 0;
 };
 
 // ── Role approval ───────────────────────────────────────────────────────────

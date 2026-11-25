@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   requireSeconds, optionalSeconds, optionalId, optionalBoolean, mediaTypeFilter,
   mediaSortFilter, MEDIA_SORTS, DEFAULT_MEDIA_SORT, durationRangeFilter,
-  optionalDateFilter, optionalQueryString, requireTitle, optionalTitle, optionalIntInRange,
+  optionalDateFilter, uploadDateRangeFilter, optionalQueryString, requireTitle, optionalTitle, optionalIntInRange,
   sessionTypeFilter, optionalSessionStart, MIN_SESSION_LEAD_MS, MAX_SESSION_LEAD_MS,
 } from "../lib/validate.js";
 import { MEDIA_ORDER } from "../services/servicesMedia.js";
@@ -143,6 +143,19 @@ test("a date filter refuses free text, impossible dates and arrays", () => {
   for (const bad of ["abc", "2024-02-30", "2024-3-5", ["2024-03-05", "2024-03-06"], 20240305]) {
     assert.throws(() => optionalDateFilter(bad, "from"), { statusCode: 400 }, JSON.stringify(bad));
   }
+});
+
+// UI_UX_FIXES 5.1: the archive's "from" may not be after its "until" — the
+// client's date fields already keep them in order.
+test("an upload date range runs forwards: from ≤ until, the same day allowed", () => {
+  assert.deepEqual(uploadDateRangeFilter("2026-01-06", "2026-03-31"), { after: "2026-01-06", before: "2026-03-31" });
+  assert.deepEqual(uploadDateRangeFilter("2026-01-06", "2026-01-06"), { after: "2026-01-06", before: "2026-01-06" });
+  assert.deepEqual(uploadDateRangeFilter("2026-01-06", undefined), { after: "2026-01-06", before: undefined });
+  assert.deepEqual(uploadDateRangeFilter("", "2026-01-06"), { after: undefined, before: "2026-01-06" });
+  assert.equal(messageOf(() => uploadDateRangeFilter("2026-03-31", "2026-01-06")), "uploadedAfter must not be later than uploadedBefore");
+  // Each end is still checked as a date first, under its own name.
+  assert.equal(messageOf(() => uploadDateRangeFilter("abc", "2026-01-06")), "uploadedAfter must be a date in the form YYYY-MM-DD");
+  assert.equal(messageOf(() => uploadDateRangeFilter("2026-01-06", "2026-02-30")), "uploadedBefore is not a real date");
 });
 
 test("a text filter must be one string of bounded length", () => {

@@ -12,7 +12,7 @@ import * as servicesCourses from "../services/servicesCourses.js";
 import { viewerScopeFor, assertUserCanSeeMediaId } from "../services/servicesVisibility.js";
 import {
   requireSeconds, optionalBoolean, optionalId, tagIdFilter, mediaTypeFilter, mediaSortFilter,
-  durationRangeFilter, optionalDateFilter, optionalQueryString,
+  durationRangeFilter, uploadDateRangeFilter, optionalQueryString,
   mediaCursorFilter, mediaPageSizeFilter, encodeMediaCursor,
 } from "../lib/validate.js";
 import { setMediaTags, cleanTagSelection } from "../services/servicesTags.js";
@@ -60,8 +60,8 @@ export const getAllMedia = async (req, res) => {
   // honour is the caller's mistake, and says so.
   const parsedSort = mediaSortFilter(sort);
   const duration = durationRangeFilter(minDuration, maxDuration);
-  const parsedAfter = optionalDateFilter(uploadedAfter, "uploadedAfter");
-  const parsedBefore = optionalDateFilter(uploadedBefore, "uploadedBefore");
+  // from ≤ to, or a 400 — an archive answering nothing reads as a broken filter.
+  const { after: parsedAfter, before: parsedBefore } = uploadDateRangeFilter(uploadedAfter, uploadedBefore);
   const parsedSearch = optionalQueryString(search, "search");
   const parsedCreator = optionalQueryString(creator, "creator");
   // Paging (ARCH-1). Checked with the filters, before anything is queried.

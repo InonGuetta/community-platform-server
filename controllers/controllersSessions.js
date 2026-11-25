@@ -4,16 +4,16 @@ import { badRequest, notFound, ERROR_CODES } from "../lib/AppError.js";
 import { notifySessionAudience, NOTIFICATION_TYPES } from "../services/servicesNotifications.js";
 import { calendarForSession } from "../lib/ics.js";
 import { requestLocale } from "../lib/i18n.js";
-import { optionalId, optionalTitle, sessionTypeFilter, optionalIntInRange, optionalSessionStart } from "../lib/validate.js";
+import { optionalId, optionalTitle, sessionTypeFilter, sessionCapacity, optionalSessionStart } from "../lib/validate.js";
 import { assertCanManageCourse } from "../lib/permissions.js";
 import * as servicesCourses from "../services/servicesCourses.js";
 import { afterSessionEnded } from "../sockets/socketManager.js";
 import * as servicesSessionRecordings from "../services/servicesSessionRecordings.js";
 
-// The type, the scheduled time and their bounds are lib/validate.js's
-// (SESSION_TYPES, optionalSessionStart); these two are this table's columns.
+// The type, the capacity, the scheduled time and their bounds are
+// lib/validate.js's (SESSION_TYPES, sessionCapacity, optionalSessionStart); this
+// one is the table's column.
 const TITLE_MAX = 255; // matches VARCHAR(255)
-const MAX_PARTICIPANTS_CEILING = 100;
 
 // room_token and recording_s3_key never leave the server.
 //
@@ -33,7 +33,8 @@ export const createSession = async (req, res) => {
   // works today.
   const trimmedTitle = optionalTitle(title, TITLE_MAX);
   sessionTypeFilter(sessionType);
-  const participants = optionalIntInRange(maxParticipants, "maxParticipants", 1, MAX_PARTICIPANTS_CEILING);
+  // 2–500, and exactly 2 for a one-on-one — the create dialog's own bounds.
+  const participants = sessionCapacity(maxParticipants, sessionType);
   // Absent means "start it now", which is what this endpoint has always done and
   // what every existing session is.
   const scheduled = optionalSessionStart(scheduledAt);
