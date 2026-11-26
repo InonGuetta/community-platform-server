@@ -3,7 +3,7 @@ import "dotenv/config";
 import { pool } from "../db/pool.js";
 import { getActiveUserById, updateProfile, getMe } from "../services/servicesAuth.js";
 import { removeAvatar, avatarKeyOf } from "../services/servicesAvatars.js";
-import { getAllMedia, getContinueWatching, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
+import { getAllMedia, getContinueWatching, getHistory, recordView, getMediaPage, countMedia, getCreators, getCreatorProfile, saveWatchProgress, getPublicMedia } from "../services/servicesMedia.js";
 import { getCourseLessons, reorderCourseLessons, trackSummary, getCourseReport } from "../services/servicesCourseTrack.js";
 import { MEDIA_SORTS } from "../lib/validate.js";
 import { getActiveSessions, getUpcomingSessions } from "../services/servicesSessions.js";
@@ -313,6 +313,32 @@ const checks = [
       if (rows.length === 0) return "no users — query shape checked only";
       const items = await getContinueWatching(rows[0].id, { courses: UNRESTRICTED, drafts: UNRESTRICTED });
       return `${items.length} row(s)`;
+    },
+  },
+  {
+    name: "getHistory and recordView (media_views, migration 055)",
+    run: async () => {
+      // The visit is a write, so both run on one client inside a transaction
+      // that is always rolled back (pool.query routed to it, as for the tag
+      // proposals below): the history must see the visit, and nothing survives.
+      const client = await pool.connect();
+      const original = { query: pool.query };
+      try {
+        await client.query("BEGIN");
+        const { rows: [user] } = await client.query("SELECT id FROM users LIMIT 1");
+        const { rows: [item] } = await client.query("SELECT id FROM media_items ORDER BY id LIMIT 1");
+        if (!user || !item) return "no user or lesson to visit";
+        // @ts-ignore — a stand-in for the duration of this check only
+        pool.query = (text, params) => client.query(text, params);
+        await recordView(user.id, item.id);
+        const items = await getHistory(user.id, { courses: UNRESTRICTED, drafts: UNRESTRICTED });
+        if (items[0]?.id !== item.id) throw new Error("the lesson just visited is not first in the history");
+        return `${items.length} row(s), the visit first`;
+      } finally {
+        pool.query = original.query;
+        await client.query("ROLLBACK").catch(() => {});
+        client.release();
+      }
     },
   },
   {

@@ -84,6 +84,8 @@ router.get("/creators/:name", controllersMedia.getCreatorProfile);
 // Before "/:id" — validateIntParam would otherwise reject the literal
 // "continue-watching" as a malformed id and this route would be unreachable.
 router.get("/continue-watching", controllersMedia.getContinueWatching);
+// Before "/:id" for the same reason.
+router.get("/history", controllersMedia.getHistory);
 router.get("/:id", validateIntParam("id"), controllersMedia.getMediaById);
 // A lesson recorded in a live session: that session's chat (PRD REC-3).
 router.get("/:id/session-chat", validateIntParam("id"), controllersMedia.getSessionChat);
@@ -139,5 +141,7 @@ const audioExtractLimiter = userRateLimit({
 router.get("/:id/download/audio", audioExtractLimiter, validateIntParam("id"), controllersMediaFiles.downloadMediaAudio);
 router.get("/:id/progress", validateIntParam("id"), controllersMedia.getProgress);
 router.post("/:id/progress", validateIntParam("id"), controllersMedia.saveProgress);
+// The lesson page was opened (migration 055) — for the history.
+router.post("/:id/view", validateIntParam("id"), controllersMedia.recordView);
 
 export default router;

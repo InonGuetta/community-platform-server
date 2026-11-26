@@ -493,6 +493,51 @@ export const getContinueWatching = async (userId, scope, limit = 12) => {
   return result.rows;
 };
 
+// Everything the reader was in, newest first (migration 055) — every kind of
+// lesson, a book as much as a recording. A lesson's time is the later of its
+// last opening (media_views) and its last played second (watch_progress), so
+// one played in the bottom player without its page ever being opened is here
+// too. Unlike getContinueWatching, a position of zero is no reason to leave a
+// lesson out: having been in it is the whole entry. last_position_seconds
+// rides along (null for a book), so a recording at the top can be resumed.
+// The visibility rule, as everywhere: a lesson the reader may no longer see
+// drops out rather than being a card that 404s.
+export const getHistory = async (userId, scope, limit = 48) => {
+  const result = await pool.query(
+    `WITH seen AS (
+       SELECT media_id, MAX(at) AS last_seen_at
+         FROM (
+           SELECT media_id, last_viewed_at AS at FROM media_views WHERE user_id = $1
+           UNION ALL
+           SELECT media_id, last_watched_at FROM watch_progress WHERE user_id = $1
+         ) visits
+        GROUP BY media_id
+     )
+     SELECT ${MEDIA_COLUMNS},
+            s.last_seen_at,
+            wp.last_position_seconds
+     ${MEDIA_JOINS}
+     JOIN seen s ON s.media_id = m.id
+     LEFT JOIN watch_progress wp ON wp.media_id = m.id AND wp.user_id = $1
+     WHERE ${visibleMediaSql("$2", "m", "$3")}
+     ORDER BY s.last_seen_at DESC, m.id DESC
+     LIMIT $4`,
+    [userId, scope.courses, scope.drafts, limit]
+  );
+  return result.rows;
+};
+
+// The reader opened this lesson's page: its visit moves to now. The caller has
+// already asked the visibility guard, so this never records a hidden lesson.
+export const recordView = async (userId, mediaId) => {
+  await pool.query(
+    `INSERT INTO media_views (user_id, media_id, last_viewed_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (user_id, media_id) DO UPDATE SET last_viewed_at = NOW()`,
+    [userId, mediaId]
+  );
+};
+
 // A lesson as a guest may see it (PRD COM-3b, migration 046): only while it is
 // both public and published, and only what a guest page shows — the summary
 // and key points with it, never the transcript or anything about readers.

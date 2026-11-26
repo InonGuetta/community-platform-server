@@ -393,6 +393,21 @@ export const getContinueWatching = async (req, res) => {
   res.status(200).json(items.map(publicMedia));
 };
 
+// Everything the reader was in, every kind of lesson, newest first — the
+// archive's hero and the "היסטוריה" shelf (migration 055).
+export const getHistory = async (req, res) => {
+  const items = await servicesMedia.getHistory(req.user.id, await viewerScopeFor(req.user));
+  res.status(200).json(items.map(publicMedia));
+};
+
+// The lesson page was opened. The same guard as progress: a lesson the caller
+// may not see is a 404, and nothing is recorded for it.
+export const recordView = async (req, res) => {
+  await assertUserCanSeeMediaId(req.user, req.params.id);
+  await servicesMedia.recordView(req.user.id, req.params.id);
+  res.status(204).end();
+};
+
 // Both progress handlers load the item and answer 404 for one the caller may
 // not see, as the stream and download handlers do. They did not: saveProgress on
 // an id that did not exist failed the FK as a 500 while one that existed — draft

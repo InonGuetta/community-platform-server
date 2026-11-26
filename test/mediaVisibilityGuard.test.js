@@ -64,6 +64,7 @@ const DOORS = [
   ["its session chat", "get", "/api/media/7/session-chat"],
   ["its watch position", "get", "/api/media/7/progress"],
   ["saving a watch position", "post", "/api/media/7/progress", { positionSeconds: 5 }],
+  ["recording a visit", "post", "/api/media/7/view"],
   ["its stream", "get", "/api/media/7/stream"],
   ["its download", "get", "/api/media/7/download"],
   ["its audio extract", "get", "/api/media/7/download/audio"],
